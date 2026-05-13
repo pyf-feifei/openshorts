@@ -1,6 +1,31 @@
-import React, { useState, useEffect } from 'react';
-import { Globe, Sparkles, Download, Copy, Check, ChevronRight, ChevronLeft, Loader2, AlertCircle, Volume2, User, Film, Terminal, ChevronDown, RefreshCw, Zap, Target, TrendingUp, MessageSquare, Eye, Share2, Calendar, Upload } from 'lucide-react';
-import { getApiUrl } from '../config';
+import React, { useState, useEffect } from 'react'
+import {
+  Globe,
+  Sparkles,
+  Download,
+  Copy,
+  Check,
+  ChevronRight,
+  ChevronLeft,
+  Loader2,
+  AlertCircle,
+  Volume2,
+  User,
+  Film,
+  Terminal,
+  ChevronDown,
+  RefreshCw,
+  Zap,
+  Target,
+  TrendingUp,
+  MessageSquare,
+  Eye,
+  Share2,
+  Calendar,
+  Upload,
+} from 'lucide-react'
+import { getApiUrl } from '../config'
+import { buildGeminiHeaders } from '../lib/geminiHeaders'
 
 const STYLE_OPTIONS = [
   { id: 'ugc', label: 'UGC Natural', desc: 'Authentic, talking to camera' },
@@ -8,199 +33,232 @@ const STYLE_OPTIONS = [
   { id: 'shock', label: 'Shock/Discovery', desc: 'Surprising opener' },
   { id: 'story', label: 'Storytelling', desc: 'Mini narrative arc' },
   { id: 'comparison', label: 'Before/After', desc: 'Comparison style' },
-];
+]
 
-const CACHE_KEY = 'saasshorts_cache';
-const CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+const CACHE_KEY = 'saasshorts_cache'
+const CACHE_MAX_AGE = 24 * 60 * 60 * 1000 // 24 hours
 
 function loadCache() {
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    const cache = JSON.parse(raw);
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const cache = JSON.parse(raw)
     if (Date.now() - cache.timestamp > CACHE_MAX_AGE) {
-      localStorage.removeItem(CACHE_KEY);
-      return null;
+      localStorage.removeItem(CACHE_KEY)
+      return null
     }
-    return cache;
-  } catch { return null; }
+    return cache
+  } catch {
+    return null
+  }
 }
 
 function saveCache(url, analysis, webResearch, scripts) {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({
-      url, analysis, webResearch, scripts, timestamp: Date.now(),
-    }));
-  } catch { /* localStorage full */ }
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({
+        url,
+        analysis,
+        webResearch,
+        scripts,
+        timestamp: Date.now(),
+      }),
+    )
+  } catch {
+    /* localStorage full */
+  }
 }
 
-export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId }) {
+export default function SaaShortsTab({
+  geminiApiKey,
+  geminiBaseUrl,
+  geminiConfig,
+  elevenLabsKey,
+  falKey,
+  uploadPostKey,
+  uploadUserId,
+}) {
   // Wizard state
   const [step, setStep] = useState(() => {
-    const cache = loadCache();
-    return cache ? 1 : 0;
-  });
+    const cache = loadCache()
+    return cache ? 1 : 0
+  })
 
   // Step 0: URL input
-  const [url, setUrl] = useState(() => loadCache()?.url || '');
-  const [videoMode, setVideoMode] = useState('lowcost'); // "lowcost" or "premium"
-  const [description, setDescription] = useState('');
-  const [style, setStyle] = useState('ugc');
-  const [language, setLanguage] = useState('en');
-  const [actorGender, setActorGender] = useState('female');
-  const [numScripts, setNumScripts] = useState(3);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analyzeError, setAnalyzeError] = useState('');
-  const [fromCache, setFromCache] = useState(() => !!loadCache());
+  const [url, setUrl] = useState(() => loadCache()?.url || '')
+  const [videoMode, setVideoMode] = useState('lowcost') // "lowcost" or "premium"
+  const [description, setDescription] = useState('')
+  const [style, setStyle] = useState('ugc')
+  const [language, setLanguage] = useState('en')
+  const [actorGender, setActorGender] = useState('female')
+  const [numScripts, setNumScripts] = useState(3)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analyzeError, setAnalyzeError] = useState('')
+  const [fromCache, setFromCache] = useState(() => !!loadCache())
 
   // Step 1: Analysis results
-  const [analysis, setAnalysis] = useState(() => loadCache()?.analysis || null);
-  const [webResearch, setWebResearch] = useState(() => loadCache()?.webResearch || null);
-  const [scripts, setScripts] = useState(() => loadCache()?.scripts || []);
-  const [selectedScript, setSelectedScript] = useState(0);
+  const [analysis, setAnalysis] = useState(() => loadCache()?.analysis || null)
+  const [webResearch, setWebResearch] = useState(
+    () => loadCache()?.webResearch || null,
+  )
+  const [scripts, setScripts] = useState(() => loadCache()?.scripts || [])
+  const [selectedScript, setSelectedScript] = useState(0)
 
   // Step 2: Configure
-  const [voices, setVoices] = useState([]);
-  const [selectedVoice, setSelectedVoice] = useState('21m00Tcm4TlvDq8ikWAM');
-  const [actorDescription, setActorDescription] = useState('');
-  const [editedNarration, setEditedNarration] = useState('');
-  const [actorOptions, setActorOptions] = useState([]);
-  const [selectedActor, setSelectedActor] = useState(null);
-  const [generatingActors, setGeneratingActors] = useState(false);
-  const [actorGallery, setActorGallery] = useState([]);
-  const [loadingGallery, setLoadingGallery] = useState(false);
-  const [uploadedActorPreview, setUploadedActorPreview] = useState(null); // {localPreview, serverUrl}
-  const [productPhoto, setProductPhoto] = useState(null); // {preview, serverUrl}
-  const [productDescription, setProductDescription] = useState('');
+  const [voices, setVoices] = useState([])
+  const [selectedVoice, setSelectedVoice] = useState('21m00Tcm4TlvDq8ikWAM')
+  const [actorDescription, setActorDescription] = useState('')
+  const [editedNarration, setEditedNarration] = useState('')
+  const [actorOptions, setActorOptions] = useState([])
+  const [selectedActor, setSelectedActor] = useState(null)
+  const [generatingActors, setGeneratingActors] = useState(false)
+  const [actorGallery, setActorGallery] = useState([])
+  const [loadingGallery, setLoadingGallery] = useState(false)
+  const [uploadedActorPreview, setUploadedActorPreview] = useState(null) // {localPreview, serverUrl}
+  const [productPhoto, setProductPhoto] = useState(null) // {preview, serverUrl}
+  const [productDescription, setProductDescription] = useState('')
 
   // Step 3: Generate
-  const [generating, setGenerating] = useState(false);
-  const [jobId, setJobId] = useState(null);
-  const [genLogs, setGenLogs] = useState([]);
-  const [genStatus, setGenStatus] = useState('idle');
-  const [genResult, setGenResult] = useState(null);
+  const [generating, setGenerating] = useState(false)
+  const [jobId, setJobId] = useState(null)
+  const [genLogs, setGenLogs] = useState([])
+  const [genStatus, setGenStatus] = useState('idle')
+  const [genResult, setGenResult] = useState(null)
 
   // Publish
-  const [publishing, setPublishing] = useState(false);
-  const [publishResult, setPublishResult] = useState(null);
-  const [publishPlatforms, setPublishPlatforms] = useState({ tiktok: true, instagram: true, youtube: true });
-  const [isScheduling, setIsScheduling] = useState(false);
-  const [scheduleDate, setScheduleDate] = useState('');
+  const [publishing, setPublishing] = useState(false)
+  const [publishResult, setPublishResult] = useState(null)
+  const [publishPlatforms, setPublishPlatforms] = useState({
+    tiktok: true,
+    instagram: true,
+    youtube: true,
+  })
+  const [isScheduling, setIsScheduling] = useState(false)
+  const [scheduleDate, setScheduleDate] = useState('')
 
   // UI
-  const [copied, setCopied] = useState('');
-  const [logsExpanded, setLogsExpanded] = useState(true);
+  const [copied, setCopied] = useState('')
+  const [logsExpanded, setLogsExpanded] = useState(true)
 
   // Pre-fill from cache on mount
   useEffect(() => {
     if (fromCache && scripts.length > 0 && !actorDescription) {
-      setActorDescription(scripts[0].actor_description || '');
-      setEditedNarration(scripts[0].full_narration || '');
+      setActorDescription(scripts[0].actor_description || '')
+      setEditedNarration(scripts[0].full_narration || '')
     }
-  }, []);
+  }, [])
 
   // Fetch actor gallery on mount
   useEffect(() => {
-    setLoadingGallery(true);
+    setLoadingGallery(true)
     fetch(getApiUrl('/api/saasshorts/actor-gallery'))
-      .then(res => res.ok ? res.json() : { images: [] })
-      .then(data => setActorGallery(data.images || []))
+      .then((res) => (res.ok ? res.json() : { images: [] }))
+      .then((data) => setActorGallery(data.images || []))
       .catch(() => {})
-      .finally(() => setLoadingGallery(false));
-  }, []);
+      .finally(() => setLoadingGallery(false))
+  }, [])
 
   // Fetch voices on mount
   useEffect(() => {
     if (elevenLabsKey) {
-      fetchVoices();
+      fetchVoices()
     }
-  }, [elevenLabsKey]);
+  }, [elevenLabsKey])
 
   // Reset selected voice when actor gender changes
   useEffect(() => {
     const genderDefaults = {
-      'en-female': '21m00Tcm4TlvDq8ikWAM',  // Rachel
-      'en-male': '29vD33N1CtxCmqQRPOHJ',    // Drew
-      'es-female': 'EXAVITQu4vr4xnSDxMaL',  // Bella
-      'es-male': 'ErXwobaYiN019PkySvjV',     // Antoni
-    };
-    // If we have fetched voices, pick the first matching one; otherwise use hardcoded default
-    const matchingVoice = voices.find(v => (v.labels?.gender || '').toLowerCase() === actorGender);
-    if (matchingVoice) {
-      setSelectedVoice(matchingVoice.voice_id);
-    } else {
-      setSelectedVoice(genderDefaults[`${language}-${actorGender}`] || genderDefaults['en-female']);
+      'en-female': '21m00Tcm4TlvDq8ikWAM', // Rachel
+      'en-male': '29vD33N1CtxCmqQRPOHJ', // Drew
+      'es-female': 'EXAVITQu4vr4xnSDxMaL', // Bella
+      'es-male': 'ErXwobaYiN019PkySvjV', // Antoni
     }
-  }, [actorGender, language]);
+    // If we have fetched voices, pick the first matching one; otherwise use hardcoded default
+    const matchingVoice = voices.find(
+      (v) => (v.labels?.gender || '').toLowerCase() === actorGender,
+    )
+    if (matchingVoice) {
+      setSelectedVoice(matchingVoice.voice_id)
+    } else {
+      setSelectedVoice(
+        genderDefaults[`${language}-${actorGender}`] ||
+          genderDefaults['en-female'],
+      )
+    }
+  }, [actorGender, language])
 
   // Poll generation status
   useEffect(() => {
-    let interval;
+    let interval
     if (jobId && genStatus === 'processing') {
       interval = setInterval(async () => {
         try {
-          const res = await fetch(getApiUrl(`/api/saasshorts/status/${jobId}`));
+          const res = await fetch(getApiUrl(`/api/saasshorts/status/${jobId}`))
           if (res.status === 404) {
             // Job lost (server restart) — treat as failed so Retry appears
-            setGenStatus('failed');
-            setGenerating(false);
-            setGenLogs((prev) => [...prev, 'Job lost after server restart. Click Retry to resume from cached assets.']);
-            clearInterval(interval);
-            return;
+            setGenStatus('failed')
+            setGenerating(false)
+            setGenLogs((prev) => [
+              ...prev,
+              'Job lost after server restart. Click Retry to resume from cached assets.',
+            ])
+            clearInterval(interval)
+            return
           }
-          if (!res.ok) return;
-          const data = await res.json();
-          if (data.logs) setGenLogs(data.logs);
+          if (!res.ok) return
+          const data = await res.json()
+          if (data.logs) setGenLogs(data.logs)
           if (data.status === 'completed') {
-            setGenStatus('completed');
-            setGenResult(data.result);
-            setGenerating(false);
-            setStep(4);
-            clearInterval(interval);
+            setGenStatus('completed')
+            setGenResult(data.result)
+            setGenerating(false)
+            setStep(4)
+            clearInterval(interval)
           } else if (data.status === 'failed') {
-            setGenStatus('failed');
-            setGenerating(false);
-            clearInterval(interval);
+            setGenStatus('failed')
+            setGenerating(false)
+            clearInterval(interval)
           }
         } catch (e) {
-          console.error('Poll error:', e);
+          console.error('Poll error:', e)
         }
-      }, 2000);
+      }, 2000)
     }
-    return () => clearInterval(interval);
-  }, [jobId, genStatus]);
+    return () => clearInterval(interval)
+  }, [jobId, genStatus])
+
+  const getGeminiHeaders = (extra = {}) =>
+    buildGeminiHeaders(geminiConfig || geminiApiKey, geminiBaseUrl, extra)
 
   const fetchVoices = async () => {
     try {
       const res = await fetch(getApiUrl('/api/saasshorts/voices'), {
         headers: { 'X-ElevenLabs-Key': elevenLabsKey },
-      });
+      })
       if (res.ok) {
-        const data = await res.json();
-        setVoices(data.voices || []);
+        const data = await res.json()
+        setVoices(data.voices || [])
       }
     } catch (e) {
-      console.error('Voices fetch error:', e);
+      console.error('Voices fetch error:', e)
     }
-  };
+  }
 
   const handleAnalyze = async () => {
-    if (!url.trim() && !description.trim()) return;
+    if (!url.trim() && !description.trim()) return
     if (!geminiApiKey) {
-      setAnalyzeError('Gemini API key required. Set it in Settings.');
-      return;
+      setAnalyzeError('Gemini API key required. Set it in Settings.')
+      return
     }
 
-    setAnalyzing(true);
-    setAnalyzeError('');
+    setAnalyzing(true)
+    setAnalyzeError('')
 
     try {
       const res = await fetch(getApiUrl('/api/saasshorts/analyze'), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey,
-        },
+        headers: getGeminiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           url: url.trim() || undefined,
           description: description.trim() || undefined,
@@ -209,69 +267,75 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
           language,
           actor_gender: actorGender,
         }),
-      });
+      })
 
       if (!res.ok) {
-        let msg = 'Analysis failed';
-        try { const err = await res.json(); msg = err.detail || msg; } catch { msg = await res.text() || msg; }
-        throw new Error(msg);
+        let msg = 'Analysis failed'
+        try {
+          const err = await res.json()
+          msg = err.detail || msg
+        } catch {
+          msg = (await res.text()) || msg
+        }
+        throw new Error(msg)
       }
 
-      const data = await res.json();
-      setAnalysis(data.analysis);
-      setWebResearch(data.web_research || null);
-      setScripts(data.scripts);
-      setSelectedScript(0);
-      setFromCache(false);
+      const data = await res.json()
+      setAnalysis(data.analysis)
+      setWebResearch(data.web_research || null)
+      setScripts(data.scripts)
+      setSelectedScript(0)
+      setFromCache(false)
 
       // Cache results
-      saveCache(url.trim(), data.analysis, data.web_research, data.scripts);
+      saveCache(url.trim(), data.analysis, data.web_research, data.scripts)
 
       // Pre-fill actor description and narration from first script
       if (data.scripts.length > 0) {
-        setActorDescription(data.scripts[0].actor_description || '');
-        setEditedNarration(data.scripts[0].full_narration || '');
+        setActorDescription(data.scripts[0].actor_description || '')
+        setEditedNarration(data.scripts[0].full_narration || '')
       }
 
-      setStep(1);
+      setStep(1)
     } catch (e) {
-      setAnalyzeError(e.message);
+      setAnalyzeError(e.message)
     } finally {
-      setAnalyzing(false);
+      setAnalyzing(false)
     }
-  };
+  }
 
   const handleSelectScript = (idx) => {
-    setSelectedScript(idx);
+    setSelectedScript(idx)
     if (scripts[idx]) {
-      setActorDescription(scripts[idx].actor_description || '');
-      setEditedNarration(scripts[idx].full_narration || '');
+      setActorDescription(scripts[idx].actor_description || '')
+      setEditedNarration(scripts[idx].full_narration || '')
     }
-  };
+  }
 
   const handleGenerate = async () => {
     if (!falKey) {
-      alert('fal.ai API key required. Set it in Settings.');
-      return;
+      alert('fal.ai API key required. Set it in Settings.')
+      return
     }
     if (!elevenLabsKey) {
-      alert('ElevenLabs API key required. Set it in Settings.');
-      return;
+      alert('ElevenLabs API key required. Set it in Settings.')
+      return
     }
 
-    setGenerating(true);
-    setGenLogs(['Starting video generation...']);
-    setGenStatus('processing');
-    setGenResult(null);
-    setStep(3);
+    setGenerating(true)
+    setGenLogs(['Starting video generation...'])
+    setGenStatus('processing')
+    setGenResult(null)
+    setStep(3)
 
     try {
       // Update script with edited narration
-      const scriptToSend = { ...scripts[selectedScript] };
-      scriptToSend._product_name = analysis?.product_name || analysis?.name || '';
-      scriptToSend._product_url = url;
+      const scriptToSend = { ...scripts[selectedScript] }
+      scriptToSend._product_name =
+        analysis?.product_name || analysis?.name || ''
+      scriptToSend._product_url = url
       if (editedNarration !== scriptToSend.full_narration) {
-        scriptToSend.full_narration = editedNarration;
+        scriptToSend.full_narration = editedNarration
       }
 
       const res = await fetch(getApiUrl('/api/saasshorts/generate'), {
@@ -288,36 +352,42 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
           selected_actor_url: selectedActor || undefined,
           video_mode: videoMode,
         }),
-      });
+      })
 
       if (!res.ok) {
-        let msg = 'Generation failed';
-        try { const err = await res.json(); msg = err.detail || msg; } catch { msg = await res.text() || msg; }
-        throw new Error(msg);
+        let msg = 'Generation failed'
+        try {
+          const err = await res.json()
+          msg = err.detail || msg
+        } catch {
+          msg = (await res.text()) || msg
+        }
+        throw new Error(msg)
       }
 
-      const data = await res.json();
-      setJobId(data.job_id);
+      const data = await res.json()
+      setJobId(data.job_id)
     } catch (e) {
-      setGenStatus('failed');
-      setGenLogs((prev) => [...prev, `Error: ${e.message}`]);
-      setGenerating(false);
+      setGenStatus('failed')
+      setGenLogs((prev) => [...prev, `Error: ${e.message}`])
+      setGenerating(false)
     }
-  };
+  }
 
   const handleRetry = async () => {
-    if (!jobId) return;
-    setGenerating(true);
-    setGenLogs(['Retrying from cached assets...']);
-    setGenStatus('processing');
-    setGenResult(null);
+    if (!jobId) return
+    setGenerating(true)
+    setGenLogs(['Retrying from cached assets...'])
+    setGenStatus('processing')
+    setGenResult(null)
 
     try {
-      const scriptToSend = { ...scripts[selectedScript] };
-      scriptToSend._product_name = analysis?.product_name || analysis?.name || '';
-      scriptToSend._product_url = url;
+      const scriptToSend = { ...scripts[selectedScript] }
+      scriptToSend._product_name =
+        analysis?.product_name || analysis?.name || ''
+      scriptToSend._product_url = url
       if (editedNarration !== scriptToSend.full_narration) {
-        scriptToSend.full_narration = editedNarration;
+        scriptToSend.full_narration = editedNarration
       }
 
       const res = await fetch(getApiUrl('/api/saasshorts/generate'), {
@@ -334,47 +404,52 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
           retry_job_id: jobId,
           video_mode: videoMode,
         }),
-      });
+      })
 
       if (!res.ok) {
-        let msg = 'Retry failed';
-        try { const err = await res.json(); msg = err.detail || msg; } catch { msg = await res.text() || msg; }
-        throw new Error(msg);
+        let msg = 'Retry failed'
+        try {
+          const err = await res.json()
+          msg = err.detail || msg
+        } catch {
+          msg = (await res.text()) || msg
+        }
+        throw new Error(msg)
       }
 
-      const data = await res.json();
-      setJobId(data.job_id);
+      const data = await res.json()
+      setJobId(data.job_id)
     } catch (e) {
-      setGenStatus('failed');
-      setGenLogs((prev) => [...prev, `Retry error: ${e.message}`]);
-      setGenerating(false);
+      setGenStatus('failed')
+      setGenLogs((prev) => [...prev, `Retry error: ${e.message}`])
+      setGenerating(false)
     }
-  };
+  }
 
   const handleCopy = (text, label) => {
-    navigator.clipboard.writeText(text);
-    setCopied(label);
-    setTimeout(() => setCopied(''), 2000);
-  };
+    navigator.clipboard.writeText(text)
+    setCopied(label)
+    setTimeout(() => setCopied(''), 2000)
+  }
 
   const handleReset = () => {
-    setStep(0);
-    setUrl('');
-    setAnalyzeError('');
-    setAnalysis(null);
-    setWebResearch(null);
-    setScripts([]);
-    setFromCache(false);
-    localStorage.removeItem(CACHE_KEY);
-    setSelectedScript(0);
-    setJobId(null);
-    setGenLogs([]);
-    setGenStatus('idle');
-    setGenResult(null);
-    setGenerating(false);
-    setActorDescription('');
-    setEditedNarration('');
-  };
+    setStep(0)
+    setUrl('')
+    setAnalyzeError('')
+    setAnalysis(null)
+    setWebResearch(null)
+    setScripts([])
+    setFromCache(false)
+    localStorage.removeItem(CACHE_KEY)
+    setSelectedScript(0)
+    setJobId(null)
+    setGenLogs([])
+    setGenStatus('idle')
+    setGenResult(null)
+    setGenerating(false)
+    setActorDescription('')
+    setEditedNarration('')
+  }
 
   // ─── Render Steps ─────────────────────────────────────────────────
 
@@ -395,7 +470,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             </p>
           </div>
           {step > 0 && (
-            <button onClick={handleReset} className="text-sm text-zinc-400 hover:text-white flex items-center gap-1 transition-colors">
+            <button
+              onClick={handleReset}
+              className="text-sm text-zinc-400 hover:text-white flex items-center gap-1 transition-colors"
+            >
               <RefreshCw size={14} /> Start over
             </button>
           )}
@@ -403,25 +481,39 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
 
         {/* Progress Steps */}
         <div className="flex items-center gap-2 mb-8">
-          {['Setup', 'Analysis', 'Configure', 'Generate', 'Result'].map((label, i) => (
-            <React.Fragment key={i}>
-              {i > 0 && <div className={`flex-1 h-px ${i <= step ? 'bg-violet-500' : 'bg-white/10'}`} />}
-              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
-                i === step ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' :
-                i < step ? 'bg-violet-500/10 text-violet-400' :
-                'bg-white/5 text-zinc-600'
-              }`}>
-                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                  i < step ? 'bg-violet-500 text-white' :
-                  i === step ? 'bg-violet-500/30 text-violet-300' :
-                  'bg-white/10 text-zinc-600'
-                }`}>
-                  {i < step ? <Check size={10} /> : i + 1}
-                </span>
-                <span className="hidden sm:inline">{label}</span>
-              </div>
-            </React.Fragment>
-          ))}
+          {['Setup', 'Analysis', 'Configure', 'Generate', 'Result'].map(
+            (label, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && (
+                  <div
+                    className={`flex-1 h-px ${i <= step ? 'bg-violet-500' : 'bg-white/10'}`}
+                  />
+                )}
+                <div
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                    i === step
+                      ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                      : i < step
+                        ? 'bg-violet-500/10 text-violet-400'
+                        : 'bg-white/5 text-zinc-600'
+                  }`}
+                >
+                  <span
+                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                      i < step
+                        ? 'bg-violet-500 text-white'
+                        : i === step
+                          ? 'bg-violet-500/30 text-violet-300'
+                          : 'bg-white/10 text-zinc-600'
+                    }`}
+                  >
+                    {i < step ? <Check size={10} /> : i + 1}
+                  </span>
+                  <span className="hidden sm:inline">{label}</span>
+                </div>
+              </React.Fragment>
+            ),
+          )}
         </div>
 
         {/* ── Step 0: URL Input ────────────────────────────────── */}
@@ -430,7 +522,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             <div className="glass-panel p-8 space-y-6">
               {/* Video Mode Selector */}
               <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-3">Video Mode</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-3">
+                  Video Mode
+                </label>
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={() => setVideoMode('lowcost')}
@@ -441,10 +535,19 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className={`text-sm font-semibold ${videoMode === 'lowcost' ? 'text-green-300' : 'text-zinc-300'}`}>Low Cost</span>
-                      <span className="text-xs font-mono text-green-400 bg-green-500/10 px-2 py-0.5 rounded-full">~$0.80</span>
+                      <span
+                        className={`text-sm font-semibold ${videoMode === 'lowcost' ? 'text-green-300' : 'text-zinc-300'}`}
+                      >
+                        Low Cost
+                      </span>
+                      <span className="text-xs font-mono text-green-400 bg-green-500/10 px-2 py-0.5 rounded-full">
+                        ~$0.80
+                      </span>
                     </div>
-                    <p className="text-[11px] text-zinc-500 leading-relaxed">Hailuo 2.3 img2video + VEED Lipsync. Good movement + lip-sync. Recommended.</p>
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Hailuo 2.3 img2video + VEED Lipsync. Good movement +
+                      lip-sync. Recommended.
+                    </p>
                   </button>
                   <button
                     onClick={() => setVideoMode('premium')}
@@ -455,19 +558,33 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className={`text-sm font-semibold ${videoMode === 'premium' ? 'text-violet-300' : 'text-zinc-300'}`}>Premium</span>
-                      <span className="text-xs font-mono text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">~$2.00</span>
+                      <span
+                        className={`text-sm font-semibold ${videoMode === 'premium' ? 'text-violet-300' : 'text-zinc-300'}`}
+                      >
+                        Premium
+                      </span>
+                      <span className="text-xs font-mono text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">
+                        ~$2.00
+                      </span>
                     </div>
-                    <p className="text-[11px] text-zinc-500 leading-relaxed">Kling Avatar v2 Standard. Full integrated movement. Best quality.</p>
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Kling Avatar v2 Standard. Full integrated movement. Best
+                      quality.
+                    </p>
                   </button>
                 </div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">Website URL <span className="text-zinc-600">(optional)</span></label>
+                <label className="block text-sm font-medium text-zinc-300 mb-2">
+                  Website URL <span className="text-zinc-600">(optional)</span>
+                </label>
                 <div className="flex gap-3">
                   <div className="relative flex-1">
-                    <Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <Globe
+                      size={16}
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500"
+                    />
                     <input
                       type="url"
                       value={url}
@@ -478,12 +595,19 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     />
                   </div>
                 </div>
-                <p className="text-[10px] text-zinc-600 mt-1">If provided, we'll scrape and research your site automatically</p>
+                <p className="text-[10px] text-zinc-600 mt-1">
+                  If provided, we'll scrape and research your site automatically
+                </p>
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  {url.trim() ? 'Extra context' : 'Describe your product/business'} <span className="text-zinc-600">{url.trim() ? '(optional)' : '(required if no URL)'}</span>
+                  {url.trim()
+                    ? 'Extra context'
+                    : 'Describe your product/business'}{' '}
+                  <span className="text-zinc-600">
+                    {url.trim() ? '(optional)' : '(required if no URL)'}
+                  </span>
                 </label>
                 <textarea
                   value={description}
@@ -495,7 +619,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-3">Language</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-3">
+                  Language
+                </label>
                 <div className="flex gap-2 mb-6">
                   {[
                     { id: 'en', label: 'English', flag: '🇺🇸' },
@@ -516,7 +642,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   ))}
                 </div>
 
-                <label className="block text-sm font-medium text-zinc-300 mb-3">Actor</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-3">
+                  Actor
+                </label>
                 <div className="flex gap-2 mb-6">
                   {[
                     { id: 'female', label: 'Woman', icon: '👩' },
@@ -537,7 +665,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   ))}
                 </div>
 
-                <label className="block text-sm font-medium text-zinc-300 mb-3">Video Style</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-3">
+                  Video Style
+                </label>
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   {STYLE_OPTIONS.map((s) => (
                     <button
@@ -550,14 +680,18 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                       }`}
                     >
                       <div className="text-xs font-medium">{s.label}</div>
-                      <div className="text-[10px] text-zinc-500 mt-0.5">{s.desc}</div>
+                      <div className="text-[10px] text-zinc-500 mt-0.5">
+                        {s.desc}
+                      </div>
                     </button>
                   ))}
                 </div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">Number of Scripts</label>
+                <label className="block text-sm font-medium text-zinc-300 mb-2">
+                  Number of Scripts
+                </label>
                 <div className="flex gap-2">
                   {[1, 2, 3, 5].map((n) => (
                     <button
@@ -590,12 +724,16 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 {analyzing ? (
                   <>
                     <Loader2 size={16} className="animate-spin" />
-                    {url.trim() ? 'Scraping + Researching web + Generating scripts... (45-90s)' : 'Generating scripts... (20-40s)'}
+                    {url.trim()
+                      ? 'Scraping + Researching web + Generating scripts... (45-90s)'
+                      : 'Generating scripts... (20-40s)'}
                   </>
                 ) : (
                   <>
                     <Sparkles size={16} />
-                    {url.trim() ? 'Research & Generate Scripts' : 'Generate Scripts'}
+                    {url.trim()
+                      ? 'Research & Generate Scripts'
+                      : 'Generate Scripts'}
                   </>
                 )}
               </button>
@@ -605,18 +743,33 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="glass-panel p-4">
                 <Target size={16} className="text-violet-400 mb-2" />
-                <h3 className="text-sm font-medium text-zinc-300">Deep Research</h3>
-                <p className="text-xs text-zinc-500 mt-1">AI analyzes your product via URL scraping + web research, or generates directly from your description.</p>
+                <h3 className="text-sm font-medium text-zinc-300">
+                  Deep Research
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  AI analyzes your product via URL scraping + web research, or
+                  generates directly from your description.
+                </p>
               </div>
               <div className="glass-panel p-4">
                 <MessageSquare size={16} className="text-violet-400 mb-2" />
-                <h3 className="text-sm font-medium text-zinc-300">Pain Point Scripts</h3>
-                <p className="text-xs text-zinc-500 mt-1">Generates hook-problem-solution scripts targeting your audience&apos;s real pain points.</p>
+                <h3 className="text-sm font-medium text-zinc-300">
+                  Pain Point Scripts
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Generates hook-problem-solution scripts targeting your
+                  audience&apos;s real pain points.
+                </p>
               </div>
               <div className="glass-panel p-4">
                 <Film size={16} className="text-violet-400 mb-2" />
-                <h3 className="text-sm font-medium text-zinc-300">AI Actor Videos</h3>
-                <p className="text-xs text-zinc-500 mt-1">Realistic AI-generated actors with lip-sync, b-roll, and viral subtitles. From ~$0.50/video.</p>
+                <h3 className="text-sm font-medium text-zinc-300">
+                  AI Actor Videos
+                </h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Realistic AI-generated actors with lip-sync, b-roll, and viral
+                  subtitles. From ~$0.50/video.
+                </p>
               </div>
             </div>
           </div>
@@ -636,7 +789,14 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   {fromCache && (
                     <span className="text-[10px] bg-amber-500/10 text-amber-400 px-2 py-0.5 rounded-full border border-amber-500/20 flex items-center gap-1">
                       Cached
-                      <button onClick={() => { setStep(0); setFromCache(false); }} className="hover:text-white ml-1" title="Re-analyze">
+                      <button
+                        onClick={() => {
+                          setStep(0)
+                          setFromCache(false)
+                        }}
+                        className="hover:text-white ml-1"
+                        title="Re-analyze"
+                      >
                         <RefreshCw size={9} />
                       </button>
                     </span>
@@ -650,17 +810,27 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Pain Points</h3>
+                  <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                    Pain Points
+                  </h3>
                   <div className="space-y-1.5">
                     {(analysis.pain_points || []).map((pp, i) => (
                       <div key={i} className="flex items-start gap-2 text-sm">
-                        <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
-                          pp.intensity === 'high' ? 'bg-red-400' : pp.intensity === 'medium' ? 'bg-yellow-400' : 'bg-green-400'
-                        }`} />
+                        <span
+                          className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
+                            pp.intensity === 'high'
+                              ? 'bg-red-400'
+                              : pp.intensity === 'medium'
+                                ? 'bg-yellow-400'
+                                : 'bg-green-400'
+                          }`}
+                        />
                         <div>
                           <span className="text-zinc-300">{pp.pain}</span>
                           {pp.source && pp.source !== 'website' && (
-                            <span className="ml-1.5 text-[9px] bg-blue-500/10 text-blue-400 px-1 py-0.5 rounded">{pp.source}</span>
+                            <span className="ml-1.5 text-[9px] bg-blue-500/10 text-blue-400 px-1 py-0.5 rounded">
+                              {pp.source}
+                            </span>
                           )}
                         </div>
                       </div>
@@ -668,11 +838,19 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   </div>
                 </div>
                 <div>
-                  <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Emotional Hooks</h3>
+                  <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                    Emotional Hooks
+                  </h3>
                   <div className="space-y-1.5">
                     {(analysis.emotional_hooks || []).map((h, i) => (
-                      <div key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                        <TrendingUp size={12} className="text-violet-400 mt-1 shrink-0" />
+                      <div
+                        key={i}
+                        className="text-sm text-zinc-300 flex items-start gap-2"
+                      >
+                        <TrendingUp
+                          size={12}
+                          className="text-violet-400 mt-1 shrink-0"
+                        />
                         {h}
                       </div>
                     ))}
@@ -695,61 +873,98 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 </h3>
 
                 {/* Real user reviews */}
-                {webResearch.real_reviews && webResearch.real_reviews.length > 0 && (
-                  <div className="mb-4">
-                    <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Real User Reviews</h4>
-                    <div className="space-y-2">
-                      {webResearch.real_reviews.slice(0, 5).map((review, i) => (
-                        <div key={i} className="text-xs bg-white/5 rounded-lg p-2.5 border border-white/5">
-                          <p className="text-zinc-300 italic">&quot;{review.quote}&quot;</p>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-zinc-600">{review.source}</span>
-                            <span className={`px-1 py-0.5 rounded text-[9px] ${
-                              review.sentiment === 'positive' ? 'bg-green-500/10 text-green-400' :
-                              review.sentiment === 'negative' ? 'bg-red-500/10 text-red-400' :
-                              'bg-zinc-500/10 text-zinc-400'
-                            }`}>{review.sentiment}</span>
-                          </div>
-                        </div>
-                      ))}
+                {webResearch.real_reviews &&
+                  webResearch.real_reviews.length > 0 && (
+                    <div className="mb-4">
+                      <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                        Real User Reviews
+                      </h4>
+                      <div className="space-y-2">
+                        {webResearch.real_reviews
+                          .slice(0, 5)
+                          .map((review, i) => (
+                            <div
+                              key={i}
+                              className="text-xs bg-white/5 rounded-lg p-2.5 border border-white/5"
+                            >
+                              <p className="text-zinc-300 italic">
+                                &quot;{review.quote}&quot;
+                              </p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-zinc-600">
+                                  {review.source}
+                                </span>
+                                <span
+                                  className={`px-1 py-0.5 rounded text-[9px] ${
+                                    review.sentiment === 'positive'
+                                      ? 'bg-green-500/10 text-green-400'
+                                      : review.sentiment === 'negative'
+                                        ? 'bg-red-500/10 text-red-400'
+                                        : 'bg-zinc-500/10 text-zinc-400'
+                                  }`}
+                                >
+                                  {review.sentiment}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
                 {/* Competitors */}
-                {webResearch.competitors && webResearch.competitors.length > 0 && (
-                  <div className="mb-4">
-                    <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Competitors</h4>
-                    <div className="flex flex-wrap gap-2">
-                      {webResearch.competitors.map((c, i) => (
-                        <span key={i} className="text-xs bg-white/5 px-2 py-1 rounded-lg text-zinc-400 border border-white/5" title={c.comparison}>
-                          {c.name}
-                        </span>
-                      ))}
+                {webResearch.competitors &&
+                  webResearch.competitors.length > 0 && (
+                    <div className="mb-4">
+                      <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                        Competitors
+                      </h4>
+                      <div className="flex flex-wrap gap-2">
+                        {webResearch.competitors.map((c, i) => (
+                          <span
+                            key={i}
+                            className="text-xs bg-white/5 px-2 py-1 rounded-lg text-zinc-400 border border-white/5"
+                            title={c.comparison}
+                          >
+                            {c.name}
+                          </span>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
                 {/* Sources */}
-                {webResearch.grounding_sources && webResearch.grounding_sources.length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Sources</h4>
-                    <div className="flex flex-wrap gap-1.5">
-                      {webResearch.grounding_sources.slice(0, 8).map((src, i) => (
-                        <a
-                          key={i}
-                          href={src.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[10px] text-blue-400 hover:text-blue-300 bg-blue-500/5 px-2 py-0.5 rounded-full border border-blue-500/10 hover:border-blue-500/30 transition-colors truncate max-w-[200px]"
-                          title={src.title}
-                        >
-                          {src.title || (() => { try { return new URL(src.url).hostname; } catch { return src.url; } })()}
-                        </a>
-                      ))}
+                {webResearch.grounding_sources &&
+                  webResearch.grounding_sources.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                        Sources
+                      </h4>
+                      <div className="flex flex-wrap gap-1.5">
+                        {webResearch.grounding_sources
+                          .slice(0, 8)
+                          .map((src, i) => (
+                            <a
+                              key={i}
+                              href={src.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-blue-400 hover:text-blue-300 bg-blue-500/5 px-2 py-0.5 rounded-full border border-blue-500/10 hover:border-blue-500/30 transition-colors truncate max-w-[200px]"
+                              title={src.title}
+                            >
+                              {src.title ||
+                                (() => {
+                                  try {
+                                    return new URL(src.url).hostname
+                                  } catch {
+                                    return src.url
+                                  }
+                                })()}
+                            </a>
+                          ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
               </div>
             )}
 
@@ -758,7 +973,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
               <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                 <Sparkles size={18} className="text-yellow-400" />
                 Generated Scripts
-                <span className="text-xs bg-white/10 px-2 py-0.5 rounded-full ml-auto">{scripts.length} scripts</span>
+                <span className="text-xs bg-white/10 px-2 py-0.5 rounded-full ml-auto">
+                  {scripts.length} scripts
+                </span>
               </h2>
 
               <div className="grid grid-cols-1 gap-4">
@@ -774,18 +991,29 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   >
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-3">
-                        <span className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
-                          selectedScript === i ? 'bg-violet-500 text-white' : 'bg-white/10 text-zinc-400'
-                        }`}>
+                        <span
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
+                            selectedScript === i
+                              ? 'bg-violet-500 text-white'
+                              : 'bg-white/10 text-zinc-400'
+                          }`}
+                        >
                           {i + 1}
                         </span>
                         <div>
-                          <h3 className="text-sm font-semibold text-zinc-200">{script.title}</h3>
-                          <span className="text-[10px] text-zinc-500">{script.duration_seconds}s &middot; {script.style} &middot; {script.target_platform}</span>
+                          <h3 className="text-sm font-semibold text-zinc-200">
+                            {script.title}
+                          </h3>
+                          <span className="text-[10px] text-zinc-500">
+                            {script.duration_seconds}s &middot; {script.style}{' '}
+                            &middot; {script.target_platform}
+                          </span>
                         </div>
                       </div>
                       {selectedScript === i && (
-                        <span className="text-[10px] bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded-full">Selected</span>
+                        <span className="text-[10px] bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded-full">
+                          Selected
+                        </span>
                       )}
                     </div>
 
@@ -795,12 +1023,15 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                         <div
                           key={j}
                           className={`h-1.5 rounded-full ${
-                            seg.type === 'hook' ? 'bg-red-400' :
-                            seg.type === 'problem' ? 'bg-yellow-400' :
-                            seg.type === 'solution' ? 'bg-green-400' :
-                            'bg-blue-400'
+                            seg.type === 'hook'
+                              ? 'bg-red-400'
+                              : seg.type === 'problem'
+                                ? 'bg-yellow-400'
+                                : seg.type === 'solution'
+                                  ? 'bg-green-400'
+                                  : 'bg-blue-400'
                           }`}
-                          style={{ flex: (seg.end - seg.start) }}
+                          style={{ flex: seg.end - seg.start }}
                           title={`${seg.type}: ${seg.start}s-${seg.end}s`}
                         />
                       ))}
@@ -809,15 +1040,22 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     <div className="space-y-2">
                       {(script.segments || []).map((seg, j) => (
                         <div key={j} className="flex gap-3 text-xs">
-                          <span className={`shrink-0 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider ${
-                            seg.type === 'hook' ? 'bg-red-500/20 text-red-300' :
-                            seg.type === 'problem' ? 'bg-yellow-500/20 text-yellow-300' :
-                            seg.type === 'solution' ? 'bg-green-500/20 text-green-300' :
-                            'bg-blue-500/20 text-blue-300'
-                          }`}>
+                          <span
+                            className={`shrink-0 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider ${
+                              seg.type === 'hook'
+                                ? 'bg-red-500/20 text-red-300'
+                                : seg.type === 'problem'
+                                  ? 'bg-yellow-500/20 text-yellow-300'
+                                  : seg.type === 'solution'
+                                    ? 'bg-green-500/20 text-green-300'
+                                    : 'bg-blue-500/20 text-blue-300'
+                            }`}
+                          >
                             {seg.type}
                           </span>
-                          <span className="text-zinc-400 leading-relaxed">{seg.narration}</span>
+                          <span className="text-zinc-400 leading-relaxed">
+                            {seg.narration}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -828,7 +1066,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                         Hook: &quot;{script.hook_text}&quot;
                       </span>
                       {(script.hashtags || []).slice(0, 4).map((tag, j) => (
-                        <span key={j} className="text-[10px] text-zinc-500">{tag}</span>
+                        <span key={j} className="text-[10px] text-zinc-500">
+                          {tag}
+                        </span>
                       ))}
                     </div>
                   </div>
@@ -837,10 +1077,16 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             </div>
 
             <div className="flex justify-between">
-              <button onClick={() => setStep(0)} className="btn-secondary px-4 py-2 text-sm flex items-center gap-2">
+              <button
+                onClick={() => setStep(0)}
+                className="btn-secondary px-4 py-2 text-sm flex items-center gap-2"
+              >
                 <ChevronLeft size={14} /> Back
               </button>
-              <button onClick={() => setStep(2)} className="btn-primary px-6 py-2 text-sm flex items-center gap-2">
+              <button
+                onClick={() => setStep(2)}
+                className="btn-primary px-6 py-2 text-sm flex items-center gap-2"
+              >
                 Configure Video <ChevronRight size={14} />
               </button>
             </div>
@@ -853,37 +1099,65 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             <div className="glass-panel p-6 space-y-5">
               <h2 className="text-lg font-semibold">Configure Video</h2>
               <p className="text-sm text-zinc-500">
-                Script: <strong className="text-zinc-300">{scripts[selectedScript].title}</strong>
+                Script:{' '}
+                <strong className="text-zinc-300">
+                  {scripts[selectedScript].title}
+                </strong>
               </p>
 
               {/* Voice Selection */}
               <div>
                 <label className="block text-sm font-medium text-zinc-300 mb-2 flex items-center gap-2">
-                  <Volume2 size={14} /> Voice {language === 'es' ? '(Spanish)' : '(English)'}
+                  <Volume2 size={14} /> Voice{' '}
+                  {language === 'es' ? '(Spanish)' : '(English)'}
                 </label>
                 {(() => {
                   // Filter voices by language/accent
-                  const filtered = voices.length > 0
-                    ? voices.filter((v) => {
-                        const gender = (v.labels?.gender || '').toLowerCase();
-                        // Only show voices that match the selected gender
-                        return gender === actorGender;
-                      })
-                      .sort((a, b) => {
-                        const aAccent = (a.labels?.accent || '').toLowerCase();
-                        const bAccent = (b.labels?.accent || '').toLowerCase();
-                        if (language === 'es') {
-                          // Spanish/latin accents first, then everything else
-                          const aScore = (aAccent.includes('spanish') || aAccent.includes('latin')) ? 0 : 1;
-                          const bScore = (bAccent.includes('spanish') || bAccent.includes('latin')) ? 0 : 1;
-                          return aScore - bScore;
-                        }
-                        // English: american/british first
-                        const aScore = (aAccent.includes('american') || aAccent.includes('british')) ? 0 : 1;
-                        const bScore = (bAccent.includes('american') || bAccent.includes('british')) ? 0 : 1;
-                        return aScore - bScore;
-                      })
-                    : [];
+                  const filtered =
+                    voices.length > 0
+                      ? voices
+                          .filter((v) => {
+                            const gender = (
+                              v.labels?.gender || ''
+                            ).toLowerCase()
+                            // Only show voices that match the selected gender
+                            return gender === actorGender
+                          })
+                          .sort((a, b) => {
+                            const aAccent = (
+                              a.labels?.accent || ''
+                            ).toLowerCase()
+                            const bAccent = (
+                              b.labels?.accent || ''
+                            ).toLowerCase()
+                            if (language === 'es') {
+                              // Spanish/latin accents first, then everything else
+                              const aScore =
+                                aAccent.includes('spanish') ||
+                                aAccent.includes('latin')
+                                  ? 0
+                                  : 1
+                              const bScore =
+                                bAccent.includes('spanish') ||
+                                bAccent.includes('latin')
+                                  ? 0
+                                  : 1
+                              return aScore - bScore
+                            }
+                            // English: american/british first
+                            const aScore =
+                              aAccent.includes('american') ||
+                              aAccent.includes('british')
+                                ? 0
+                                : 1
+                            const bScore =
+                              bAccent.includes('american') ||
+                              bAccent.includes('british')
+                                ? 0
+                                : 1
+                            return aScore - bScore
+                          })
+                      : []
 
                   if (filtered.length > 0) {
                     return (
@@ -899,25 +1173,37 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                             }`}
                           >
                             <div className="flex-1 min-w-0">
-                              <div className="text-sm font-medium truncate">{v.name}</div>
+                              <div className="text-sm font-medium truncate">
+                                {v.name}
+                              </div>
                               <div className="text-[10px] text-zinc-500">
-                                {v.labels?.accent || ''} {v.labels?.gender || ''} {v.category ? `· ${v.category}` : ''}
+                                {v.labels?.accent || ''}{' '}
+                                {v.labels?.gender || ''}{' '}
+                                {v.category ? `· ${v.category}` : ''}
                               </div>
                             </div>
                             {v.preview_url && (
                               <button
-                                onClick={(e) => { e.stopPropagation(); new Audio(v.preview_url).play(); }}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  new Audio(v.preview_url).play()
+                                }}
                                 className="shrink-0 w-7 h-7 rounded-full bg-white/10 hover:bg-violet-500/30 flex items-center justify-center transition-colors"
                                 title="Preview voice"
                               >
                                 <Volume2 size={12} />
                               </button>
                             )}
-                            {selectedVoice === v.voice_id && <Check size={14} className="text-violet-400 shrink-0" />}
+                            {selectedVoice === v.voice_id && (
+                              <Check
+                                size={14}
+                                className="text-violet-400 shrink-0"
+                              />
+                            )}
                           </button>
                         ))}
                       </div>
-                    );
+                    )
                   }
 
                   // Fallback defaults by gender + language
@@ -939,14 +1225,22 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                       { id: 'ErXwobaYiN019PkySvjV', name: 'Antoni (cálido)' },
                       { id: '29vD33N1CtxCmqQRPOHJ', name: 'Drew (confiado)' },
                     ],
-                  };
-                  const key = `${language}-${actorGender}`;
-                  const opts = defaults[key] || defaults['en-female'];
+                  }
+                  const key = `${language}-${actorGender}`
+                  const opts = defaults[key] || defaults['en-female']
                   return (
-                    <select value={selectedVoice} onChange={(e) => setSelectedVoice(e.target.value)} className="input-field">
-                      {opts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                    <select
+                      value={selectedVoice}
+                      onChange={(e) => setSelectedVoice(e.target.value)}
+                      className="input-field"
+                    >
+                      {opts.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.name}
+                        </option>
+                      ))}
                     </select>
-                  );
+                  )
                 })()}
                 <p className="text-[10px] text-zinc-600 mt-1">
                   {language === 'es'
@@ -964,17 +1258,25 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 {/* Existing Gallery from S3 */}
                 {actorGallery.length > 0 && (
                   <div className="mb-4">
-                    <p className="text-xs text-zinc-400 mb-2">Previously generated actors (click to select):</p>
+                    <p className="text-xs text-zinc-400 mb-2">
+                      Previously generated actors (click to select):
+                    </p>
                     <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto pr-1">
                       {actorGallery.map((img, i) => (
                         <button
                           key={img.url}
                           onClick={() => setSelectedActor(img.url)}
                           className={`relative rounded-lg overflow-hidden border-2 transition-all aspect-[3/4] ${
-                            selectedActor === img.url ? 'border-violet-500 ring-2 ring-violet-500/30 scale-[1.02]' : 'border-white/10 hover:border-white/30'
+                            selectedActor === img.url
+                              ? 'border-violet-500 ring-2 ring-violet-500/30 scale-[1.02]'
+                              : 'border-white/10 hover:border-white/30'
                           }`}
                         >
-                          <img src={img.url} alt={`Actor ${i+1}`} className="w-full h-full object-cover" />
+                          <img
+                            src={img.url}
+                            alt={`Actor ${i + 1}`}
+                            className="w-full h-full object-cover"
+                          />
                           {selectedActor === img.url && (
                             <div className="absolute top-1 right-1 w-5 h-5 bg-violet-500 rounded-full flex items-center justify-center shadow-lg">
                               <Check size={10} className="text-white" />
@@ -986,7 +1288,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   </div>
                 )}
                 {loadingGallery && (
-                  <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> Loading actor gallery...</p>
+                  <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+                    <Loader2 size={12} className="animate-spin" /> Loading actor
+                    gallery...
+                  </p>
                 )}
 
                 {/* Upload Custom Actor */}
@@ -1000,29 +1305,40 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                         accept="image/*"
                         className="hidden"
                         onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
+                          const file = e.target.files?.[0]
+                          if (!file) return
                           // Show instant preview
-                          const localPreview = URL.createObjectURL(file);
-                          setUploadedActorPreview({ localPreview, serverUrl: null });
-                          setSelectedActor(null);
+                          const localPreview = URL.createObjectURL(file)
+                          setUploadedActorPreview({
+                            localPreview,
+                            serverUrl: null,
+                          })
+                          setSelectedActor(null)
 
-                          const formData = new FormData();
-                          formData.append('file', file);
+                          const formData = new FormData()
+                          formData.append('file', file)
                           try {
-                            const res = await fetch(getApiUrl('/api/saasshorts/actor-upload'), {
-                              method: 'POST',
-                              body: formData,
-                            });
+                            const res = await fetch(
+                              getApiUrl('/api/saasshorts/actor-upload'),
+                              {
+                                method: 'POST',
+                                body: formData,
+                              },
+                            )
                             if (res.ok) {
-                              const data = await res.json();
+                              const data = await res.json()
                               if (data.url) {
-                                setUploadedActorPreview({ localPreview, serverUrl: data.url });
-                                setSelectedActor(data.url);
+                                setUploadedActorPreview({
+                                  localPreview,
+                                  serverUrl: data.url,
+                                })
+                                setSelectedActor(data.url)
                               }
                             }
-                          } catch (err) { console.error('Upload failed:', err); }
-                          e.target.value = '';
+                          } catch (err) {
+                            console.error('Upload failed:', err)
+                          }
+                          e.target.value = ''
                         }}
                       />
                     </label>
@@ -1030,7 +1346,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                       <button
                         onClick={() => {
                           if (uploadedActorPreview.serverUrl) {
-                            setSelectedActor(uploadedActorPreview.serverUrl);
+                            setSelectedActor(uploadedActorPreview.serverUrl)
                           }
                         }}
                         className={`relative w-16 h-20 rounded-lg overflow-hidden border-2 transition-all flex-shrink-0 ${
@@ -1039,7 +1355,11 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                             : 'border-white/20 hover:border-white/40'
                         }`}
                       >
-                        <img src={uploadedActorPreview.localPreview} alt="Uploaded" className="w-full h-full object-cover" />
+                        <img
+                          src={uploadedActorPreview.localPreview}
+                          alt="Uploaded"
+                          className="w-full h-full object-cover"
+                        />
                         {selectedActor === uploadedActorPreview.serverUrl && (
                           <div className="absolute top-1 right-1 w-4 h-4 bg-violet-500 rounded-full flex items-center justify-center">
                             <Check size={8} className="text-white" />
@@ -1047,7 +1367,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                         )}
                         {!uploadedActorPreview.serverUrl && (
                           <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                            <Loader2 size={12} className="animate-spin text-white" />
+                            <Loader2
+                              size={12}
+                              className="animate-spin text-white"
+                            />
                           </div>
                         )}
                       </button>
@@ -1056,68 +1379,111 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 </div>
 
                 {/* Generate New Actors */}
-                <p className="text-xs text-zinc-500 mb-2">{actorGallery.length > 0 ? 'Or generate new actors:' : 'Or describe your actor:'}</p>
+                <p className="text-xs text-zinc-500 mb-2">
+                  {actorGallery.length > 0
+                    ? 'Or generate new actors:'
+                    : 'Or describe your actor:'}
+                </p>
                 <textarea
                   value={actorDescription}
-                  onChange={(e) => { setActorDescription(e.target.value); setActorOptions([]); }}
+                  onChange={(e) => {
+                    setActorDescription(e.target.value)
+                    setActorOptions([])
+                  }}
                   rows={2}
                   className="input-field resize-none text-sm"
                   placeholder="e.g. A young woman in her late 20s, dark hair, casual outfit..."
                 />
 
-
                 <button
                   onClick={async () => {
-                    if (!falKey || !actorDescription) return;
-                    setGeneratingActors(true);
-                    setActorOptions([]);
-                    setSelectedActor(null);
+                    if (!falKey || !actorDescription) return
+                    setGeneratingActors(true)
+                    setActorOptions([])
+                    setSelectedActor(null)
                     try {
-                      const res = await fetch(getApiUrl('/api/saasshorts/actor-options'), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'X-Fal-Key': falKey },
-                        body: JSON.stringify({ actor_description: actorDescription, num_options: 3 }),
-                      });
+                      const res = await fetch(
+                        getApiUrl('/api/saasshorts/actor-options'),
+                        {
+                          method: 'POST',
+                          headers: {
+                            'Content-Type': 'application/json',
+                            'X-Fal-Key': falKey,
+                          },
+                          body: JSON.stringify({
+                            actor_description: actorDescription,
+                            num_options: 3,
+                          }),
+                        },
+                      )
                       if (res.ok) {
-                        const data = await res.json();
-                        setActorOptions(data.images || []);
+                        const data = await res.json()
+                        setActorOptions(data.images || [])
                         // Refresh gallery to include newly uploaded actors
-                        const galRes = await fetch(getApiUrl('/api/saasshorts/actor-gallery'));
+                        const galRes = await fetch(
+                          getApiUrl('/api/saasshorts/actor-gallery'),
+                        )
                         if (galRes.ok) {
-                          const galData = await galRes.json();
-                          setActorGallery(galData.images || []);
+                          const galData = await galRes.json()
+                          setActorGallery(galData.images || [])
                         }
                       }
-                    } catch (e) { console.error(e); }
-                    finally { setGeneratingActors(false); }
+                    } catch (e) {
+                      console.error(e)
+                    } finally {
+                      setGeneratingActors(false)
+                    }
                   }}
                   disabled={generatingActors || !falKey || !actorDescription}
                   className="mt-2 w-full text-sm bg-violet-500/20 text-violet-300 px-4 py-2.5 rounded-lg hover:bg-violet-500/30 transition-colors disabled:opacity-40 flex items-center justify-center gap-2 font-medium"
                 >
-                  {generatingActors ? <><Loader2 size={14} className="animate-spin" /> Generating 3 actors...</> : <><User size={14} /> {actorOptions.length > 0 ? 'Regenerate Actors' : 'Generate 3 New Actors'} (~$0.06)</>}
+                  {generatingActors ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" /> Generating
+                      3 actors...
+                    </>
+                  ) : (
+                    <>
+                      <User size={14} />{' '}
+                      {actorOptions.length > 0
+                        ? 'Regenerate Actors'
+                        : 'Generate 3 New Actors'}{' '}
+                      (~$0.06)
+                    </>
+                  )}
                 </button>
 
                 {/* Newly Generated Actor Options */}
                 {actorOptions.length > 0 && (
                   <div className="mt-3">
-                    <p className="text-xs text-zinc-400 mb-2">New actors (select one):</p>
+                    <p className="text-xs text-zinc-400 mb-2">
+                      New actors (select one):
+                    </p>
                     <div className="grid grid-cols-3 gap-3">
                       {actorOptions.map((imgUrl, i) => (
                         <button
                           key={imgUrl}
                           onClick={() => setSelectedActor(imgUrl)}
                           className={`relative rounded-xl overflow-hidden border-2 transition-all aspect-[9/16] ${
-                            selectedActor === imgUrl ? 'border-violet-500 ring-2 ring-violet-500/30 scale-[1.02]' : 'border-white/10 hover:border-white/30'
+                            selectedActor === imgUrl
+                              ? 'border-violet-500 ring-2 ring-violet-500/30 scale-[1.02]'
+                              : 'border-white/10 hover:border-white/30'
                           }`}
                         >
-                          <img src={imgUrl} alt={`New ${i+1}`} className="w-full h-full object-cover" />
+                          <img
+                            src={imgUrl}
+                            alt={`New ${i + 1}`}
+                            className="w-full h-full object-cover"
+                          />
                           {selectedActor === imgUrl && (
                             <div className="absolute top-2 right-2 w-6 h-6 bg-violet-500 rounded-full flex items-center justify-center shadow-lg">
                               <Check size={12} className="text-white" />
                             </div>
                           )}
                           <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/60 to-transparent p-2">
-                            <span className="text-[10px] text-white/80">New {i+1}</span>
+                            <span className="text-[10px] text-white/80">
+                              New {i + 1}
+                            </span>
                           </div>
                         </button>
                       ))}
@@ -1125,9 +1491,12 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   </div>
                 )}
 
-                {!selectedActor && (actorOptions.length > 0 || actorGallery.length > 0) && (
-                  <p className="text-xs text-amber-400 mt-2 flex items-center gap-1"><AlertCircle size={12} /> Select an actor to continue</p>
-                )}
+                {!selectedActor &&
+                  (actorOptions.length > 0 || actorGallery.length > 0) && (
+                    <p className="text-xs text-amber-400 mt-2 flex items-center gap-1">
+                      <AlertCircle size={12} /> Select an actor to continue
+                    </p>
+                  )}
               </div>
 
               {/* Narration Edit */}
@@ -1141,20 +1510,24 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   rows={5}
                   className="input-field resize-none font-mono text-xs"
                 />
-                <p className="text-[10px] text-zinc-600 mt-1">{editedNarration.length} chars &middot; ~{Math.round(editedNarration.split(' ').length / 2.5)}s speech</p>
+                <p className="text-[10px] text-zinc-600 mt-1">
+                  {editedNarration.length} chars &middot; ~
+                  {Math.round(editedNarration.split(' ').length / 2.5)}s speech
+                </p>
               </div>
 
               {/* Cost Estimate */}
               <div className="p-3 bg-white/5 rounded-lg border border-white/10">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-zinc-400">Estimated cost</span>
-                  <span className="text-green-400 font-semibold">~${videoMode === 'lowcost' ? '0.65' : '2.50'}</span>
+                  <span className="text-green-400 font-semibold">
+                    ~${videoMode === 'lowcost' ? '0.65' : '2.50'}
+                  </span>
                 </div>
                 <div className="text-[10px] text-zinc-600 mt-1">
                   {videoMode === 'lowcost'
                     ? 'Flux image ($0.05) + ElevenLabs voice ($0.10) + Hailuo 2.3 img2video ($0.19) + VEED Lipsync ($0.20) + Flux b-roll ($0.10)'
-                    : 'Flux image ($0.05) + ElevenLabs voice ($0.10) + Kling avatar ($1.69) + Kling b-roll ($0.70)'
-                  }
+                    : 'Flux image ($0.05) + ElevenLabs voice ($0.10) + Kling avatar ($1.69) + Kling b-roll ($0.70)'}
                 </div>
               </div>
 
@@ -1162,27 +1535,40 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
               {(!falKey || !elevenLabsKey) && (
                 <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg flex items-center gap-2 text-sm text-amber-400">
                   <AlertCircle size={14} />
-                  {!falKey && 'fal.ai API key missing. '}{!elevenLabsKey && 'ElevenLabs API key missing. '}
+                  {!falKey && 'fal.ai API key missing. '}
+                  {!elevenLabsKey && 'ElevenLabs API key missing. '}
                   Set them in Settings.
                 </div>
               )}
             </div>
 
             <div className="flex justify-between">
-              <button onClick={() => setStep(1)} className="btn-secondary px-4 py-2 text-sm flex items-center gap-2">
+              <button
+                onClick={() => setStep(1)}
+                className="btn-secondary px-4 py-2 text-sm flex items-center gap-2"
+              >
                 <ChevronLeft size={14} /> Back
               </button>
               <button
                 onClick={handleGenerate}
-                disabled={!falKey || !elevenLabsKey || !selectedActor || generating}
+                disabled={
+                  !falKey || !elevenLabsKey || !selectedActor || generating
+                }
                 className="btn-primary px-6 py-2 text-sm flex items-center gap-2 disabled:opacity-50"
               >
                 {generating ? (
-                  <><Loader2 size={14} className="animate-spin" /> Generating...</>
+                  <>
+                    <Loader2 size={14} className="animate-spin" /> Generating...
+                  </>
                 ) : !selectedActor ? (
-                  <><User size={14} /> Select an actor first</>
+                  <>
+                    <User size={14} /> Select an actor first
+                  </>
                 ) : (
-                  <><Film size={14} /> Generate Video (~${videoMode === 'lowcost' ? '0.65' : '2.00'})</>
+                  <>
+                    <Film size={14} /> Generate Video (~$
+                    {videoMode === 'lowcost' ? '0.65' : '2.00'})
+                  </>
                 )}
               </button>
             </div>
@@ -1195,14 +1581,27 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
             <div className="glass-panel p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
-                  <Film size={18} className={genStatus === 'processing' ? 'text-violet-400 animate-pulse' : genStatus === 'completed' ? 'text-green-400' : 'text-red-400'} />
+                  <Film
+                    size={18}
+                    className={
+                      genStatus === 'processing'
+                        ? 'text-violet-400 animate-pulse'
+                        : genStatus === 'completed'
+                          ? 'text-green-400'
+                          : 'text-red-400'
+                    }
+                  />
                   Video Generation
                 </h2>
-                <span className={`text-xs px-2 py-1 rounded-full border ${
-                  genStatus === 'processing' ? 'bg-violet-500/10 border-violet-500/20 text-violet-300' :
-                  genStatus === 'completed' ? 'bg-green-500/10 border-green-500/20 text-green-400' :
-                  'bg-red-500/10 border-red-500/20 text-red-400'
-                }`}>
+                <span
+                  className={`text-xs px-2 py-1 rounded-full border ${
+                    genStatus === 'processing'
+                      ? 'bg-violet-500/10 border-violet-500/20 text-violet-300'
+                      : genStatus === 'completed'
+                        ? 'bg-green-500/10 border-green-500/20 text-green-400'
+                        : 'bg-red-500/10 border-red-500/20 text-red-400'
+                  }`}
+                >
                   {genStatus.toUpperCase()}
                 </span>
               </div>
@@ -1215,32 +1614,54 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   'Generating b-roll clips',
                   'Compositing final video',
                 ].map((label, i) => {
-                  const logStr = genLogs.join(' ').toLowerCase();
+                  const logStr = genLogs.join(' ').toLowerCase()
                   const stepDone =
-                    i === 0 ? logStr.includes('[2/6]') || logStr.includes('[3/6]') :
-                    i === 1 ? logStr.includes('[3/6]') && (logStr.includes('[4/6]') || logStr.includes('talking head ready')) :
-                    i === 2 ? logStr.includes('[5/6]') || logStr.includes('[6/6]') :
-                    genStatus === 'completed';
+                    i === 0
+                      ? logStr.includes('[2/6]') || logStr.includes('[3/6]')
+                      : i === 1
+                        ? logStr.includes('[3/6]') &&
+                          (logStr.includes('[4/6]') ||
+                            logStr.includes('talking head ready'))
+                        : i === 2
+                          ? logStr.includes('[5/6]') || logStr.includes('[6/6]')
+                          : genStatus === 'completed'
                   const stepActive =
-                    i === 0 ? logStr.includes('[1/6]') && !stepDone :
-                    i === 1 ? (logStr.includes('[3/6]') && !logStr.includes('[4/6]')) :
-                    i === 2 ? (logStr.includes('[4/6]') && !logStr.includes('[5/6]') && !logStr.includes('[6/6]')) :
-                    logStr.includes('[6/6]') && genStatus !== 'completed';
+                    i === 0
+                      ? logStr.includes('[1/6]') && !stepDone
+                      : i === 1
+                        ? logStr.includes('[3/6]') && !logStr.includes('[4/6]')
+                        : i === 2
+                          ? logStr.includes('[4/6]') &&
+                            !logStr.includes('[5/6]') &&
+                            !logStr.includes('[6/6]')
+                          : logStr.includes('[6/6]') &&
+                            genStatus !== 'completed'
 
                   return (
                     <div key={i} className="flex items-center gap-3 text-sm">
                       {stepDone ? (
                         <Check size={14} className="text-green-400" />
                       ) : stepActive ? (
-                        <Loader2 size={14} className="text-violet-400 animate-spin" />
+                        <Loader2
+                          size={14}
+                          className="text-violet-400 animate-spin"
+                        />
                       ) : (
                         <div className="w-3.5 h-3.5 rounded-full border border-white/20" />
                       )}
-                      <span className={stepDone ? 'text-zinc-400' : stepActive ? 'text-white' : 'text-zinc-600'}>
+                      <span
+                        className={
+                          stepDone
+                            ? 'text-zinc-400'
+                            : stepActive
+                              ? 'text-white'
+                              : 'text-zinc-600'
+                        }
+                      >
                         {label}
                       </span>
                     </div>
-                  );
+                  )
                 })}
               </div>
 
@@ -1250,14 +1671,23 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   <span className="text-xs font-mono text-zinc-400 flex items-center gap-2">
                     <Terminal size={12} /> Generation Logs
                   </span>
-                  <button onClick={() => setLogsExpanded(!logsExpanded)} className="text-zinc-500 hover:text-white transition-colors">
-                    <ChevronDown size={14} className={logsExpanded ? '' : 'rotate-180'} />
+                  <button
+                    onClick={() => setLogsExpanded(!logsExpanded)}
+                    className="text-zinc-500 hover:text-white transition-colors"
+                  >
+                    <ChevronDown
+                      size={14}
+                      className={logsExpanded ? '' : 'rotate-180'}
+                    />
                   </button>
                 </div>
                 {logsExpanded && (
                   <div className="p-4 max-h-64 overflow-y-auto font-mono text-xs space-y-1 custom-scrollbar">
                     {genLogs.map((log, i) => (
-                      <div key={i} className={`${log.toLowerCase().includes('error') ? 'text-red-400' : log.includes('✅') ? 'text-green-400' : 'text-zinc-400'}`}>
+                      <div
+                        key={i}
+                        className={`${log.toLowerCase().includes('error') ? 'text-red-400' : log.includes('✅') ? 'text-green-400' : 'text-zinc-400'}`}
+                      >
                         {log}
                       </div>
                     ))}
@@ -1273,11 +1703,18 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 <div className="mt-4 p-4 bg-red-500/5 border border-red-500/20 rounded-xl space-y-3">
                   <div className="flex items-center gap-2">
                     <AlertCircle size={16} className="text-red-400 shrink-0" />
-                    <span className="text-sm text-red-300">Generation failed. You can retry or go back to change settings.</span>
+                    <span className="text-sm text-red-300">
+                      Generation failed. You can retry or go back to change
+                      settings.
+                    </span>
                   </div>
                   <div className="flex gap-3">
                     <button
-                      onClick={() => { setStep(2); setGenStatus('idle'); setGenerating(false); }}
+                      onClick={() => {
+                        setStep(2)
+                        setGenStatus('idle')
+                        setGenerating(false)
+                      }}
                       className="btn-secondary px-4 py-2 text-sm flex items-center gap-2"
                     >
                       <ChevronLeft size={14} /> Change Voice/Settings
@@ -1319,23 +1756,35 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 {/* Details */}
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-medium text-zinc-300 mb-1">{genResult.script?.title}</h3>
-                    <p className="text-xs text-zinc-500">{genResult.duration?.toFixed(1)}s &middot; 9:16 vertical</p>
+                    <h3 className="text-sm font-medium text-zinc-300 mb-1">
+                      {genResult.script?.title}
+                    </h3>
+                    <p className="text-xs text-zinc-500">
+                      {genResult.duration?.toFixed(1)}s &middot; 9:16 vertical
+                    </p>
                   </div>
 
                   {/* Cost breakdown */}
                   {genResult.cost_estimate && (
                     <div className="p-3 bg-white/5 rounded-lg border border-white/10 space-y-1">
-                      <div className="text-xs font-semibold text-zinc-300 mb-2">Cost Breakdown</div>
-                      {Object.entries(genResult.cost_estimate).filter(([k]) => k !== 'total').map(([k, v]) => (
-                        <div key={k} className="flex justify-between text-xs">
-                          <span className="text-zinc-500">{k.replace(/_/g, ' ')}</span>
-                          <span className="text-zinc-400">${v}</span>
-                        </div>
-                      ))}
+                      <div className="text-xs font-semibold text-zinc-300 mb-2">
+                        Cost Breakdown
+                      </div>
+                      {Object.entries(genResult.cost_estimate)
+                        .filter(([k]) => k !== 'total')
+                        .map(([k, v]) => (
+                          <div key={k} className="flex justify-between text-xs">
+                            <span className="text-zinc-500">
+                              {k.replace(/_/g, ' ')}
+                            </span>
+                            <span className="text-zinc-400">${v}</span>
+                          </div>
+                        ))}
                       <div className="flex justify-between text-sm font-semibold border-t border-white/10 pt-1 mt-1">
                         <span className="text-zinc-300">Total</span>
-                        <span className="text-green-400">${genResult.cost_estimate.total}</span>
+                        <span className="text-green-400">
+                          ${genResult.cost_estimate.total}
+                        </span>
                       </div>
                     </div>
                   )}
@@ -1344,16 +1793,26 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   {genResult.script?.caption && (
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-medium text-zinc-400">Caption</span>
+                        <span className="text-xs font-medium text-zinc-400">
+                          Caption
+                        </span>
                         <button
-                          onClick={() => handleCopy(genResult.script.caption, 'caption')}
+                          onClick={() =>
+                            handleCopy(genResult.script.caption, 'caption')
+                          }
                           className="text-xs text-zinc-500 hover:text-white flex items-center gap-1"
                         >
-                          {copied === 'caption' ? <Check size={10} /> : <Copy size={10} />}
+                          {copied === 'caption' ? (
+                            <Check size={10} />
+                          ) : (
+                            <Copy size={10} />
+                          )}
                           {copied === 'caption' ? 'Copied' : 'Copy'}
                         </button>
                       </div>
-                      <p className="text-xs text-zinc-400 bg-white/5 p-2 rounded-lg">{genResult.script.caption}</p>
+                      <p className="text-xs text-zinc-400 bg-white/5 p-2 rounded-lg">
+                        {genResult.script.caption}
+                      </p>
                     </div>
                   )}
 
@@ -1361,18 +1820,34 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   {genResult.script?.hashtags && (
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-medium text-zinc-400">Hashtags</span>
+                        <span className="text-xs font-medium text-zinc-400">
+                          Hashtags
+                        </span>
                         <button
-                          onClick={() => handleCopy(genResult.script.hashtags.join(' '), 'hashtags')}
+                          onClick={() =>
+                            handleCopy(
+                              genResult.script.hashtags.join(' '),
+                              'hashtags',
+                            )
+                          }
                           className="text-xs text-zinc-500 hover:text-white flex items-center gap-1"
                         >
-                          {copied === 'hashtags' ? <Check size={10} /> : <Copy size={10} />}
+                          {copied === 'hashtags' ? (
+                            <Check size={10} />
+                          ) : (
+                            <Copy size={10} />
+                          )}
                           {copied === 'hashtags' ? 'Copied' : 'Copy'}
                         </button>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {genResult.script.hashtags.map((tag, i) => (
-                          <span key={i} className="text-[10px] bg-violet-500/10 text-violet-300 px-2 py-0.5 rounded-full">{tag}</span>
+                          <span
+                            key={i}
+                            className="text-[10px] bg-violet-500/10 text-violet-300 px-2 py-0.5 rounded-full"
+                          >
+                            {tag}
+                          </span>
                         ))}
                       </div>
                     </div>
@@ -1402,7 +1877,10 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     </h3>
 
                     {!uploadPostKey ? (
-                      <p className="text-xs text-zinc-500">Set your Upload-Post API key in Settings to enable publishing.</p>
+                      <p className="text-xs text-zinc-500">
+                        Set your Upload-Post API key in Settings to enable
+                        publishing.
+                      </p>
                     ) : (
                       <>
                         {/* Platform checkboxes */}
@@ -1412,11 +1890,19 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                             { id: 'instagram', label: 'Instagram', icon: '📸' },
                             { id: 'youtube', label: 'YouTube', icon: '▶️' },
                           ].map((p) => (
-                            <label key={p.id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                            <label
+                              key={p.id}
+                              className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"
+                            >
                               <input
                                 type="checkbox"
                                 checked={publishPlatforms[p.id]}
-                                onChange={(e) => setPublishPlatforms({ ...publishPlatforms, [p.id]: e.target.checked })}
+                                onChange={(e) =>
+                                  setPublishPlatforms({
+                                    ...publishPlatforms,
+                                    [p.id]: e.target.checked,
+                                  })
+                                }
                                 className="w-3.5 h-3.5 rounded border-zinc-600 bg-black/50 text-violet-500 focus:ring-violet-500"
                               />
                               <span>{p.icon}</span> {p.label}
@@ -1430,7 +1916,9 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                             <input
                               type="checkbox"
                               checked={isScheduling}
-                              onChange={(e) => setIsScheduling(e.target.checked)}
+                              onChange={(e) =>
+                                setIsScheduling(e.target.checked)
+                              }
                               className="w-3.5 h-3.5 rounded border-zinc-600 bg-black/50 text-violet-500 focus:ring-violet-500"
                             />
                             <Calendar size={12} /> Schedule
@@ -1448,12 +1936,26 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                         {/* Publish button */}
                         <button
                           onClick={async () => {
-                            const selected = Object.keys(publishPlatforms).filter(k => publishPlatforms[k]);
-                            if (selected.length === 0) { setPublishResult({ ok: false, msg: 'Select at least one platform' }); return; }
-                            if (isScheduling && !scheduleDate) { setPublishResult({ ok: false, msg: 'Select a date' }); return; }
+                            const selected = Object.keys(
+                              publishPlatforms,
+                            ).filter((k) => publishPlatforms[k])
+                            if (selected.length === 0) {
+                              setPublishResult({
+                                ok: false,
+                                msg: 'Select at least one platform',
+                              })
+                              return
+                            }
+                            if (isScheduling && !scheduleDate) {
+                              setPublishResult({
+                                ok: false,
+                                msg: 'Select a date',
+                              })
+                              return
+                            }
 
-                            setPublishing(true);
-                            setPublishResult(null);
+                            setPublishing(true)
+                            setPublishResult(null)
                             try {
                               const payload = {
                                 job_id: jobId,
@@ -1461,40 +1963,63 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                                 user_id: uploadUserId,
                                 platforms: selected,
                                 title: genResult.script?.title,
-                                description: genResult.script?.caption || genResult.script?.full_narration,
-                              };
+                                description:
+                                  genResult.script?.caption ||
+                                  genResult.script?.full_narration,
+                              }
                               if (isScheduling && scheduleDate) {
-                                payload.scheduled_date = new Date(scheduleDate).toISOString();
-                                payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                                payload.scheduled_date = new Date(
+                                  scheduleDate,
+                                ).toISOString()
+                                payload.timezone =
+                                  Intl.DateTimeFormat().resolvedOptions().timeZone
                               }
-                              const res = await fetch(getApiUrl('/api/saasshorts/post'), {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(payload),
-                              });
+                              const res = await fetch(
+                                getApiUrl('/api/saasshorts/post'),
+                                {
+                                  method: 'POST',
+                                  headers: {
+                                    'Content-Type': 'application/json',
+                                  },
+                                  body: JSON.stringify(payload),
+                                },
+                              )
                               if (!res.ok) {
-                                const err = await res.json().catch(() => ({ detail: 'Failed' }));
-                                throw new Error(err.detail || 'Failed');
+                                const err = await res
+                                  .json()
+                                  .catch(() => ({ detail: 'Failed' }))
+                                throw new Error(err.detail || 'Failed')
                               }
-                              setPublishResult({ ok: true, msg: isScheduling ? 'Scheduled!' : 'Published!' });
+                              setPublishResult({
+                                ok: true,
+                                msg: isScheduling ? 'Scheduled!' : 'Published!',
+                              })
                             } catch (e) {
-                              setPublishResult({ ok: false, msg: e.message });
+                              setPublishResult({ ok: false, msg: e.message })
                             } finally {
-                              setPublishing(false);
+                              setPublishing(false)
                             }
                           }}
                           disabled={publishing}
                           className="w-full btn-primary py-2 text-sm flex items-center justify-center gap-2 disabled:opacity-50"
                         >
                           {publishing ? (
-                            <><Loader2 size={14} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</>
+                            <>
+                              <Loader2 size={14} className="animate-spin" />{' '}
+                              {isScheduling ? 'Scheduling...' : 'Publishing...'}
+                            </>
                           ) : (
-                            <><Share2 size={14} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>
+                            <>
+                              <Share2 size={14} />{' '}
+                              {isScheduling ? 'Schedule Post' : 'Publish Now'}
+                            </>
                           )}
                         </button>
 
                         {publishResult && (
-                          <p className={`text-xs ${publishResult.ok ? 'text-green-400' : 'text-red-400'}`}>
+                          <p
+                            className={`text-xs ${publishResult.ok ? 'text-green-400' : 'text-red-400'}`}
+                          >
                             {publishResult.msg}
                           </p>
                         )}
@@ -1508,5 +2033,5 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
         )}
       </div>
     </div>
-  );
+  )
 }

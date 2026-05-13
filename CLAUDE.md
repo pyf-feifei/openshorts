@@ -12,7 +12,7 @@ OpenShorts is an AI-powered vertical video generator that transforms long YouTub
 ```bash
 docker compose up --build   # Build and run full stack
 ```
-- Backend: http://localhost:8000 (FastAPI/Uvicorn)
+- Backend: http://localhost:58001 (FastAPI/Uvicorn)
 - Frontend: http://localhost:5175 (Vite proxies API calls to backend)
 
 ### Frontend Only (Dashboard)
@@ -27,7 +27,7 @@ npm run lint      # ESLint (strict, --max-warnings 0)
 ### Backend Only
 ```bash
 pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 58001
 ```
 
 ## Architecture

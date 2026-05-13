@@ -14,7 +14,23 @@
 }
 
 .input-field {
-  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
+  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm text-white placeholder:text-zinc-500;
+  color-scheme: dark;
+}
+
+select.input-field {
+  @apply cursor-pointer;
+}
+
+select.input-field option {
+  background-color: #18181b;
+  color: #ffffff;
+}
+
+select.input-field option:checked,
+select.input-field option:hover {
+  background-color: #2563eb;
+  color: #ffffff;
 }
 
 .btn-primary {

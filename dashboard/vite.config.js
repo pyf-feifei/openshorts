@@ -11,27 +11,27 @@ export default defineConfig({
     ],
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:58001',
         changeOrigin: true,
       },
       '/videos': {
-        target: 'http://backend:8000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:58001',
         changeOrigin: true,
       },
       '/thumbnails': {
-        target: 'http://backend:8000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:58001',
         changeOrigin: true,
       },
       '/gallery': {
-        target: 'http://backend:8000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:58001',
         changeOrigin: true,
       },
       '/video': {
-        target: 'http://backend:8000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:58001',
         changeOrigin: true,
       },
       '/render': {
-        target: 'http://renderer:3100',
+        target: process.env.VITE_RENDERER_URL || 'http://localhost:3100',
         changeOrigin: true,
       }
     }

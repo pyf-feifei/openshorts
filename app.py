@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import subprocess
 import threading
@@ -7,20 +8,85 @@ import shutil
 import glob
 import time
 import asyncio
+import yt_dlp
+import tempfile
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+from gemini_pool import parse_gemini_pool_config
 
 load_dotenv()
 
+GEMINI_BASE_URL_HEADER = "X-Gemini-Base-URL"
+OPENAI_COMPAT_KEY_HEADER = "X-OpenAI-Compatible-Key"
+OPENAI_COMPAT_BASE_URL_HEADER = "X-OpenAI-Compatible-Base-URL"
+OPENAI_COMPAT_MODEL_HEADER = "X-OpenAI-Compatible-Model"
+PROJECT_COOKIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local", "youtube_cookies.txt")
+PROJECT_COOKIES_BACKUP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local", "youtube_cookies.last_good.txt")
+
+
+def normalize_gemini_base_url(base_url: Optional[str]) -> str:
+    if not base_url:
+        return ""
+    return base_url.strip().rstrip("/")
+
+
+def get_gemini_base_url(request: Request = None, header_value: Optional[str] = None) -> str:
+    value = header_value or ""
+    if not value and request is not None:
+        value = request.headers.get(GEMINI_BASE_URL_HEADER, "")
+    return normalize_gemini_base_url(value or os.environ.get("GEMINI_BASE_URL", ""))
+
+
+def add_gemini_base_url_to_env(env: dict, base_url: str) -> None:
+    normalized = normalize_gemini_base_url(base_url)
+    if normalized:
+        env["GEMINI_BASE_URL"] = normalized
+    else:
+        env.pop("GEMINI_BASE_URL", None)
+
+
+def normalize_openai_compat_base_url(base_url: Optional[str]) -> str:
+    return (base_url or "").strip().rstrip("/")
+
+
+def resolve_openai_compat_config(
+    header_key: Optional[str] = None,
+    header_base_url: Optional[str] = None,
+    header_model: Optional[str] = None,
+    request_model: Optional[str] = None,
+) -> Dict[str, str]:
+    return {
+        "api_key": (header_key or os.environ.get("OPENAI_COMPAT_API_KEY") or "").strip(),
+        "base_url": normalize_openai_compat_base_url(header_base_url or os.environ.get("OPENAI_COMPAT_BASE_URL") or ""),
+        "model": (header_model or request_model or os.environ.get("OPENAI_COMPAT_MODEL") or "").strip(),
+    }
+
+
+def resolve_gemini_access(
+    request: Request,
+    header_key: Optional[str] = None,
+    header_base_url: Optional[str] = None,
+    body: Optional[Dict] = None,
+    form: Optional[Dict] = None,
+):
+    pool = parse_gemini_pool_config(headers=dict(request.headers), body=body, form=form)
+    if pool.mode == "official_pool":
+        session = pool.checkout()
+        return session.api_key, "", pool
+    api_key = header_key or (pool.keys[0] if pool.keys else os.environ.get("GEMINI_API_KEY"))
+    base_url = get_gemini_base_url(request, header_base_url)
+    return api_key, base_url, pool
+
 # Constants
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.environ.get("OPENSHORTS_UPLOAD_DIR", "uploads")
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -29,6 +95,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
+COMMENTARY_MAX_UPLOAD_MB = int(os.environ.get("COMMENTARY_MAX_UPLOAD_MB", "8192"))
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 
 # Application State
@@ -314,15 +381,15 @@ async def process_endpoint(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None)
 ):
-    api_key = request.headers.get("X-Gemini-Key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
-    
     # Handle JSON body manually for URL payload
     content_type = request.headers.get("content-type", "")
+    body = None
     if "application/json" in content_type:
         body = await request.json()
         url = body.get("url")
+    api_key, gemini_base_url, gemini_pool = resolve_gemini_access(request, body=body)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
     
     if not url and not file:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
@@ -334,7 +401,8 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    env["GEMINI_API_KEY"] = api_key
+    add_gemini_base_url_to_env(env, gemini_base_url)
     
     if url:
         cmd.extend(["-u", url])
@@ -365,7 +433,8 @@ async def process_endpoint(
         'logs': [f"Job {job_id} queued."],
         'cmd': cmd,
         'env': env,
-        'output_dir': job_output_dir
+        'output_dir': job_output_dir,
+        'gemini_events': gemini_pool.event_dicts() if gemini_pool else [],
     }
     
     await job_queue.put(job_id)
@@ -381,7 +450,8 @@ async def get_status(job_id: str):
     return {
         "status": job['status'],
         "logs": job['logs'],
-        "result": job.get('result')
+        "result": job.get('result'),
+        "gemini_events": job.get("gemini_events", []),
     }
 
 from editor import VideoEditor
@@ -389,6 +459,898 @@ from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
+from commentary import DEFAULT_ANALYSIS_MODE, generate_commentary_video, generate_edge_voiceover, resolve_openai_sampling_options
+
+commentary_jobs: Dict[str, Dict] = {}
+COMMENTARY_TASK_FILE = "commentary_task.json"
+COMMENTARY_PERSISTED_FIELDS = {
+    "job_id",
+    "status",
+    "stage",
+    "stage_label",
+    "stage_progress",
+    "logs",
+    "created_at",
+    "updated_at",
+    "request",
+    "source_type",
+    "source_path",
+    "source_filename",
+    "source_value",
+    "analysis_video_path",
+    "analysis_video_filename",
+    "gemini_file_uri",
+    "gemini_file_name",
+    "gemini_file_mime_type",
+    "script_path",
+    "metadata_path",
+    "result",
+    "error",
+    "gemini_events",
+}
+
+COMMENTARY_STAGE_PATTERNS = [
+    ("source", "准备源视频", "Preparing source video"),
+    ("analysis_compress", "压缩 Gemini 分析视频", "Compressing Gemini analysis video"),
+    ("analysis_compress", "复用 Gemini 分析视频", "Reusing compressed Gemini analysis video"),
+    ("analysis_upload", "上传 Gemini 分析副本", "Uploading 360p Gemini analysis video"),
+    ("analysis_upload", "复用 Gemini 分析副本", "Reusing processed Gemini analysis video"),
+    ("analysis_upload", "等待 Gemini 文件处理", "Gemini Files API processing"),
+    ("openai", "OpenAI 兼容多模态分析", "OpenAI-compatible multimodal visual analysis"),
+    ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model is writing"),
+    ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model returned"),
+    ("gemini", "Gemini 分析并写解说", "Gemini is analyzing"),
+    ("gemini", "校验解说时间线", "validating timeline sync"),
+    ("voice", "生成语音并同步画面", "Generating synced commentary block"),
+    ("voice", "生成解说语音", "Generating commentary voiceover"),
+    ("render", "合成最终视频", "Mixing new voiceover"),
+    ("render", "生成字幕", "Generating text-timed subtitles"),
+    ("done", "生成完成", "Commentary remix video completed"),
+]
+
+
+def commentary_job_dir(job_id: str) -> str:
+    return os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
+
+
+def commentary_task_path(job_id: str) -> str:
+    return os.path.join(commentary_job_dir(job_id), COMMENTARY_TASK_FILE)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def commentary_request_to_dict(req) -> Dict:
+    data = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    data.pop("gemini_pool", None)
+    return {key: value for key, value in data.items() if value is not None}
+
+
+def persistable_commentary_task(job: Dict) -> Dict:
+    return {key: job.get(key) for key in COMMENTARY_PERSISTED_FIELDS if key in job}
+
+
+def save_commentary_task(job_id: str) -> None:
+    job = commentary_jobs.get(job_id)
+    if not job:
+        return
+    job["updated_at"] = now_iso()
+    os.makedirs(commentary_job_dir(job_id), exist_ok=True)
+    tmp_path = f"{commentary_task_path(job_id)}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(persistable_commentary_task(job), f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, commentary_task_path(job_id))
+
+
+def load_commentary_task(job_id: str) -> Optional[Dict]:
+    task_path = commentary_task_path(job_id)
+    if not os.path.exists(task_path):
+        return None
+    try:
+        with open(task_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("job_id", job_id)
+    data.setdefault("logs", [])
+    commentary_jobs[job_id] = data
+    return data
+
+
+def list_commentary_tasks(limit: int = 30) -> List[Dict]:
+    tasks = []
+    for task_path in glob.glob(os.path.join(os.path.abspath(OUTPUT_DIR), "*", COMMENTARY_TASK_FILE)):
+        try:
+            with open(task_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            tasks.append(data)
+    tasks.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return tasks[:limit]
+
+
+def update_commentary_stage(job_id: str, message: str) -> None:
+    job = commentary_jobs.get(job_id)
+    if not job:
+        return
+    for stage, label, marker in COMMENTARY_STAGE_PATTERNS:
+        if marker in message:
+            job["stage"] = stage
+            job["stage_label"] = label
+            break
+    match = re.search(r"(\d+)%", message)
+    if match:
+        job["stage_progress"] = int(match.group(1))
+    elif job.get("stage") not in {"analysis_compress", "upload"}:
+        job["stage_progress"] = None
+
+class CommentaryVoicePreviewRequest(BaseModel):
+    language: str = "zh"
+    edge_voice: str
+    text: Optional[str] = None
+
+COMMENTARY_VOICE_PREVIEW_TEXT = {
+    "zh": "你好，这是当前选择的中文解说声音试听。",
+    "en": "Hello, this is a preview of the selected English narration voice.",
+    "es": "Hola, esta es una prueba de la voz de narración seleccionada.",
+    "ja": "こんにちは。これは選択した日本語ナレーション音声のプレビューです。",
+}
+
+class CommentaryRequest(BaseModel):
+    url: str
+    language: str = "zh"
+    style: str = "documentary"
+    target_duration: str = "medium"
+    analysis_mode: str = DEFAULT_ANALYSIS_MODE
+    gemini_model: Optional[str] = None
+    openai_model: Optional[str] = None
+    openai_frame_interval_seconds: Optional[float] = None
+    openai_max_frames: Optional[int] = None
+    openai_scene_max_keyframes: Optional[int] = None
+    openai_batch_size: Optional[int] = None
+    openai_visual_concurrency: Optional[int] = None
+    tts_provider: str = "edge"
+    voice_id: Optional[str] = None
+    edge_voice: Optional[str] = None
+    original_audio_volume: float = 0.08
+    pause_original_audio_volume: float = 0.6
+    subtitles: bool = True
+    vertical: bool = False
+    aspect_mode: str = "auto"
+    source_language: Optional[str] = None
+    gemini_pool: Optional[str] = None
+
+def parse_form_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+def parse_form_float(value, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_form_optional_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_form_optional_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def apply_openai_sampling_options_to_request(req: CommentaryRequest) -> Dict:
+    options = resolve_openai_sampling_options(
+        frame_interval_seconds=req.openai_frame_interval_seconds,
+        max_frames=req.openai_max_frames,
+        scene_max_keyframes=req.openai_scene_max_keyframes,
+        batch_size=req.openai_batch_size,
+        visual_concurrency=req.openai_visual_concurrency,
+    )
+    req.openai_frame_interval_seconds = options["frame_interval_seconds"]
+    req.openai_max_frames = options["max_frames"]
+    req.openai_scene_max_keyframes = options["scene_max_keyframes"]
+    req.openai_batch_size = options["batch_size"]
+    req.openai_visual_concurrency = options["visual_concurrency"]
+    return options
+
+def commentary_request_from_form(form) -> CommentaryRequest:
+    return CommentaryRequest(
+        url=str(form.get("url") or ""),
+        language=str(form.get("language") or "zh"),
+        style=str(form.get("style") or "documentary"),
+        target_duration=str(form.get("target_duration") or "medium"),
+        analysis_mode=str(form.get("analysis_mode") or DEFAULT_ANALYSIS_MODE),
+        gemini_model=str(form.get("gemini_model") or "") or None,
+        openai_model=str(form.get("openai_model") or "") or None,
+        openai_frame_interval_seconds=parse_form_optional_float(form.get("openai_frame_interval_seconds")),
+        openai_max_frames=parse_form_optional_int(form.get("openai_max_frames")),
+        openai_scene_max_keyframes=parse_form_optional_int(form.get("openai_scene_max_keyframes")),
+        openai_batch_size=parse_form_optional_int(form.get("openai_batch_size")),
+        openai_visual_concurrency=parse_form_optional_int(form.get("openai_visual_concurrency")),
+        tts_provider=str(form.get("tts_provider") or "edge"),
+        voice_id=str(form.get("voice_id") or "") or None,
+        edge_voice=str(form.get("edge_voice") or "") or None,
+        original_audio_volume=parse_form_float(form.get("original_audio_volume"), 0.08),
+        pause_original_audio_volume=parse_form_float(form.get("pause_original_audio_volume"), 0.6),
+        subtitles=parse_form_bool(form.get("subtitles"), True),
+        vertical=parse_form_bool(form.get("vertical"), False),
+        aspect_mode=str(form.get("aspect_mode") or "auto"),
+        source_language=str(form.get("source_language") or "") or None,
+        gemini_pool=str(form.get("gemini_pool") or "") or None,
+    )
+
+async def save_commentary_upload(file: UploadFile, job_id: str, progress=None) -> str:
+    safe_filename = os.path.basename(file.filename or "uploaded_video.mp4") or "uploaded_video.mp4"
+    upload_dir = commentary_job_dir(job_id)
+    os.makedirs(upload_dir, exist_ok=True)
+    input_path = os.path.abspath(os.path.join(upload_dir, f"{job_id}_source_{safe_filename}"))
+    size = 0
+    limit_bytes = COMMENTARY_MAX_UPLOAD_MB * 1024 * 1024
+    total = int(file.headers.get("content-length") or 0) if getattr(file, "headers", None) else 0
+    last_logged_percent = -1
+    if progress:
+        progress("upload", "Saving uploaded video on server...", 0)
+    with open(input_path, "wb") as buffer:
+        while content := await file.read(1024 * 1024):
+            size += len(content)
+            if progress and total > 0:
+                percent = int(min(99, (size / total) * 100))
+                if percent >= last_logged_percent + 10:
+                    last_logged_percent = percent
+                    progress("upload", f"Saving uploaded video on server: {percent}%", percent)
+            if size > limit_bytes:
+                buffer.close()
+                if os.path.exists(input_path):
+                    os.remove(input_path)
+                raise HTTPException(status_code=413, detail=f"File too large. Max size {COMMENTARY_MAX_UPLOAD_MB}MB")
+            buffer.write(content)
+    if progress:
+        progress("upload", "Uploaded video saved on server: 100%", 100)
+    return input_path
+
+class YouTubeCookiesRequest(BaseModel):
+    cookies: str
+
+class YouTubeCookiesVerifyRequest(BaseModel):
+    url: Optional[str] = None
+
+def normalize_youtube_cookies(cookies: str) -> str:
+    split_field_rows = normalize_split_youtube_cookie_fields(cookies)
+    if split_field_rows:
+        cookies = split_field_rows
+
+    normalized_lines = []
+    allowed_domains = ("youtube.com", ".youtube.com", "google.com", ".google.com")
+    for raw_line in cookies.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if not normalized_lines:
+                normalized_lines.append(line)
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            parts = line.split(None, 6)
+        if len(parts) >= 7:
+            domain = parts[0].lower()
+            if any(domain == allowed or domain.endswith(allowed) for allowed in allowed_domains):
+                normalized_lines.append("\t".join(parts[:7]))
+        elif "youtube" in line.lower() or "google" in line.lower():
+            normalized_lines.append(line)
+    return "\n".join(normalized_lines).strip()
+
+
+def normalize_split_youtube_cookie_fields(cookies: str) -> str:
+    fields = [
+        line.strip()
+        for line in cookies.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(fields) < 7 or len(fields) % 7 != 0:
+        return ""
+    rows = []
+    for index in range(0, len(fields), 7):
+        chunk = fields[index:index + 7]
+        domain, include_subdomains, path, secure, expiry, name, value = chunk
+        if not (domain.startswith(".") or "." in domain):
+            return ""
+        if include_subdomains.upper() not in {"TRUE", "FALSE"}:
+            return ""
+        if secure.upper() not in {"TRUE", "FALSE"}:
+            return ""
+        if not expiry.isdigit():
+            return ""
+        if not ("youtube" in domain.lower() or "google" in domain.lower()):
+            return ""
+        rows.append("\t".join([domain, include_subdomains.upper(), path, secure.upper(), expiry, name, value]))
+    return "\n".join(rows)
+
+def inspect_youtube_cookies(cookies: str) -> Dict:
+    names = set()
+    rows = 0
+    domains = set()
+    for line in normalize_youtube_cookies(cookies).splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            rows += 1
+            domains.add(parts[0])
+            names.add(parts[5])
+    login_names = {"SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO"}
+    has_login_cookies = bool(names & login_names)
+    strong_login_names = {"SID", "SAPISID", "LOGIN_INFO"}
+    found_strong_login_cookies = sorted(names & strong_login_names)
+    missing_strong_login_cookies = sorted(strong_login_names - names)
+    has_strong_login_cookies = strong_login_names.issubset(names)
+    youtube_domains = [domain for domain in domains if "youtube" in domain or "google" in domain]
+    return {
+        "rows": rows,
+        "domains": sorted(youtube_domains),
+        "has_login_cookies": has_login_cookies,
+        "has_strong_login_cookies": has_strong_login_cookies,
+        "found_strong_login_cookies": found_strong_login_cookies,
+        "missing_strong_login_cookies": missing_strong_login_cookies,
+        "missing_warning": not has_strong_login_cookies,
+    }
+
+
+def read_cookie_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+
+def write_cookie_file(path: str, cookies: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(cookies.rstrip() + "\n")
+
+
+def restore_complete_cookies_from_backup() -> bool:
+    if not os.path.exists(PROJECT_COOKIES_BACKUP_PATH):
+        return False
+    backup_cookies = normalize_youtube_cookies(read_cookie_file(PROJECT_COOKIES_BACKUP_PATH))
+    backup_info = inspect_youtube_cookies(backup_cookies)
+    if backup_info.get("missing_warning"):
+        return False
+    current_info = {"missing_warning": True}
+    if os.path.exists(PROJECT_COOKIES_PATH):
+        current_info = inspect_youtube_cookies(read_cookie_file(PROJECT_COOKIES_PATH))
+    if current_info.get("missing_warning"):
+        write_cookie_file(PROJECT_COOKIES_PATH, backup_cookies)
+        os.environ["YOUTUBE_COOKIES_PATH"] = PROJECT_COOKIES_PATH
+        return True
+    return False
+
+
+def verify_youtube_cookies_for_url(url: str, cookies_path: str) -> Dict:
+    if not cookies_path or not os.path.exists(cookies_path):
+        return {"ok": False, "message": "YouTube cookies file is not configured."}
+
+    verify_url = (url or "https://www.youtube.com/watch?v=dQw4w9WgXcQ").strip()
+    runtime_cookies_path = cookies_path
+    runtime_dir = None
+    try:
+        runtime_dir = tempfile.mkdtemp(prefix="openshorts_ytdlp_verify_")
+        runtime_cookies_path = os.path.join(runtime_dir, "youtube_cookies.runtime.txt")
+        shutil.copyfile(cookies_path, runtime_cookies_path)
+    except Exception:
+        runtime_cookies_path = cookies_path
+
+    js_runtimes = {}
+    for runtime_name in ("node", "bun", "deno"):
+        if shutil.which(runtime_name):
+            js_runtimes[runtime_name] = {}
+            break
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "cookiefile": runtime_cookies_path,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "nocheckcertificate": True,
+        "cachedir": False,
+        "js_runtimes": js_runtimes,
+        "remote_components": ["ejs:github"],
+        "extractor_args": {"youtube": {"player_client": ["web"]}},
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(verify_url, download=False)
+        formats = info.get("formats") or []
+        video_formats = [fmt for fmt in formats if fmt.get("vcodec") and fmt.get("vcodec") != "none"]
+        if not video_formats:
+            return {
+                "ok": False,
+                "message": "Cookies reached YouTube, but no downloadable video formats were returned.",
+                "title": info.get("title"),
+                "duration": info.get("duration"),
+            }
+        return {
+            "ok": True,
+            "message": "YouTube cookies are valid for yt-dlp video extraction.",
+            "title": info.get("title"),
+            "duration": info.get("duration"),
+            "format_count": len(video_formats),
+        }
+    except Exception as exc:
+        error_text = str(exc)
+        if "Sign in to confirm" in error_text or "not a bot" in error_text or "cookies" in error_text.lower():
+            message = "YouTube cookies appear invalid or expired; YouTube still asks for login/bot verification."
+        elif "Requested format is not available" in error_text or "no downloadable video formats" in error_text:
+            message = "YouTube responded, but yt-dlp could not find a downloadable video format."
+        else:
+            message = "YouTube cookies verification failed."
+        return {"ok": False, "message": message, "error": error_text[:800]}
+
+
+@app.get("/api/settings/youtube-cookies")
+async def get_youtube_cookies_status():
+    exists = os.path.exists(PROJECT_COOKIES_PATH)
+    if not exists:
+        restored = restore_complete_cookies_from_backup()
+        if not restored:
+            return {"configured": False, "size": 0}
+    else:
+        restore_complete_cookies_from_backup()
+    with open(PROJECT_COOKIES_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        info = inspect_youtube_cookies(f.read())
+    return {
+        "configured": True,
+        "size": os.path.getsize(PROJECT_COOKIES_PATH),
+        **info,
+    }
+
+@app.post("/api/settings/youtube-cookies")
+async def save_youtube_cookies(req: YouTubeCookiesRequest):
+    cookies = normalize_youtube_cookies(req.cookies or "")
+    if not cookies:
+        raise HTTPException(status_code=400, detail="Missing YouTube cookies")
+    if "youtube.com" not in cookies and "youtube" not in cookies.lower():
+        raise HTTPException(status_code=400, detail="Invalid YouTube cookies format")
+    info = inspect_youtube_cookies(cookies)
+    if info["rows"] == 0:
+        raise HTTPException(status_code=400, detail="Invalid Netscape cookies format")
+    existing_info = None
+    if os.path.exists(PROJECT_COOKIES_PATH):
+        with open(PROJECT_COOKIES_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            existing_info = inspect_youtube_cookies(f.read())
+    if info.get("missing_warning"):
+        if existing_info and not existing_info.get("missing_warning"):
+            raise HTTPException(status_code=400, detail="拒绝覆盖当前完整 cookies：你这次上传/粘贴的 cookies 缺少 SID / SAPISID / LOGIN_INFO 等关键字段，仍保留原来的完整 cookies。")
+        raise HTTPException(status_code=400, detail="当前 cookies 不是完整登录 cookies：缺少 SID / SAPISID / LOGIN_INFO 等关键字段。请用隐身窗口登录 YouTube 后重新导出 cookies，或粘贴包含这些字段的完整 cookies。")
+    write_cookie_file(PROJECT_COOKIES_PATH, cookies)
+    write_cookie_file(PROJECT_COOKIES_BACKUP_PATH, cookies)
+    os.environ["YOUTUBE_COOKIES_PATH"] = PROJECT_COOKIES_PATH
+    return {"configured": True, "size": os.path.getsize(PROJECT_COOKIES_PATH), **info}
+
+@app.post("/api/settings/youtube-cookies/verify")
+async def verify_youtube_cookies(req: YouTubeCookiesVerifyRequest):
+    restore_complete_cookies_from_backup()
+    if not os.path.exists(PROJECT_COOKIES_PATH):
+        raise HTTPException(status_code=400, detail="YouTube cookies are not configured")
+    result = verify_youtube_cookies_for_url(req.url or "https://www.youtube.com/watch?v=dQw4w9WgXcQ", PROJECT_COOKIES_PATH)
+    status_code = 200 if result.get("ok") else 400
+    if not result.get("ok"):
+        raise HTTPException(status_code=status_code, detail=result)
+    return result
+
+@app.post("/api/commentary/voice-preview")
+async def commentary_voice_preview(req: CommentaryVoicePreviewRequest):
+    voice = (req.edge_voice or "").strip()
+    if not voice:
+        raise HTTPException(status_code=400, detail="Missing Edge voice")
+    text = (req.text or COMMENTARY_VOICE_PREVIEW_TEXT.get(req.language, COMMENTARY_VOICE_PREVIEW_TEXT["zh"])).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing preview text")
+
+    preview_id = str(uuid.uuid4())
+    preview_dir = os.path.abspath(os.path.join(OUTPUT_DIR, "voice_previews"))
+    os.makedirs(preview_dir, exist_ok=True)
+    preview_path = os.path.join(preview_dir, f"{preview_id}.mp3")
+
+    try:
+        await asyncio.to_thread(generate_edge_voiceover, text[:180], preview_path, voice)
+        return FileResponse(preview_path, media_type="audio/mpeg", filename="voice-preview.mp3")
+    except Exception as e:
+        if os.path.exists(preview_path):
+            os.remove(preview_path)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/commentary/generate")
+async def commentary_generate(
+    request: Request,
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER),
+    x_openai_compatible_key: Optional[str] = Header(None, alias=OPENAI_COMPAT_KEY_HEADER),
+    x_openai_compatible_base_url: Optional[str] = Header(None, alias=OPENAI_COMPAT_BASE_URL_HEADER),
+    x_openai_compatible_model: Optional[str] = Header(None, alias=OPENAI_COMPAT_MODEL_HEADER),
+):
+    gemini_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    elevenlabs_key = x_elevenlabs_key or os.environ.get("ELEVENLABS_API_KEY")
+    gemini_base_url = get_gemini_base_url(header_value=x_gemini_base_url)
+    upload_file = None
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload_file = form.get("file")
+        req = commentary_request_from_form(form)
+        gemini_pool = parse_gemini_pool_config(headers=dict(request.headers), form=form)
+    else:
+        body = await request.json()
+        req = CommentaryRequest(**body)
+        gemini_pool = parse_gemini_pool_config(headers=dict(request.headers), body=body)
+
+    has_upload = bool(upload_file and getattr(upload_file, "filename", None))
+    if not req.url.strip() and not has_upload:
+        raise HTTPException(status_code=400, detail="Missing YouTube URL or uploaded video")
+    effective_gemini_pool = gemini_pool if gemini_pool.keys else None
+    analysis_mode = (req.analysis_mode or DEFAULT_ANALYSIS_MODE).strip().lower()
+    if analysis_mode not in {"current", "video", "openai"}:
+        raise HTTPException(status_code=400, detail="Unsupported commentary analysis mode")
+    openai_config = resolve_openai_compat_config(
+        header_key=x_openai_compatible_key,
+        header_base_url=x_openai_compatible_base_url,
+        header_model=x_openai_compatible_model,
+        request_model=req.openai_model,
+    )
+    if analysis_mode == "openai":
+        if not openai_config["api_key"]:
+            raise HTTPException(status_code=400, detail="Missing OpenAI-compatible API Key")
+        if not openai_config["base_url"]:
+            raise HTTPException(status_code=400, detail="Missing OpenAI-compatible Base URL")
+        if not openai_config["model"]:
+            raise HTTPException(status_code=400, detail="Missing OpenAI-compatible model")
+        req.openai_model = openai_config["model"]
+        apply_openai_sampling_options_to_request(req)
+    elif not gemini_key and not gemini_pool.keys:
+        raise HTTPException(status_code=400, detail="Missing Gemini API Key")
+    tts_provider = (req.tts_provider or "edge").lower()
+    if tts_provider not in {"edge", "elevenlabs"}:
+        raise HTTPException(status_code=400, detail="Unsupported TTS provider")
+    if tts_provider == "elevenlabs" and not elevenlabs_key:
+        raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+
+    job_id = str(uuid.uuid4())
+    job_output_dir = commentary_job_dir(job_id)
+    os.makedirs(job_output_dir, exist_ok=True)
+    created_at = now_iso()
+    commentary_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "processing",
+        "stage": "upload" if has_upload else "queued",
+        "stage_label": "上传原视频" if has_upload else "等待开始",
+        "stage_progress": 0 if has_upload else None,
+        "logs": ["Queued commentary remix job..."],
+        "created_at": created_at,
+        "updated_at": created_at,
+        "request": commentary_request_to_dict(req),
+        "source_type": "file" if has_upload else "url",
+        "source_value": req.url.strip(),
+        "source_path": None,
+        "source_filename": getattr(upload_file, "filename", None) if has_upload else None,
+        "analysis_video_path": None,
+        "analysis_video_filename": None,
+        "result": None,
+        "error": None,
+        "gemini_events": [],
+    }
+    save_commentary_task(job_id)
+
+    def log(message: str):
+        commentary_jobs[job_id]["logs"].append(message)
+        update_commentary_stage(job_id, message)
+        save_commentary_task(job_id)
+
+    def upload_log(stage: str, message: str, percent=None):
+        commentary_jobs[job_id]["stage"] = stage
+        commentary_jobs[job_id]["stage_label"] = "上传原视频"
+        commentary_jobs[job_id]["stage_progress"] = percent
+        commentary_jobs[job_id]["logs"].append(message)
+        save_commentary_task(job_id)
+
+    def checkpoint(fields: Dict):
+        commentary_jobs[job_id].update(fields)
+        save_commentary_task(job_id)
+
+    input_path = None
+    source_type = "url"
+    source_value = req.url.strip()
+    try:
+        if has_upload:
+            input_path = await save_commentary_upload(upload_file, job_id, progress=upload_log)
+            source_type = "file"
+            source_value = input_path
+            checkpoint({
+                "source_value": source_value,
+                "source_path": source_value,
+                "source_filename": os.path.basename(source_value),
+            })
+    except HTTPException as e:
+        commentary_jobs[job_id]["logs"].append(f"Error: {e.detail}")
+        commentary_jobs[job_id]["stage"] = "failed"
+        commentary_jobs[job_id]["stage_label"] = "生成失败"
+        commentary_jobs[job_id]["stage_progress"] = None
+        commentary_jobs[job_id]["status"] = "failed"
+        commentary_jobs[job_id]["error"] = str(e.detail)
+        save_commentary_task(job_id)
+        raise
+    except Exception as e:
+        error_text = f"Failed to save uploaded video: {e}"
+        commentary_jobs[job_id]["logs"].append(f"Error: {error_text}")
+        commentary_jobs[job_id]["stage"] = "failed"
+        commentary_jobs[job_id]["stage_label"] = "生成失败"
+        commentary_jobs[job_id]["stage_progress"] = None
+        commentary_jobs[job_id]["status"] = "failed"
+        commentary_jobs[job_id]["error"] = error_text
+        save_commentary_task(job_id)
+        raise HTTPException(status_code=500, detail=error_text)
+    finally:
+        if has_upload:
+            await upload_file.close()
+
+    def run_job():
+        try:
+            result = generate_commentary_video(
+                source=source_value,
+                source_type=source_type,
+                output_dir=job_output_dir,
+                gemini_key=gemini_key or "",
+                gemini_pool=effective_gemini_pool,
+                elevenlabs_key=elevenlabs_key,
+                tts_provider=tts_provider,
+                voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
+                edge_voice=req.edge_voice,
+                language=req.language,
+                style=req.style,
+                target_duration=req.target_duration,
+                original_audio_volume=req.original_audio_volume,
+                pause_original_audio_volume=req.pause_original_audio_volume,
+                subtitles=req.subtitles,
+                vertical=req.vertical,
+                aspect_mode=req.aspect_mode,
+                source_language=req.source_language,
+                gemini_base_url=gemini_base_url,
+                analysis_mode=analysis_mode,
+                gemini_model=req.gemini_model,
+                openai_key=openai_config["api_key"],
+                openai_base_url=openai_config["base_url"],
+                openai_model=openai_config["model"],
+                openai_frame_interval_seconds=req.openai_frame_interval_seconds,
+                openai_max_frames=req.openai_max_frames,
+                openai_scene_max_keyframes=req.openai_scene_max_keyframes,
+                openai_batch_size=req.openai_batch_size,
+                openai_visual_concurrency=req.openai_visual_concurrency,
+                progress=log,
+                checkpoint=checkpoint,
+            )
+            commentary_jobs[job_id]["result"] = result
+            commentary_jobs[job_id]["gemini_events"] = result.get("gemini_events", [])
+            commentary_jobs[job_id]["stage"] = "done"
+            commentary_jobs[job_id]["stage_label"] = "生成完成"
+            commentary_jobs[job_id]["stage_progress"] = 100
+            commentary_jobs[job_id]["status"] = "completed"
+            commentary_jobs[job_id]["error"] = None
+            save_commentary_task(job_id)
+        except Exception as e:
+            error_text = str(e)
+            commentary_jobs[job_id]["logs"].append(f"Error: {error_text}")
+            commentary_jobs[job_id]["gemini_events"] = effective_gemini_pool.event_dicts() if effective_gemini_pool else []
+            commentary_jobs[job_id]["stage"] = "failed"
+            commentary_jobs[job_id]["stage_label"] = "生成失败"
+            commentary_jobs[job_id]["stage_progress"] = None
+            commentary_jobs[job_id]["status"] = "failed"
+            commentary_jobs[job_id]["error"] = error_text
+            save_commentary_task(job_id)
+
+    threading.Thread(target=run_job, daemon=True).start()
+    return {"job_id": job_id, "status": "processing"}
+
+@app.get("/api/commentary/jobs")
+async def commentary_job_list():
+    return {"jobs": list_commentary_tasks()}
+
+
+@app.post("/api/commentary/jobs/{job_id}/retry")
+async def commentary_retry(
+    job_id: str,
+    request: Request,
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER),
+    x_openai_compatible_key: Optional[str] = Header(None, alias=OPENAI_COMPAT_KEY_HEADER),
+    x_openai_compatible_base_url: Optional[str] = Header(None, alias=OPENAI_COMPAT_BASE_URL_HEADER),
+    x_openai_compatible_model: Optional[str] = Header(None, alias=OPENAI_COMPAT_MODEL_HEADER),
+):
+    job = commentary_jobs.get(job_id) or load_commentary_task(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Commentary job not found")
+    if job.get("status") == "processing":
+        raise HTTPException(status_code=409, detail="Commentary job is already processing")
+
+    body = {}
+    if "application/json" in request.headers.get("content-type", ""):
+        try:
+            parsed_body = await request.json()
+            body = parsed_body if isinstance(parsed_body, dict) else {}
+        except Exception:
+            body = {}
+    gemini_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    elevenlabs_key = x_elevenlabs_key or os.environ.get("ELEVENLABS_API_KEY")
+    gemini_base_url = get_gemini_base_url(header_value=x_gemini_base_url)
+    gemini_pool = parse_gemini_pool_config(headers=dict(request.headers), body=body)
+
+    request_data = job.get("request") or {}
+    if not request_data:
+        request_data = {"url": job.get("source_value") or ""}
+    req = CommentaryRequest(**request_data)
+    effective_gemini_pool = gemini_pool if gemini_pool.keys else None
+    analysis_mode = (req.analysis_mode or DEFAULT_ANALYSIS_MODE).strip().lower()
+    if analysis_mode not in {"current", "video", "openai"}:
+        raise HTTPException(status_code=400, detail="Unsupported commentary analysis mode")
+    openai_config = resolve_openai_compat_config(
+        header_key=x_openai_compatible_key,
+        header_base_url=x_openai_compatible_base_url,
+        header_model=x_openai_compatible_model,
+        request_model=req.openai_model,
+    )
+    has_cached_script = bool(job.get("script_path") and os.path.exists(job.get("script_path")))
+    if analysis_mode == "openai":
+        if not has_cached_script:
+            if not openai_config["api_key"]:
+                raise HTTPException(status_code=400, detail="Missing OpenAI-compatible API Key")
+            if not openai_config["base_url"]:
+                raise HTTPException(status_code=400, detail="Missing OpenAI-compatible Base URL")
+            if not openai_config["model"]:
+                raise HTTPException(status_code=400, detail="Missing OpenAI-compatible model")
+        if openai_config["model"]:
+            req.openai_model = openai_config["model"]
+        apply_openai_sampling_options_to_request(req)
+        job["request"] = commentary_request_to_dict(req)
+    elif not gemini_key and not gemini_pool.keys:
+        raise HTTPException(status_code=400, detail="Missing Gemini API Key")
+    tts_provider = (req.tts_provider or "edge").lower()
+    if tts_provider == "elevenlabs" and not elevenlabs_key:
+        raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+
+    source_path = job.get("source_path")
+    if source_path and not os.path.exists(source_path):
+        source_path = None
+    if source_path:
+        source_type = "file"
+        source_value = source_path
+    elif job.get("source_type") == "url" and (job.get("source_value") or req.url):
+        source_type = "url"
+        source_value = job.get("source_value") or req.url
+    else:
+        raise HTTPException(status_code=400, detail="Missing reusable source video for retry")
+
+    job_output_dir = commentary_job_dir(job_id)
+    os.makedirs(job_output_dir, exist_ok=True)
+    previous_error = job.get("error") or ""
+    job.update({
+        "status": "processing",
+        "stage": "queued",
+        "stage_label": "准备重试",
+        "stage_progress": None,
+        "result": None,
+        "error": None,
+    })
+    job.setdefault("logs", []).append("Retrying commentary remix from saved task checkpoints...")
+    save_commentary_task(job_id)
+
+    def log(message: str):
+        commentary_jobs[job_id]["logs"].append(message)
+        update_commentary_stage(job_id, message)
+        save_commentary_task(job_id)
+
+    def checkpoint(fields: Dict):
+        commentary_jobs[job_id].update(fields)
+        save_commentary_task(job_id)
+
+    gemini_file = None
+    if job.get("gemini_file_uri"):
+        gemini_file = {
+            "uri": job.get("gemini_file_uri"),
+            "name": job.get("gemini_file_name"),
+            "mime_type": job.get("gemini_file_mime_type") or "video/mp4",
+        }
+
+    prepared_analysis_video_path = job.get("analysis_video_path")
+    if prepared_analysis_video_path and not os.path.exists(prepared_analysis_video_path):
+        prepared_analysis_video_path = None
+
+    def run_retry_job():
+        try:
+            result = generate_commentary_video(
+                source=source_value,
+                source_type=source_type,
+                output_dir=job_output_dir,
+                gemini_key=gemini_key or "",
+                gemini_pool=effective_gemini_pool,
+                elevenlabs_key=elevenlabs_key,
+                tts_provider=tts_provider,
+                voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
+                edge_voice=req.edge_voice,
+                language=req.language,
+                style=req.style,
+                target_duration=req.target_duration,
+                original_audio_volume=req.original_audio_volume,
+                pause_original_audio_volume=req.pause_original_audio_volume,
+                subtitles=req.subtitles,
+                vertical=req.vertical,
+                aspect_mode=req.aspect_mode,
+                source_language=req.source_language,
+                gemini_base_url=gemini_base_url,
+                analysis_mode=analysis_mode,
+                gemini_model=req.gemini_model,
+                openai_key=openai_config["api_key"],
+                openai_base_url=openai_config["base_url"],
+                openai_model=openai_config["model"],
+                openai_frame_interval_seconds=req.openai_frame_interval_seconds,
+                openai_max_frames=req.openai_max_frames,
+                openai_scene_max_keyframes=req.openai_scene_max_keyframes,
+                openai_batch_size=req.openai_batch_size,
+                openai_visual_concurrency=req.openai_visual_concurrency,
+                progress=log,
+                checkpoint=checkpoint,
+                prepared_analysis_video_path=prepared_analysis_video_path,
+                gemini_file=gemini_file,
+                previous_error=previous_error,
+            )
+            commentary_jobs[job_id]["result"] = result
+            commentary_jobs[job_id]["gemini_events"] = result.get("gemini_events", [])
+            commentary_jobs[job_id]["stage"] = "done"
+            commentary_jobs[job_id]["stage_label"] = "生成完成"
+            commentary_jobs[job_id]["stage_progress"] = 100
+            commentary_jobs[job_id]["status"] = "completed"
+            commentary_jobs[job_id]["error"] = None
+            save_commentary_task(job_id)
+        except Exception as e:
+            error_text = str(e)
+            commentary_jobs[job_id]["logs"].append(f"Error: {error_text}")
+            commentary_jobs[job_id]["gemini_events"] = effective_gemini_pool.event_dicts() if effective_gemini_pool else []
+            commentary_jobs[job_id]["stage"] = "failed"
+            commentary_jobs[job_id]["stage_label"] = "生成失败"
+            commentary_jobs[job_id]["stage_progress"] = None
+            commentary_jobs[job_id]["status"] = "failed"
+            commentary_jobs[job_id]["error"] = error_text
+            save_commentary_task(job_id)
+
+    threading.Thread(target=run_retry_job, daemon=True).start()
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/commentary/status/{job_id}")
+async def commentary_status(job_id: str):
+    job = commentary_jobs.get(job_id) or load_commentary_task(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Commentary job not found")
+    return job
 
 class EditRequest(BaseModel):
     job_id: str
@@ -398,11 +1360,18 @@ class EditRequest(BaseModel):
 
 @app.post("/api/edit")
 async def edit_clip(
+    request: Request,
     req: EditRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     # Determine API Key
-    final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    final_api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=req.api_key or x_gemini_key,
+        header_base_url=x_gemini_base_url,
+        body=req.dict(),
+    )
     
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
@@ -437,7 +1406,7 @@ async def edit_clip(
         # Run editing in a thread to avoid blocking main loop
         # Since VideoEditor uses blocking calls (subprocess, API wait)
         def run_edit():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
             
             # SAFE FILE RENAMING STRATEGY (Avoid UnicodeEncodeError in Docker)
             # Create a safe ASCII filename in the same directory
@@ -614,11 +1583,18 @@ class EffectsGenerateRequest(BaseModel):
 
 @app.post("/api/effects/generate")
 async def generate_effects_config(
+    request: Request,
     req: EffectsGenerateRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     """Generate structured EffectsConfig JSON for Remotion rendering via Gemini AI."""
-    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    final_api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+        body=req.dict(),
+    )
 
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header)")
@@ -644,7 +1620,7 @@ async def generate_effects_config(
             raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
         def run_effects_generation():
-            editor = VideoEditor(api_key=final_api_key)
+            editor = VideoEditor(api_key=final_api_key, base_url=gemini_base_url)
 
             # Create safe ASCII filename to avoid encoding issues
             safe_filename = f"temp_effects_{req.job_id}.mp4"
@@ -1241,10 +2217,15 @@ async def thumbnail_analyze(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     """Analyze a video and suggest viral YouTube titles."""
-    api_key = x_gemini_key
+    api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+    )
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
@@ -1288,7 +2269,7 @@ async def thumbnail_analyze(
     try:
         # Run analysis in thread pool (skips Whisper if pre_transcript is available)
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, analyze_video_for_titles, api_key, video_path, pre_transcript)
+        result = await loop.run_in_executor(None, analyze_video_for_titles, api_key, video_path, pre_transcript, gemini_base_url)
 
         # Store/update session context
         if session_id not in thumbnail_sessions:
@@ -1324,11 +2305,18 @@ class ThumbnailTitlesRequest(BaseModel):
 
 @app.post("/api/thumbnail/titles")
 async def thumbnail_titles(
+    request: Request,
     req: ThumbnailTitlesRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     """Refine title suggestions or accept a manual title."""
-    api_key = x_gemini_key
+    api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+        body=req.dict(),
+    )
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
@@ -1364,7 +2352,8 @@ async def thumbnail_titles(
             api_key,
             session["context"],
             req.message,
-            session["conversation"]
+            session["conversation"],
+            gemini_base_url
         )
 
         new_titles = result.get("titles", [])
@@ -1387,10 +2376,15 @@ async def thumbnail_generate(
     count: int = Form(3),
     face: Optional[UploadFile] = File(None),
     background: Optional[UploadFile] = File(None),
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     """Generate YouTube thumbnails with Gemini image generation."""
-    api_key = x_gemini_key
+    api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+    )
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
@@ -1431,7 +2425,8 @@ async def thumbnail_generate(
             bg_path,
             extra_prompt,
             count,
-            video_context
+            video_context,
+            gemini_base_url
         )
 
         if not thumbnails:
@@ -1452,11 +2447,18 @@ class ThumbnailDescribeRequest(BaseModel):
 
 @app.post("/api/thumbnail/describe")
 async def thumbnail_describe(
+    request: Request,
     req: ThumbnailDescribeRequest,
-    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER)
 ):
     """Generate a YouTube description with chapters from the transcript."""
-    api_key = x_gemini_key
+    api_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+        body=req.dict(),
+    )
     if not api_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
@@ -1477,7 +2479,8 @@ async def thumbnail_describe(
             req.title,
             segments,
             session.get("language", "en"),
-            session.get("video_duration", 0)
+            session.get("video_duration", 0),
+            gemini_base_url
         )
         return {"description": result.get("description", "")}
 
@@ -1637,11 +2640,18 @@ class SaaSAnalyzeRequest(BaseModel):
 
 @app.post("/api/saasshorts/analyze")
 async def saasshorts_analyze(
+    request: Request,
     req: SaaSAnalyzeRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER),
 ):
     """Analyze a URL or manual description and generate video scripts."""
-    gemini_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    gemini_key, gemini_base_url, _gemini_pool = resolve_gemini_access(
+        request,
+        header_key=x_gemini_key,
+        header_base_url=x_gemini_base_url,
+        body=req.dict(),
+    )
     if not gemini_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key")
 
@@ -1657,8 +2667,8 @@ async def saasshorts_analyze(
             if req.url and req.url.strip():
                 # URL provided: full scrape + research pipeline
                 scraped = scrape_website(req.url)
-                web_research = research_saas_online(req.url, gemini_key)
-                analysis = analyze_saas(scraped, gemini_key, web_research=web_research)
+                web_research = research_saas_online(req.url, gemini_key, gemini_base_url)
+                analysis = analyze_saas(scraped, gemini_key, web_research=web_research, base_url=gemini_base_url)
             else:
                 # Manual description: build analysis from description
                 analysis = {
@@ -1671,7 +2681,7 @@ async def saasshorts_analyze(
                     "tone": "casual and authentic",
                 }
 
-            scripts = generate_scripts(analysis, gemini_key, req.num_scripts, req.style, req.language, req.actor_gender)
+            scripts = generate_scripts(analysis, gemini_key, req.num_scripts, req.style, req.language, req.actor_gender, gemini_base_url)
             return {
                 "analysis": analysis,
                 "scripts": scripts,

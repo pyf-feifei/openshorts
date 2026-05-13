@@ -3,12 +3,12 @@ import json
 import re
 import subprocess
 import time
-from google import genai
 from google.genai import types
+from gemini_client import create_gemini_client
 
 class VideoEditor:
-    def __init__(self, api_key):
-        self.client = genai.Client(api_key=api_key)
+    def __init__(self, api_key, base_url=None):
+        self.client = create_gemini_client(api_key, base_url)
         self.model_name = "gemini-3-flash-preview" 
 
     def upload_video(self, video_path):

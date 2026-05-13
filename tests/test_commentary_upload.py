@@ -1,0 +1,192 @@
+import os
+import json
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from fastapi.testclient import TestClient
+
+import app
+
+
+class ImmediateThread:
+    def __init__(self, target, daemon=False):
+        self.target = target
+        self.daemon = daemon
+
+    def start(self):
+        self.target()
+
+
+class CommentaryUploadTests(unittest.TestCase):
+    def test_commentary_generate_accepts_uploaded_video_file(self):
+        with tempfile.TemporaryDirectory() as uploads_dir, \
+            tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "UPLOAD_DIR", uploads_dir), \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "final.mp4"),
+                "video_url": "/videos/job/final.mp4",
+                "title": "Uploaded Commentary",
+            }) as generate:
+
+            app.commentary_jobs.clear()
+            client = TestClient(app.app)
+            response = client.post(
+                "/api/commentary/generate",
+                headers={"X-Gemini-Key": "gemini-key"},
+                data={
+                    "language": "zh",
+                    "style": "documentary",
+                    "target_duration": "medium",
+                    "analysis_mode": "video",
+                    "tts_provider": "edge",
+                    "original_audio_volume": "0.12",
+                    "pause_original_audio_volume": "0.7",
+                    "subtitles": "true",
+                    "aspect_mode": "auto",
+                },
+                files={"file": ("demo.mp4", b"fake-video", "video/mp4")},
+            )
+            job_id = response.json()["job_id"]
+            task_path = os.path.join(output_dir, job_id, "commentary_task.json")
+            with open(task_path, "r", encoding="utf-8") as f:
+                task_data = json.load(f)
+
+        self.assertEqual(200, response.status_code, response.text)
+        kwargs = generate.call_args.kwargs
+        self.assertEqual("file", kwargs["source_type"])
+        self.assertTrue(kwargs["source"].endswith("demo.mp4"))
+        self.assertEqual("video", kwargs["analysis_mode"])
+        self.assertEqual(0.12, kwargs["original_audio_volume"])
+        self.assertEqual(0.7, kwargs["pause_original_audio_volume"])
+        self.assertTrue(os.path.basename(kwargs["source"]).startswith(job_id))
+        self.assertEqual("completed", task_data["status"])
+        self.assertEqual(job_id, task_data["job_id"])
+        self.assertTrue(task_data["source_path"].endswith("demo.mp4"))
+
+    def test_commentary_status_loads_persisted_task_after_memory_clear(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir):
+            job_id = "persisted-job"
+            os.makedirs(os.path.join(output_dir, job_id))
+            with open(os.path.join(output_dir, job_id, "commentary_task.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stage": "failed",
+                    "stage_label": "生成失败",
+                    "logs": ["saved failure"],
+                    "error": "saved error",
+                }, f)
+            app.commentary_jobs.clear()
+
+            client = TestClient(app.app)
+            response = client.get(f"/api/commentary/status/{job_id}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("failed", response.json()["status"])
+        self.assertEqual(["saved failure"], response.json()["logs"])
+
+    def test_commentary_retry_reuses_saved_source_and_analysis_artifacts(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "retry", "final.mp4"),
+                "video_url": "/videos/retry/final.mp4",
+                "title": "Retried Commentary",
+            }) as generate:
+            job_id = "retry"
+            job_dir = os.path.join(output_dir, job_id)
+            os.makedirs(job_dir)
+            source_path = os.path.join(job_dir, "source.mp4")
+            analysis_path = os.path.join(job_dir, "source_gemini_360p.mp4")
+            open(source_path, "wb").close()
+            open(analysis_path, "wb").close()
+            with open(os.path.join(job_dir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stage": "failed",
+                    "logs": ["Error: old failure"],
+                    "error": "Gemini narration_blocks do not cover enough",
+                    "request": {
+                        "url": "",
+                        "language": "zh",
+                        "style": "funny",
+                        "target_duration": "full",
+                        "analysis_mode": "video",
+                        "tts_provider": "edge",
+                        "subtitles": True,
+                        "aspect_mode": "auto",
+                    },
+                    "source_type": "file",
+                    "source_path": source_path,
+                    "source_value": source_path,
+                    "analysis_video_path": analysis_path,
+                    "gemini_file_uri": "https://files.example/video-1",
+                    "gemini_file_name": "files/video-1",
+                    "gemini_file_mime_type": "video/mp4",
+                }, f)
+            app.commentary_jobs.clear()
+
+            client = TestClient(app.app)
+            response = client.post(f"/api/commentary/jobs/{job_id}/retry", headers={"X-Gemini-Key": "gemini-key"})
+
+        self.assertEqual(200, response.status_code, response.text)
+        kwargs = generate.call_args.kwargs
+        self.assertEqual(source_path, kwargs["source"])
+        self.assertEqual("file", kwargs["source_type"])
+        self.assertEqual(analysis_path, kwargs["prepared_analysis_video_path"])
+        self.assertEqual(0.6, kwargs["pause_original_audio_volume"])
+        self.assertEqual("https://files.example/video-1", kwargs["gemini_file"]["uri"])
+        self.assertIn("narration_blocks", kwargs["previous_error"])
+
+    def test_commentary_generate_accepts_official_gemini_pool(self):
+        pool_config = {
+            "mode": "official_pool",
+            "keys": ["key-one", "key-two"],
+            "stats": {"key-...-one": {"state": "healthy"}},
+        }
+        with tempfile.TemporaryDirectory() as uploads_dir, \
+            tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "UPLOAD_DIR", uploads_dir), \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "final.mp4"),
+                "video_url": "/videos/job/final.mp4",
+                "title": "Uploaded Commentary",
+            }) as generate:
+
+            app.commentary_jobs.clear()
+            client = TestClient(app.app)
+            response = client.post(
+                "/api/commentary/generate",
+                data={
+                    "gemini_pool": json.dumps(pool_config),
+                    "language": "zh",
+                    "style": "documentary",
+                    "target_duration": "medium",
+                    "analysis_mode": "video",
+                    "tts_provider": "edge",
+                    "subtitles": "true",
+                    "aspect_mode": "auto",
+                },
+                files={"file": ("demo.mp4", b"fake-video", "video/mp4")},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        pool = generate.call_args.kwargs["gemini_pool"]
+        self.assertEqual("official_pool", pool.mode)
+        self.assertEqual(["key-one", "key-two"], pool.keys)
+        self.assertEqual("", generate.call_args.kwargs["gemini_key"])
+
+
+if __name__ == "__main__":
+    unittest.main()

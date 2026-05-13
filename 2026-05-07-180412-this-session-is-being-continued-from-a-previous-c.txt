@@ -1,0 +1,594 @@
+ ▐▛███▜▌   Claude Code v2.1.129
+▝▜█████▛▘  gpt-5.5 · API Usage Billing
+  ▘▘ ▝▝    /mnt/c/Apps/a-tools/skills/openshorts
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Referenced file app.py
+  ⎿  Referenced file commentary.py
+  ⎿  Referenced file dashboard/src/components/CommentaryTab.jsx
+  ⎿  Read dashboard/src/components/commentaryDefaults.test.js (39 lines)
+  ⎿  Plan file referenced (~/.claude/plans/linear-waddling-river.md)
+
+● 我会把“尽量完整”改成有上限的较完整长剪辑目标，并同步更新提示词、校验逻辑和测试
+  。
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● 我已经定位到原因：full 模式现在把目标时长设成原片
+  100%，所以后面会按所有同步块拼出接近原片长度的视频。
+
+  Read 2 files (ctrl+o to expand)
+
+● 我会更新现有 full-mode 单测里“接近原片全长”的预期，改成验证 1
+  小时视频会被控制在较完整但明显更短的长剪辑范围内。
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● 为了避免新的 Gemini 回复继续选择整段原片，我还会把失败提示从“覆盖原时间线”改成
+  “覆盖约目标时长的精选时间线”。
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+● Update(commentary.py)
+  ⎿  Added 3 lines, removed 3 lines
+      39  GEMINI_FILE_PROCESSING_POLL_SECONDS = max(1, int(os.environ.get
+          ("OPENSHORTS_GEMINI_FILE_PROCESSING_POLL_SECONDS", "2")))
+      40  DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+      41  DEFAULT_EDGE_VOICE = "zh-CN-XiaoxiaoNeural"
+      42 -FULL_MODE_MIN_VISUAL_SECONDS = 600.0                           
+      43 -FULL_MODE_MAX_VISUAL_SECONDS = 6 * 60 * 60.0                   
+      44 -FULL_MODE_SOURCE_FRACTION = 1.0                                
+      42 +FULL_MODE_MIN_VISUAL_SECONDS = float(os.environ.get("OPENSHORTS
+         +_FULL_MODE_MIN_VISUAL_SECONDS", "600"))                        
+      43 +FULL_MODE_MAX_VISUAL_SECONDS = float(os.environ.get("OPENSHORTS
+         +_FULL_MODE_MAX_VISUAL_SECONDS", "1800"))                       
+      44 +FULL_MODE_SOURCE_FRACTION = float(os.environ.get("OPENSHORTS_FU
+         +LL_MODE_SOURCE_FRACTION", "0.30"))                             
+      45  FULL_MODE_MAX_NARRATION_CHARS_ZH = int(os.environ.get("OPENSHOR
+          TS_FULL_MODE_MAX_NARRATION_CHARS_ZH", "22000"))
+      46  FULL_MODE_MAX_NARRATION_CHARS_OTHER = int(os.environ.get("OPENS
+          HORTS_FULL_MODE_MAX_NARRATION_CHARS_OTHER", "32000"))
+      47  FULL_MODE_MAX_VOICEOVER_DURATION_RATIO = float(os.environ.get("
+          OPENSHORTS_FULL_MODE_MAX_VOICEOVER_DURATION_RATIO", "1.15"))
+
+● Update(commentary.py)
+  ⎿  Added 3 lines, removed 3 lines
+      254          return "Select enough important visual moments for a 3
+           -5 minute commentary edit, but remove repetitive or low-value 
+           parts."
+      255      full_target = _target_visual_duration_seconds(source_durat
+           ion, "full")
+      256      return (
+      257 -        "Create a near-complete commentary edit for long sourc
+          -es, preserving the source timeline unless a section is truly u
+          -nusable. "                                                    
+      258 -        f"For this source, select about {int(full_target)} sec
+          -onds of useful original footage across the whole timeline. "  
+      259 -        "Do not return a short highlight reel or 10-minute sum
+          -mary. The narration must be long, scene-by-scene, and matched 
+          -to the selected edit_segments."                               
+      257 +        "Create a comprehensive long-form commentary edit, not
+          + a raw full-length copy of the source. "                      
+      258 +        f"For this source, select about {int(full_target)} sec
+          +onds of useful original footage across the whole timeline, kee
+          +ping the strongest process stages and removing repetitive or l
+          +ow-value waiting time. "                                      
+      259 +        "Do not preserve the entire source unless the source i
+          +tself is already shorter than the target. The narration must b
+          +e detailed, scene-by-scene, and matched to the selected edit_s
+          +egments."                                                     
+      260      )
+      261  
+      262  
+
+● Update(commentary.py)
+  ⎿  Added 2 lines, removed 2 lines
+      1080          prompt += (
+      1081              "\n\nRetry correction note:\n"
+      1082              f"The previous response failed validation with th
+            is error: {previous_error}\n"
+      1083 -            "Return narration_blocks that cover the selected 
+           -source timeline from start to finish. "                      
+      1084 -            "Do not return a short highlight summary; every i
+           -mportant visual range in the full target must have matching n
+           -arration."                                                   
+      1083 +            "Return narration_blocks that cover about the req
+           +uested full-mode target duration, not the entire raw source t
+           +imeline. "                                                   
+      1084 +            "Do not return a short highlight summary; every s
+           +elected visual range in the comprehensive edit must have matc
+           +hing narration."                                             
+      1085          )
+      1086      if analysis_mode == "video":
+      1087          contents = _build_video_analysis_contents(
+
+● 后端目标已改为默认最多 30 分钟、约取原片
+  30%；你可以之后用环境变量调这个比例和上限。
+
+● Update(dashboard/src/components/CommentaryTab.jsx)  ⎿  Added 1 line, removed 1 line
+      15  const DURATION_OPTIONS = [
+      16    { id: 'medium', label: '3-5 分钟' },
+      17    { id: 'short', label: '60-90 秒' },
+      18 -  { id: 'full', label: '尽量完整' },                           
+      18 +  { id: 'full', label: '尽量完整（自动精简）' },               
+      19  ]
+      20  
+      21  const VOICE_PREVIEW_TEXT = {
+
+● 我会把提示词和测试预期一起更新，确保以后“尽量完整”不会退回到 1:1 原片输出。
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● 我发现错误文案还在说“source timeline”，这会误导重试提示；我会把它改成“selected
+   edit”。
+
+● Update(commentary.py)
+  ⎿  Added 1 line, removed 1 line
+      484      visual_seconds = _segments_total_duration(_narration_block
+           s_to_edit_segments(blocks))
+      485      if target_seconds > 0 and (len(blocks) <= 1 or visual_seco
+           nds < target_seconds * 0.65 or visual_seconds > target_seconds
+            * 1.6):
+      486          raise Exception(
+      487 -            "Gemini narration_blocks do not cover enough of th
+          -e selected source timeline. "                                 
+      487 +            "Gemini narration_blocks do not cover enough of th
+          +e selected full-mode edit. "                                  
+      488              f"Got {visual_seconds:.1f}s of block-matched visua
+           ls for a {target_seconds:.1f}s target."
+      489          )
+      490      narration = re.sub(r"\s+", "", str(data.get("narration") o
+           r ""))
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      18      ) * 6
+      19  
+      20  
+      21 -def scene_matched_blocks(count=33, seconds=120.0, text=None):  
+      21 +def scene_matched_blocks(count=10, seconds=120.0, text=None):  
+      22      block_text = text or scene_matched_block_text()
+      23      return [
+      24          {
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 4 lines, removed 4 lines
+      538                  )
+      539  
+      540          transcribe.assert_not_called()
+      541 -        self.assertGreaterEqual(                              
+      542 -            sum(segment["end"] - segment["start"] for segment 
+          -in result["edit_segments"]),                                  
+      543 -            3935 * 0.9,                                       
+      544 -        )                                                     
+      541 +        selected_seconds = sum(segment["end"] - segment["start
+          +"] for segment in result["edit_segments"])                    
+      542 +        target_seconds = commentary._target_visual_duration_se
+          +conds(3935, "full")                                           
+      543 +        self.assertGreaterEqual(selected_seconds, target_secon
+          +ds * 0.9)                                                     
+      544 +        self.assertLess(selected_seconds, 3935 * 0.5)         
+      545          create_visual.assert_not_called()
+      546          create_synced.assert_called_once()
+      547          expected_segments = commentary._narration_blocks_to_ed
+           it_segments(scene_matched_blocks())
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Removed 1 line
+      545          create_visual.assert_not_called()
+      546          create_synced.assert_called_once()
+      547          expected_segments = commentary._narration_blocks_to_ed
+           it_segments(scene_matched_blocks())
+      548 -        expected_segments[-1]["end"] = 3935.0                 
+      548          self.assertEqual(result["edit_segments"], expected_seg
+           ments)
+      549          fit_video.assert_not_called()
+      550          self.assertEqual(result["edited_visual"], result["time
+           d_visual"])
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Error editing file
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 2 lines, removed 2 lines
+      618                      "hashtags": [],
+      619                  }), \
+      620                  patch.object(commentary, "generate_commentary_
+           voiceover", side_effect=fake_voiceover), \
+      621 -                patch.object(commentary, "_get_audio_duration"
+          -, return_value=3556), \                                       
+      621 +                patch.object(commentary, "_get_audio_duration"
+          +, return_value=1100), \                                       
+      622                  patch.object(commentary, "_create_visual_edit"
+           , side_effect=fake_create_visual), \
+      623                  patch.object(commentary, "_fit_video_to_voiceo
+           ver") as fit_video, \
+      624                  patch.object(commentary, "_create_ambient_audi
+           o_bed", return_value=None), \
+     ...
+      669                      "hashtags": [],
+      670                  }), \
+      671                  patch.object(commentary, "generate_commentary_
+           voiceover", side_effect=fake_voiceover), \
+      672 -                patch.object(commentary, "_get_audio_duration"
+          -, return_value=3556), \                                       
+      672 +                patch.object(commentary, "_get_audio_duration"
+          +, return_value=1100), \                                       
+      673                  patch.object(commentary, "_create_visual_edit"
+           , side_effect=fake_create_visual), \
+      674                  patch.object(commentary, "_create_ambient_audi
+           o_bed", return_value=None), \
+      675                  patch.object(commentary, "_mix_voiceover_with_
+           video") as mix_video, \
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 7 lines, removed 6 lines
+      692          self.assertEqual("Remix_mixed.mp4", result["video_file
+           name"])
+      693          self.assertEqual("Remix_commentary.ass", result["subti
+           tle"])
+      694  
+      695 -    def test_full_duration_targets_nearly_complete_source_time
+          -line(self):                                                   
+      695 +    def test_full_duration_targets_comprehensive_edit_not_raw_
+          +full_source(self):                                            
+      696          self.assertEqual(
+      697 -            3935,                                             
+      697 +            1180,                                             
+      698              int(commentary._target_visual_duration_seconds(393
+           5, "full")),
+      699          )
+      700          segments = commentary._fallback_edit_segments(3935, "f
+           ull")
+      701 -        self.assertEqual(1, len(segments))                    
+      702 -        self.assertEqual(0.0, segments[0]["start"])           
+      703 -        self.assertEqual(3935, int(segments[0]["end"]))       
+      701 +        total = sum(segment["end"] - segment["start"] for segm
+          +ent in segments)                                              
+      702 +        self.assertGreater(len(segments), 1)                  
+      703 +        self.assertGreaterEqual(total, 1100)                  
+      704 +        self.assertLess(total, 3935 * 0.5)                    
+      705          self.assertGreaterEqual(
+      706              commentary._minimum_narration_chars(3935, "full", 
+           "zh"),
+      706 -            12000,                                            
+      707 +            4000,                                             
+      708          )
+      709  
+      710      def test_full_duration_prompt_demands_long_scene_matched_n
+           arration(self):
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 3 lines, removed 3 lines
+      718              analysis_mode="video",
+      719          )
+      720  
+      721 -        self.assertIn("near-complete commentary edit", prompt)
+      722 -        self.assertIn("scene-by-scene", prompt)               
+      723 -        self.assertIn("Do not return a short highlight reel", 
+          -prompt)                                                       
+      721 +        self.assertIn("comprehensive long-form commentary edit
+          +", prompt)                                                    
+      722 +        self.assertIn("not a raw full-length copy", prompt)   
+      723 +        self.assertIn("Do not preserve the entire source", pro
+          +mpt)                                                          
+      724          self.assertIn("Treat narration_blocks as the productio
+           n timeline", prompt)
+      725          self.assertIn("do not put 2 minutes of words into a 20
+           -second visual range", prompt)
+      726          self.assertIn('"narration_blocks"', prompt)
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      724          self.assertIn("Treat narration_blocks as the productio
+           n timeline", prompt)
+      725          self.assertIn("do not put 2 minutes of words into a 20
+           -second visual range", prompt)
+      726          self.assertIn('"narration_blocks"', prompt)
+      727 -        self.assertIn("at least 13379", prompt)               
+      727 +        self.assertIn("at least 4013", prompt)                
+      728  
+      729      def test_funny_style_prompt_requires_visual_grounded_china
+           _international_comparison(self):
+      730          prompt = commentary._build_commentary_prompt(
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● 测试里旧的“接近原片全长”断言已经替换成“约 1180 秒、明显小于原片一半”的行为。
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● 我还会去掉后端错误里的“full-length”措辞，避免它继续暗示要生成原片等长视频。
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      18      ) * 6
+      19  
+      20  
+      21 -def scene_matched_blocks(count=10, seconds=120.0, text=None):  
+      21 +def scene_matched_blocks(count=12, seconds=100.0, text=None):  
+      22      block_text = text or scene_matched_block_text()
+      23      return [
+      24          {
+
+● Update(commentary.py)
+  ⎿  Added 2 lines, removed 2 lines
+      477      blocks = _normalize_narration_blocks(data.get("narration_b
+           locks") or [], duration)
+      478      if not blocks:
+      479          raise Exception(
+      480 -            "Gemini narration_blocks are required for full-len
+          -gth commentary. "                                             
+      481 -            "OpenShorts needs timestamped narration blocks so 
+          -each voiceover section can stay synced with the matching visua
+          -l range."                                                     
+      480 +            "Gemini narration_blocks are required for comprehe
+          +nsive full-mode commentary. "                                 
+      481 +            "OpenShorts needs timestamped narration blocks so 
+          +each voiceover section can stay synced with the matching selec
+          +ted visual range."                                            
+      482          )
+      483      target_seconds = _target_visual_duration_seconds(duration,
+            target_duration)
+      484      visual_seconds = _segments_total_duration(_narration_block
+           s_to_edit_segments(blocks))
+
+● Update(commentary.py)
+  ⎿  Added 1 line, removed 1 line
+      492      max_chars = _maximum_narration_chars(duration, target_dura
+           tion, language)
+      493      if len(narration) < min_chars:
+      494          raise Exception(
+      495 -            "Gemini narration is too short for full-length com
+          -mentary. "                                                    
+      495 +            "Gemini narration is too short for comprehensive f
+          +ull-mode commentary. "                                        
+      496              f"Got {len(narration)} chars; expected at least {m
+           in_chars}. "
+      497              "The generated video would not match the selected 
+           visuals, so OpenShorts rejected it."
+      498          )
+
+● Update(commentary.py)  ⎿  Added 1 line, removed 1 line
+      498          )
+      499      if max_chars and len(narration) > max_chars:
+      500          raise Exception(
+      501 -            "Gemini narration is too long for full-length comm
+          -entary. "                                                     
+      501 +            "Gemini narration is too long for comprehensive fu
+          +ll-mode commentary. "                                         
+      502              f"Got {len(narration)} chars; expected at most {ma
+           x_chars}. "
+      503              "The generated voiceover would run much longer tha
+           n the selected visuals and can overload local rendering, so Op
+           enShorts rejected it."
+      504          )
+
+● Update(commentary.py)
+  ⎿  Added 1 line, removed 1 line
+      519      max_seconds = max(visual_seconds + 60.0, visual_seconds * 
+           FULL_MODE_MAX_VOICEOVER_DURATION_RATIO)
+      520      if audio_seconds > max_seconds:
+      521          raise Exception(
+      522 -            "Generated voiceover is too long for full-length c
+          -ommentary. "                                                  
+      522 +            "Generated voiceover is too long for comprehensive
+          + full-mode commentary. "                                      
+      523              f"Got {audio_seconds:.1f}s audio for {visual_secon
+           ds:.1f}s selected visuals; allowed at most {max_seconds:.1f}s.
+            "
+      524              "OpenShorts stopped before visual rendering to avo
+           id an oversized local FFmpeg job."
+      525          )
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      867              )
+      868  
+      869      def test_full_duration_rejects_short_narration_with_timest
+           amp_blocks(self):
+      870 -        with self.assertRaisesRegex(Exception, "too short for 
+          -full-length commentary"):                                     
+      870 +        with self.assertRaisesRegex(Exception, "too short for 
+          +comprehensive full-mode commentary"):                         
+      871              commentary._validate_commentary_script_for_target(
+      872                  {
+      873                      "narration": "这些废旧电机最终会被回收成铜
+           材。",
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      887              len(commentary.re.sub(r"\s+", "", overlong)),
+      888              commentary._maximum_narration_chars(3935, "full", 
+           "zh"),
+      889          )
+      890 -        with self.assertRaisesRegex(Exception, "too long for f
+          -ull-length commentary"):                                      
+      890 +        with self.assertRaisesRegex(Exception, "too long for c
+          +omprehensive full-mode commentary"):                          
+      891              commentary._validate_commentary_script_for_target(
+      892                  {
+      893                      "narration": overlong,
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● 有几处测试 payload 仍用 3935 秒整段 edit_segments，但因为 full 模式现在以
+  narration_blocks 为准，我会把它们改成 bounded blocks，保持意图不变。
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      569                      "hook": "hook",
+      570                      "narration": "\n\n".join(block["narration"
+           ] for block in scene_matched_blocks()),
+      571                      "narration_blocks": scene_matched_blocks()
+           ,
+      572 -                    "edit_segments": [{"start": 0, "end": 3935
+          -, "reason": "full source"}],                                  
+      572 +                    "edit_segments": commentary._narration_blo
+          +cks_to_edit_segments(scene_matched_blocks()),                 
+      573                      "chapters": [],
+      574                      "hashtags": [],
+      575                  }), \
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      613                      "summary": "summary",
+      614                      "hook": "hook",
+      615                      "narration": "Narration",
+      616 -                    "edit_segments": [{"start": 0, "end": 3935
+          -, "reason": "full source"}],                                  
+      616 +                    "edit_segments": commentary._fallback_edit
+          +_segments(3935, "full"),                                      
+      617                      "chapters": [],
+      618                      "hashtags": [],
+      619                  }), \
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      664                      "summary": "summary",
+      665                      "hook": "hook",
+      666                      "narration": "Narration.",
+      667 -                    "edit_segments": [{"start": 0, "end": 3935
+          -, "reason": "full source"}],                                  
+      667 +                    "edit_segments": commentary._fallback_edit
+          +_segments(3935, "full"),                                      
+      668                      "chapters": [],
+      669                      "hashtags": [],
+      670                  }), \
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 2 lines, removed 2 lines
+      759              "hook": "hook",
+      760              "narration": "太短。",
+      761              "narration_blocks": [
+      762 -                {"start": i * 120, "end": i * 120 + 120, "narr
+          -ation": block_text}                                           
+      763 -                for i in range(33)                            
+      762 +                {"start": i * 100, "end": i * 100 + 100, "narr
+          +ation": block_text}                                           
+      763 +                for i in range(12)                            
+      764              ],
+      765              "edit_segments": [{"start": i * 120, "end": i * 12
+           0 + 120, "reason": "process"} for i in range(33)],
+      766              "chapters": [],
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      762                  {"start": i * 100, "end": i * 100 + 100, "narr
+           ation": block_text}
+      763                  for i in range(12)
+      764              ],
+      765 -            "edit_segments": [{"start": i * 120, "end": i * 12
+          -0 + 120, "reason": "process"} for i in range(33)],            
+      765 +            "edit_segments": [{"start": i * 100, "end": i * 10
+          +0 + 100, "reason": "process"} for i in range(12)],            
+      766              "chapters": [],
+      767              "hashtags": [],
+      768          }
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● 我会改成不依赖精确字符数字的测试，这样未来调整比例或上限时测试不会因为提示词里
+  的数字微调而误报。
+
+● Update(tests/test_commentary_analysis_mode.py)
+  ⎿  Added 1 line, removed 1 line
+      724          self.assertIn("Treat narration_blocks as the productio
+           n timeline", prompt)
+      725          self.assertIn("do not put 2 minutes of words into a 20
+           -second visual range", prompt)
+      726          self.assertIn('"narration_blocks"', prompt)
+      727 -        self.assertIn("at least 4013", prompt)                
+      727 +        self.assertIn(f"at least {commentary._minimum_narratio
+          +n_chars(3935, 'full', 'zh')}", prompt)                        
+      728  
+      729      def test_funny_style_prompt_requires_visual_grounded_china
+           _international_comparison(self):
+      730          prompt = commentary._build_commentary_prompt(
+
+● 我会运行语法检查和可用的定向测试；如果环境缺少依赖，我会说明具体阻塞。
+
+● Bash(python -c "import ast; [ast.parse(open(p, encoding='utf-8').read(),
+      filename=p) for p in ['commentary.py', 'app.py']]")
+  ⎿  (No output)
+
+● Bash(node --test "dashboard/src/components/commentaryDefaults.test.js")
+  ⎿  TAP version 13
+     # Subtest: commentary tab defaults match preferred Chinese remix setup
+     ok 1 - commentary tab defaults match preferred Chinese remix setup
+     … +26 lines (ctrl+o to expand)
+
+● Bash(python -m pytest "tests/test_commentary_analysis_mode.py"
+      "tests/test_commentary_upload.py")
+  ⎿  Error: Exit code 2
+     ============================= test session starts 
+     ==============================
+     platform linux -- Python 3.12.3, pytest-7.4.3, pluggy-1.6.0
+     rootdir: /mnt/c/Apps/a-tools/skills/openshorts
+     plugins: asyncio-0.21.1, anyio-3.7.1
+     asyncio: mode=Mode.STRICT
+     collected 0 items / 2 errors
+
+     ==================================== ERRORS 
+     ====================================
+     ___________ ERROR collecting tests/test_commentary_analysis_mode.py 
+     ____________
+     … +26 lines (ctrl+o to expand)
+
+● Python 语法和前端源码测试通过；后端 pytest 仍被当前 WSL 环境缺少 cv2、yt_dlp
+  依赖挡住，不是这次修改引入的测试失败。
+
+● Bash(git diff -- "commentary.py" "dashboard/src/components/CommentaryTab.jsx"
+      "tests/test_commentary_analysis_mode.py")
+  ⎿  diff --git a/commentary.py b/commentary.py
+     index 0c61d66..98a6e2f 100644
+     --- a/commentary.py
+     … +419 lines (ctrl+o to expand)
+● 我会补跑一次最终语法/源码测试和 diff
+  空白检查，确认刚才后续编辑没有引入低级问题。
+
+● Bash(python -c "import ast; [ast.parse(open(p, encoding='utf-8').read(),
+      filename=p) for p in ['commentary.py', 'app.py',
+      'tests/test_commentary_analysis_mode.py']]")
+  ⎿  (No output)
+
+● Bash(node --test "dashboard/src/components/commentaryDefaults.test.js")
+  ⎿  TAP version 13
+     # Subtest: commentary tab defaults match preferred Chinese remix setup
+     ok 1 - commentary tab defaults match preferred Chinese remix setup
+     … +27 lines (ctrl+o to expand)
+
+● Bash(git diff --check -- "commentary.py"
+      "dashboard/src/components/CommentaryTab.jsx"
+      "tests/test_commentary_analysis_mode.py")
+  ⎿  (No output)
+
+● 已修正“尽量完整”模式：现在不会按原片 100%
+  输出，默认会生成“较完整但自动精简”的长剪辑，约取原片 30%，并默认封顶 30
+  分钟。1 小时 5 分钟的视频目标会从约 3935 秒降到约 1180 秒左右。
+
+  改动点：
+  - commentary.py：full 模式从原来的 FULL_MODE_SOURCE_FRACTION = 1.0 改为默认
+  0.30，最大目标时长默认 1800 秒。
+  - commentary.py：Gemini 提示词从“near-complete /
+  保留原时间线”改为“comprehensive long-form commentary edit, not a raw
+  full-length copy”。
+  - commentary.py：重试和校验文案也改成“覆盖选中的 full-mode edit”，避免 Gemini
+  继续理解成要覆盖整条原片。
+  - CommentaryTab.jsx：前端选项显示为 尽量完整（自动精简）。
+  - tests/test_commentary_analysis_mode.py：更新单测，验证 3935 秒原片的 full
+  目标约为 1180 秒，并明显小于原片一半。
+
+  已验证：
+  - Python AST 语法检查通过。
+  - node --test dashboard/src/components/commentaryDefaults.test.js 通过。
+  - git diff --check 通过。
+  - 后端 pytest 仍因当前 WSL 缺少 cv2 和 yt_dlp
+  无法收集测试，这和之前环境问题一致，不是这次改动导致。
+
+✻ Cogitated for 13m 18s
+
+※ recap: 目标是让“尽量完整”二创不要生成原片等长视频；已改成自动精简的长剪辑并完成基础检查。下一步是重启前后端后再用同一个 1 小时 5 分钟视频跑一次验证输出时长。

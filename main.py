@@ -5,7 +5,13 @@ import subprocess
 import argparse
 import re
 import sys
-from scenedetect import VideoManager, SceneManager
+import shutil
+try:
+    from scenedetect import VideoManager, SceneManager
+    open_video = None
+except ImportError:
+    from scenedetect import SceneManager, open_video
+    VideoManager = None
 from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
@@ -15,9 +21,10 @@ from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
-from google import genai
 from dotenv import load_dotenv
+from gemini_client import create_gemini_client
 import json
+import tempfile
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -421,16 +428,22 @@ def analyze_scenes_strategy(video_path, scenes):
     return strategies
 
 def detect_scenes(video_path):
-    video_manager = VideoManager([video_path])
     scene_manager = SceneManager()
     scene_manager.add_detector(ContentDetector())
-    video_manager.set_downscale_factor()
-    video_manager.start()
-    scene_manager.detect_scenes(frame_source=video_manager)
-    scene_list = scene_manager.get_scene_list()
-    fps = video_manager.get_framerate()
-    video_manager.release()
-    return scene_list, fps
+
+    if VideoManager is not None:
+        video_manager = VideoManager([video_path])
+        video_manager.set_downscale_factor()
+        video_manager.start()
+        scene_manager.detect_scenes(frame_source=video_manager)
+        scene_list = scene_manager.get_scene_list()
+        fps = video_manager.get_framerate()
+        video_manager.release()
+        return scene_list, fps
+
+    video = open_video(video_path)
+    scene_manager.detect_scenes(video=video)
+    return scene_manager.get_scene_list(), video.frame_rate
 
 def get_video_resolution(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -449,37 +462,125 @@ def sanitize_filename(filename):
     return filename[:100]
 
 
-def download_youtube_video(url, output_dir="."):
+def inspect_cookie_file_for_download(path):
+    names = set()
+    rows = 0
+    if not path or not os.path.exists(path):
+        return {"rows": 0, "missing_warning": True, "missing": ["LOGIN_INFO", "SAPISID", "SID"]}
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                parts = line.split(None, 6)
+            if len(parts) >= 7:
+                rows += 1
+                names.add(parts[5])
+    strong_names = {"LOGIN_INFO", "SAPISID", "SID"}
+    return {
+        "rows": rows,
+        "missing_warning": not strong_names.issubset(names),
+        "missing": sorted(strong_names - names),
+    }
+
+
+def restore_project_cookies_if_needed(project_cookies_path, backup_cookies_path):
+    current_info = inspect_cookie_file_for_download(project_cookies_path)
+    if not current_info.get("missing_warning"):
+        return False
+    backup_info = inspect_cookie_file_for_download(backup_cookies_path)
+    if backup_info.get("missing_warning"):
+        return False
+    os.makedirs(os.path.dirname(project_cookies_path), exist_ok=True)
+    shutil.copyfile(backup_cookies_path, project_cookies_path)
+    print(f"🍪 Restored complete YouTube cookies from backup because current cookies were incomplete: {project_cookies_path}")
+    return True
+
+
+def create_runtime_cookies_copy(source_cookies_path):
+    if not source_cookies_path or not os.path.exists(source_cookies_path):
+        return None
+    runtime_dir = tempfile.mkdtemp(prefix="openshorts_ytdlp_cookies_")
+    runtime_cookies_path = os.path.join(runtime_dir, "youtube_cookies.runtime.txt")
+    shutil.copyfile(source_cookies_path, runtime_cookies_path)
+    return runtime_cookies_path
+
+
+def _youtube_download_settings(video_title, output_dir=".", quality="high", filename_suffix=""):
+    sanitized_title = sanitize_filename(video_title)
+    suffix = filename_suffix or ""
+    output_stem = f"{sanitized_title}{suffix}"
+    mode = (quality or "high").strip().lower()
+    format_selectors = {
+        "high": "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]",
+        "low": "bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/worst[ext=mp4]/worst",
+    }
+    if mode not in format_selectors:
+        raise ValueError(f"Unsupported YouTube download quality: {quality}")
+    return {
+        "format": format_selectors[mode],
+        "output_template": os.path.join(output_dir, f"{output_stem}.%(ext)s"),
+        "expected_file": os.path.join(output_dir, f"{output_stem}.mp4"),
+        "output_stem": output_stem,
+        "sanitized_title": sanitized_title,
+    }
+
+
+def download_youtube_video(url, output_dir=".", quality="high", filename_suffix=""):
     """
     Downloads a YouTube video using yt-dlp.
     Returns the path to the downloaded video and the video title.
     """
     print(f"🔍 Debug: yt-dlp version: {yt_dlp.version.__version__}")
-    print("📥 Downloading video from YouTube...")
+    print(f"📥 Downloading video from YouTube ({quality} quality)...")
     step_start_time = time.time()
 
-    cookies_path = '/app/cookies.txt'
+    cookies_path_env = os.environ.get("YOUTUBE_COOKIES_PATH")
+    project_cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local", "youtube_cookies.txt")
+    backup_cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local", "youtube_cookies.last_good.txt")
+    cookies_path = cookies_path_env or project_cookies_path
     cookies_env = os.environ.get("YOUTUBE_COOKIES")
-    if cookies_env:
-        print("🍪 Found YOUTUBE_COOKIES env var, creating cookies file inside container...")
+    if cookies_env and not os.path.exists(project_cookies_path):
+        print("🍪 Found YOUTUBE_COOKIES env var, creating initial cookies file...")
         try:
-            with open(cookies_path, 'w') as f:
+            os.makedirs(os.path.dirname(os.path.abspath(cookies_path)), exist_ok=True)
+            with open(cookies_path, 'w', encoding='utf-8') as f:
                 f.write(cookies_env)
             if os.path.exists(cookies_path):
                  print(f"   Debug: Cookies file created. Size: {os.path.getsize(cookies_path)} bytes")
-                 with open(cookies_path, 'r') as f:
+                 with open(cookies_path, 'r', encoding='utf-8') as f:
                      content = f.read(100)
                      print(f"   Debug: First 100 chars of cookie file: {content}")
         except Exception as e:
             print(f"⚠️ Failed to write cookies file: {e}")
             cookies_path = None
+    elif cookies_env and os.path.exists(project_cookies_path):
+        cookies_path = project_cookies_path
+        print(f"🍪 Ignoring YOUTUBE_COOKIES env var because project cookies file already exists: {project_cookies_path}")
+    elif cookies_path_env and os.path.exists(cookies_path_env):
+        cookies_path = cookies_path_env
+        print(f"🍪 Using existing cookies file from YOUTUBE_COOKIES_PATH: {cookies_path}")
+    elif os.path.exists(project_cookies_path):
+        cookies_path = project_cookies_path
+        print(f"🍪 Using project cookies file: {cookies_path}")
     else:
         cookies_path = None
-        print("⚠️ YOUTUBE_COOKIES env var not found.")
+        print("⚠️ YouTube cookies not configured.")
+
+    restore_project_cookies_if_needed(project_cookies_path, backup_cookies_path)
+    if cookies_path and os.path.abspath(cookies_path) == os.path.abspath(project_cookies_path):
+        cookies_path = create_runtime_cookies_copy(project_cookies_path)
+        if cookies_path:
+            print(f"🍪 Using isolated runtime cookies copy for yt-dlp: {cookies_path}")
     
-    # Common yt-dlp options to work around YouTube bot detection.
-    # extractor_args tries multiple player clients in order; tv_embed / android
-    # avoid the OAuth/PO-token checks that block server IPs.
+    js_runtimes = {}
+    for runtime_name in ('node', 'bun', 'deno'):
+        if shutil.which(runtime_name):
+            js_runtimes[runtime_name] = {}
+            break
+
     _COMMON_YDL_OPTS = {
         'quiet': False,
         'verbose': True,
@@ -490,10 +591,11 @@ def download_youtube_video(url, output_dir="."):
         'fragment_retries': 10,
         'nocheckcertificate': True,
         'cachedir': False,
+        'js_runtimes': js_runtimes,
+        'remote_components': ['ejs:github'],
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embed', 'android', 'mweb', 'web'],
-                'player_skip': ['webpage', 'configs'],
+                'player_client': ['web'],
             }
         },
         'http_headers': {
@@ -509,70 +611,100 @@ def download_youtube_video(url, output_dir="."):
         try:
             info = ydl.extract_info(url, download=False)
             video_title = info.get('title', 'youtube_video')
+            formats = info.get('formats') or []
+            video_formats = [fmt for fmt in formats if fmt.get('vcodec') and fmt.get('vcodec') != 'none']
+            if not video_formats:
+                raise Exception(
+                    "yt-dlp did not receive any downloadable video formats. "
+                    "This is usually caused by YouTube n challenge / SABR / PO-token restrictions, "
+                    "not by missing saved cookies."
+                )
             sanitized_title = sanitize_filename(video_title)
         except Exception as e:
-            # Force print to stderr/stdout immediately so it's captured before crash
             import sys
-            import traceback
+            error_text = str(e)
+            if "n challenge" in error_text or "no downloadable video formats" in error_text or "Requested format is not available" in error_text:
+                reason = (
+                    "YouTube cookies are configured, but yt-dlp could not solve YouTube's n challenge "
+                    "or YouTube only returned storyboard/image formats for this request."
+                )
+                solution = (
+                    "1. Keep the current cookies, then retry after updating yt-dlp/yt-dlp-ejs if available.\n"
+                    "2. If the same video still fails, download the source video manually in your browser and process the local file instead.\n"
+                    "3. This can also happen when the current IP/account is under stricter YouTube/SABR/PO-token restrictions."
+                )
+            elif "Sign in to confirm" in error_text or "not a bot" in error_text or "cookies" in error_text.lower():
+                reason = "YouTube is still asking for login/bot verification. The saved cookies may be expired or not accepted for this IP/session."
+                solution = "Re-export cookies from the same browser account that can play the video, save them again, and retry."
+            else:
+                reason = "YouTube download failed before the video could be prepared."
+                solution = "Check the technical details below, or download the source video manually and process the local file."
             
-            # Print minimal error first to ensure something gets out
             print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
-            
             error_msg = f"""
             
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED
 ❌ ================================================================= ❌
             
-REASON: YouTube has blocked the download request (Error 429/Unavailable).
-        This is likely a temporary IP ban on this server.
+REASON: {reason}
 
 👇 SOLUTION FOR USER 👇
 ---------------------------------------------------------------------
-1. Download the video manually to your computer.
-2. Use the 'Upload Video' tab in this app to process it.
+{solution}
 ---------------------------------------------------------------------
 
-Technical Details: {str(e)}
+Technical Details: {error_text}
             """
-            # Print to both streams to ensure capture
             print(error_msg, file=sys.stdout)
             print(error_msg, file=sys.stderr)
-            
-            # Force flush
             sys.stdout.flush()
             sys.stderr.flush()
-            
-            # Wait a split second to allow buffer to drain before raising
             time.sleep(0.5)
-            
             raise e
     
-    output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
-    expected_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+    download_settings = _youtube_download_settings(
+        sanitized_title,
+        output_dir=output_dir,
+        quality=quality,
+        filename_suffix=filename_suffix,
+    )
+    output_template = download_settings["output_template"]
+    expected_file = download_settings["expected_file"]
     if os.path.exists(expected_file):
         os.remove(expected_file)
         print(f"🗑️  Removed existing file to re-download with H.264 codec")
     
     ydl_opts = {
         **_COMMON_YDL_OPTS,
-        'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[ext=mp4]/best',
+        'format': download_settings["format"],
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
         'overwrites': True,
     }
     
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        error_text = str(e)
+        if "Requested format is not available" in error_text or "Only images are available" in error_text or "n challenge" in error_text:
+            raise Exception(
+                "YouTube returned no downloadable video formats for yt-dlp. "
+                "The saved cookies are present, but this request is blocked by YouTube n challenge / SABR / PO-token restrictions. "
+                f"Technical details: {error_text}"
+            ) from e
+        raise
     
-    downloaded_file = os.path.join(output_dir, f'{sanitized_title}.mp4')
+    downloaded_file = expected_file
     
     if not os.path.exists(downloaded_file):
         for f in os.listdir(output_dir):
-            if f.startswith(sanitized_title) and f.endswith('.mp4'):
+            if f.startswith(download_settings["output_stem"]) and f.endswith('.mp4'):
                 downloaded_file = os.path.join(output_dir, f)
                 break
     
+    restore_project_cookies_if_needed(project_cookies_path, backup_cookies_path)
     step_end_time = time.time()
     print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
     
@@ -750,16 +882,29 @@ def process_video_to_vertical(input_video, final_output_video):
     
     return True
 
-def transcribe_video(video_path):
+def transcribe_video(video_path, language=None):
     print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
     from faster_whisper import WhisperModel
+    from resource_limits import resolve_thread_count, resolve_worker_count
+
+    cpu_threads = resolve_thread_count("OPENSHORTS_WHISPER_CPU_THREADS")
+    num_workers = resolve_worker_count("OPENSHORTS_WHISPER_WORKERS")
     
     # Run on CPU with INT8 quantization for speed
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    model = WhisperModel(
+        "base",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=cpu_threads,
+        num_workers=num_workers,
+    )
     
-    segments, info = model.transcribe(video_path, word_timestamps=True)
+    segments, info = model.transcribe(video_path, word_timestamps=True, language=language)
     
-    print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
+    if language:
+        print(f"   Forced language '{language}', detected '{info.language}' with probability {info.language_probability:.2f}")
+    else:
+        print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
     
     # Convert to openai-whisper compatible format
     transcript_segments = []
@@ -803,10 +948,9 @@ def get_viral_clips(transcript_result, video_duration):
         return None
 
 
-    client = genai.Client(api_key=api_key)
+    client = create_gemini_client(api_key, os.getenv("GEMINI_BASE_URL"))
     
-    # We use gemini-2.5-flash as requested.
-    model_name = 'gemini-2.5-flash' 
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     print(f"🤖  Initializing Gemini with model: {model_name}")
 

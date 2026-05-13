@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Sparkles, Loader2, Maximize, MoveVertical, Zap } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
+import { useI18n } from '../i18n/I18nProvider';
 
 const ENTRANCE_OPTIONS = [
     { value: 'spring', label: 'Bounce' },
@@ -10,6 +11,7 @@ const ENTRANCE_OPTIONS = [
 ];
 
 export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles }) {
+    const { t } = useI18n();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
     const [position, setPosition] = useState('top');
     const [size, setSize] = useState('M');
@@ -20,7 +22,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
     // Build hook config for Remotion preview
     const hookConfig = {
-        text: text || 'Enter your text...',
+        text: text || t('hookModal.textPlaceholder'),
         position,
         size,
         entranceAnimation,
@@ -82,7 +84,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                         paddingRight: '12px'
                                     }}
                                 >
-                                    {text || "Enter your text..."}
+                                    {text || t('hookModal.textPlaceholder')}
                                 </div>
                             </div>
                         </>
@@ -92,26 +94,26 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
                     <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-                        <Sparkles className="text-yellow-400" /> Viral Hook
+                        <Sparkles className="text-yellow-400" /> {t('hookModal.title')}
                     </h3>
 
                     <div className="space-y-6 flex-1 overflow-y-auto custom-scrollbar pr-2">
                         {/* Text Input */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Text</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">{t('hookModal.text')}</label>
                             <textarea
                                 value={text}
                                 onChange={(e) => setText(e.target.value)}
                                 rows={4}
                                 className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
-                                placeholder="Enter text that will stop the scroll..."
+                                placeholder={t('hookModal.textPlaceholder')}
                             />
                         </div>
 
                         {/* Position Control */}
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                                <MoveVertical size={12} /> Position
+                                <MoveVertical size={12} /> {t('hookModal.positionLabel')}
                             </label>
                             <div className="grid grid-cols-3 gap-2">
                                 {['top', 'center', 'bottom'].map((pos) => (
@@ -123,7 +125,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {pos}
+                                        {t(`hookModal.positionOptions.${pos}`)}
                                     </button>
                                 ))}
                             </div>
@@ -132,7 +134,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         {/* Size Control */}
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                                <Maximize size={12} /> Size
+                                <Maximize size={12} /> {t('hookModal.sizeLabel')}
                             </label>
                             <div className="grid grid-cols-3 gap-2">
                                 {['S', 'M', 'L'].map((sz) => (
@@ -144,7 +146,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {sz === 'S' ? 'Small' : sz === 'M' ? 'Medium' : 'Large'}
+                                        {t(`hookModal.sizeOptions.${sz}`)}
                                     </button>
                                 ))}
                             </div>
@@ -153,7 +155,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         {/* Entrance Animation (new) */}
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                                <Zap size={12} /> Entrance
+                                <Zap size={12} /> {t('hookModal.entrance')}
                             </label>
                             <div className="grid grid-cols-2 gap-2">
                                 {ENTRANCE_OPTIONS.map((opt) => (
@@ -165,7 +167,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {opt.label}
+                                        {t(`hookModal.entranceOptions.${opt.value}`)}
                                     </button>
                                 ))}
                             </div>
@@ -173,7 +175,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
                         {/* Display Duration (new) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Duration: {displayDuration}s</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">{t('hookModal.duration', { seconds: displayDuration })}</label>
                             <input
                                 type="range"
                                 min="2"
@@ -189,7 +191,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div className="p-3 bg-white/5 rounded-lg border border-white/5 text-[11px] text-zinc-400">
-                            <strong>Tip:</strong> Keep it short and punchy. Using "POV:" or specific questions works best for retention.
+                            <strong>{t('hookModal.tipLabel')}</strong> {t('hookModal.tipText')}
                         </div>
                     </div>
 
@@ -203,7 +205,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         className="w-full py-4 mt-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
-                        {isProcessing ? 'Generating...' : 'Add Hook'}
+                        {isProcessing ? t('hookModal.generating') : t('hookModal.generate')}
                     </button>
                 </div>
             </div>

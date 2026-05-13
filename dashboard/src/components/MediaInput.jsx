@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Youtube, Upload, FileVideo, X } from 'lucide-react';
+import { useI18n } from '../i18n/I18nProvider';
 
 export default function MediaInput({ onProcess, isProcessing }) {
+    const { t } = useI18n();
     const [mode, setMode] = useState('url'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
@@ -34,7 +36,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         }`}
                 >
                     <Youtube size={18} />
-                    YouTube URL
+                    {t('mediaInput.youtubeUrl')}
                 </button>
                 <button
                     onClick={() => setMode('file')}
@@ -44,7 +46,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         }`}
                 >
                     <Upload size={18} />
-                    Upload File
+                    {t('mediaInput.uploadFile')}
                 </button>
             </div>
 
@@ -88,8 +90,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     className="hidden"
                                 />
                                 <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
-                                <p className="text-zinc-400">Click to upload or drag and drop</p>
-                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV up to 500MB</p>
+                                <p className="text-zinc-400">{t('mediaInput.dropPrompt')}</p>
+                                <p className="text-xs text-zinc-600 mt-1">{t('mediaInput.fileHelp')}</p>
                             </label>
                         )}
                     </div>
@@ -103,11 +105,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     {isProcessing ? (
                         <>
                             <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            Processing Video...
+                            {t('mediaInput.processing')}
                         </>
                     ) : (
                         <>
-                            Generate Clips
+                            {t('mediaInput.generate')}
                         </>
                     )}
                 </button>

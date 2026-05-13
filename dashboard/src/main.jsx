@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import Landing from './Landing.jsx'
+import { I18nProvider } from './i18n/I18nProvider.jsx'
 
 function Root() {
   const [showApp, setShowApp] = useState(() => {
@@ -32,6 +33,8 @@ function Root() {
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <Root />
+    <I18nProvider>
+      <Root />
+    </I18nProvider>
   </StrictMode>,
 )

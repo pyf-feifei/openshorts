@@ -18,6 +18,9 @@ uploads/
 downloads/
 videos/
 output/
+outputs/
+.local/
+references/
 
 # OS / IDE
 .DS_Store

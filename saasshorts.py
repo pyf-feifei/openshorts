@@ -22,6 +22,8 @@ from urllib.parse import urljoin
 from typing import Optional, List, Dict, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from gemini_client import create_gemini_client
+
 
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 FAL_QUEUE_BASE = "https://queue.fal.run"
@@ -44,18 +46,17 @@ GEMINI_MODEL = "gemini-3-flash-preview"
 # Phase 1: Website Scraping, Web Research & Analysis
 # ═══════════════════════════════════════════════════════════════════════
 
-def research_saas_online(url: str, gemini_key: str) -> dict:
+def research_saas_online(url: str, gemini_key: str, base_url: str = None) -> dict:
     """
     Use Gemini with Google Search grounding to deeply research a SaaS product
     across the internet: reviews, Reddit threads, Twitter, competitor comparisons,
     pricing complaints, user testimonials, etc.
     """
-    from google import genai
     from google.genai import types
 
     print(f"[SaaSShorts] 🔍 Researching {url} across the web (Google Search grounding)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = create_gemini_client(gemini_key, base_url)
 
     # Extract domain name for search queries
     domain = url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -236,17 +237,16 @@ def scrape_website(url: str) -> dict:
     return result
 
 
-def analyze_saas(scraped_data: dict, gemini_key: str, web_research: dict = None) -> dict:
+def analyze_saas(scraped_data: dict, gemini_key: str, web_research: dict = None, base_url: str = None) -> dict:
     """
     Deep analysis of a SaaS product combining website scraping + web research.
     Uses Gemini 3 Flash for synthesis.
     """
-    from google import genai
     from google.genai import types
 
     print(f"[SaaSShorts] 🧠 Analyzing {scraped_data['url']} (with web research)...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = create_gemini_client(gemini_key, base_url)
 
     # Build web research context
     research_context = ""
@@ -372,15 +372,15 @@ def generate_scripts(
     style: str = "ugc",
     language: str = "en",
     actor_gender: str = "female",
+    base_url: str = None,
 ) -> list:
     """Generate video scripts based on SaaS analysis."""
-    from google import genai
     from google.genai import types
 
     lang_name = "Spanish" if language == "es" else "English"
     print(f"[SaaSShorts] 📝 Generating {num_scripts} scripts ({style}, {lang_name})...")
 
-    client = genai.Client(api_key=gemini_key)
+    client = create_gemini_client(gemini_key, base_url)
 
     style_guide = {
         "ugc": "Natural, authentic UGC style. Person talking to camera like sharing a discovery with a friend. Casual, genuine.",

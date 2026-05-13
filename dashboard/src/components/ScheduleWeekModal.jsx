@@ -1,9 +1,16 @@
 import React, { useState, useMemo } from 'react';
 import { X, Loader2, Calendar, Clock, CheckCircle, AlertCircle, Video, Instagram, Youtube, ChevronLeft, ChevronRight, Globe, ExternalLink } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { useI18n } from '../i18n/I18nProvider';
 
-const DAYS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-const MONTHS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+const DAY_LABELS = {
+    en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+    'zh-CN': ['周日', '周一', '周二', '周三', '周四', '周五', '周六'],
+};
+const MONTH_LABELS = {
+    en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+    'zh-CN': ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'],
+};
 
 const TIMEZONES = [
     { value: 'Pacific/Midway', label: '(GMT-11:00) Midway' },
@@ -37,7 +44,7 @@ const TIMEZONES = [
     { value: 'Pacific/Auckland', label: '(GMT+12:00) Auckland' },
 ];
 
-function getDayLabel(date) {
+function getDayLabel(date, t, language) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -45,13 +52,14 @@ function getDayLabel(date) {
     const target = new Date(date);
     target.setHours(0, 0, 0, 0);
 
-    if (target.getTime() === today.getTime()) return 'Hoy';
-    if (target.getTime() === tomorrow.getTime()) return 'Mañana';
-    return DAYS[target.getDay()];
+    if (target.getTime() === today.getTime()) return t('scheduleModal.today');
+    if (target.getTime() === tomorrow.getTime()) return t('scheduleModal.tomorrow');
+    return (DAY_LABELS[language] || DAY_LABELS.en)[target.getDay()];
 }
 
-function formatDate(date) {
-    return `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+function formatDate(date, language) {
+    if (language === 'zh-CN') return `${MONTH_LABELS['zh-CN'][date.getMonth()]}${date.getDate()}日`;
+    return `${date.getDate()} ${MONTH_LABELS.en[date.getMonth()]}`;
 }
 
 function detectTimezone() {
@@ -65,6 +73,7 @@ function detectTimezone() {
 }
 
 export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploadPostKey, uploadUserId }) {
+    const { t, language } = useI18n();
     const [time, setTime] = useState('12:00');
     const [timezone, setTimezone] = useState(detectTimezone);
     const [platforms, setPlatforms] = useState({
@@ -127,7 +136,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                 api_key: uploadPostKey,
                 user_id: uploadUserId,
                 platforms: selectedPlatforms,
-                title: clip.video_title_for_youtube_short || 'Viral Short',
+                title: clip.video_title_for_youtube_short || t('resultCard.viralShortVideo'),
                 description: clip.video_description_for_instagram || clip.video_description_for_tiktok || '',
                 scheduled_date: scheduledDate,
                 timezone
@@ -177,15 +186,15 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                         <Calendar size={20} className="text-white" />
                     </div>
                     <div>
-                        <h3 className="text-lg font-bold text-white">Programar Semana</h3>
-                        <p className="text-xs text-zinc-500">{clips?.length || 0} clips &middot; 1 por día</p>
+                        <h3 className="text-lg font-bold text-white">{t('scheduleModal.title')}</h3>
+                        <p className="text-xs text-zinc-500">{t('scheduleModal.subtitle', { count: clips?.length || 0 })}</p>
                     </div>
                 </div>
 
                 {!uploadPostKey && (
                     <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>Configura tu API Key de Upload-Post en Settings primero.</div>
+                        <div>{t('scheduleModal.missingKey')}</div>
                     </div>
                 )}
 
@@ -194,7 +203,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                     <div>
                         <label className="block text-xs font-bold text-zinc-400 mb-2 flex items-center gap-2">
                             <Clock size={14} className="text-purple-400" />
-                            Hora
+                            {t('scheduleModal.time')}
                         </label>
                         <input
                             type="time"
@@ -207,7 +216,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                     <div>
                         <label className="block text-xs font-bold text-zinc-400 mb-2 flex items-center gap-2">
                             <Globe size={14} className="text-indigo-400" />
-                            Zona horaria
+                            {t('scheduleModal.timezone')}
                         </label>
                         <select
                             value={timezone}
@@ -224,7 +233,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
 
                 {/* Start day offset */}
                 <div className="mb-5 flex items-center justify-between">
-                    <span className="text-xs font-bold text-zinc-400">Empezar desde</span>
+                    <span className="text-xs font-bold text-zinc-400">{t('scheduleModal.startFrom')}</span>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => setStartOffset(Math.max(1, startOffset - 1))}
@@ -237,7 +246,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                             {(() => {
                                 const d = new Date();
                                 d.setDate(d.getDate() + startOffset);
-                                return `${getDayLabel(d)} ${formatDate(d)}`;
+                                return `${getDayLabel(d, t, language)} ${formatDate(d, language)}`;
                             })()}
                         </span>
                         <button
@@ -255,17 +264,17 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                     {schedule.map(({ clip, index, date }) => (
                         <div key={index} className="flex items-center gap-3 p-3 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-colors">
                             <div className="w-14 shrink-0 text-center">
-                                <div className="text-[10px] font-bold text-purple-400 uppercase">{getDayLabel(date)}</div>
+                                <div className="text-[10px] font-bold text-purple-400 uppercase">{getDayLabel(date, t, language)}</div>
                                 <div className="text-lg font-bold text-white leading-tight">{date.getDate()}</div>
-                                <div className="text-[10px] text-zinc-500">{MONTHS[date.getMonth()]}</div>
+                                <div className="text-[10px] text-zinc-500">{(MONTH_LABELS[language] || MONTH_LABELS.en)[date.getMonth()]}</div>
                             </div>
 
                             <div className="flex-1 min-w-0">
                                 <div className="text-xs font-bold text-white truncate">
-                                    Clip {index + 1}
+                                    {t('common.clip', { number: index + 1 })}
                                 </div>
                                 <div className="text-[10px] text-zinc-500 truncate">
-                                    {clip.video_title_for_youtube_short || 'Viral Short'}
+                                    {clip.video_title_for_youtube_short || t('resultCard.viralShortVideo')}
                                 </div>
                                 <div className="text-[10px] text-zinc-600 mt-0.5">
                                     {time}h &middot; {TIMEZONES.find(t => t.value === timezone)?.label || timezone}
@@ -292,7 +301,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
 
                 {/* Platforms */}
                 <div className="mb-5">
-                    <label className="block text-xs font-bold text-zinc-400 mb-2">Plataformas</label>
+                    <label className="block text-xs font-bold text-zinc-400 mb-2">{t('scheduleModal.platforms')}</label>
                     <div className="flex gap-2">
                         <button
                             onClick={() => setPlatforms(p => ({ ...p, tiktok: !p.tiktok }))}
@@ -322,7 +331,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                 {(scheduling || done) && (
                     <div className="mb-5">
                         <div className="flex items-center justify-between text-xs text-zinc-400 mb-2">
-                            <span>{scheduling ? 'Programando...' : 'Completado'}</span>
+                            <span>{scheduling ? t('scheduleModal.scheduling') : t('scheduleModal.completed')}</span>
                             <span>{progress.current}/{progress.total}</span>
                         </div>
                         <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
@@ -334,9 +343,9 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                         {done && (
                             <div className="mt-3 text-xs text-center">
                                 {failCount === 0 ? (
-                                    <span className="text-green-400">Todos los clips programados correctamente</span>
+                                    <span className="text-green-400">{t('scheduleModal.allScheduled')}</span>
                                 ) : (
-                                    <span className="text-yellow-400">{successCount} programados, {failCount} fallidos</span>
+                                    <span className="text-yellow-400">{t('scheduleModal.partialScheduled', { success: successCount, fail: failCount })}</span>
                                 )}
                             </div>
                         )}
@@ -350,7 +359,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                         disabled={scheduling}
                         className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-xl font-medium transition-colors disabled:opacity-50"
                     >
-                        {done ? 'Cerrar' : 'Cancelar'}
+                        {done ? t('common.close') : t('common.cancel')}
                     </button>
                     {!done ? (
                         <button
@@ -361,12 +370,12 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                             {scheduling ? (
                                 <>
                                     <Loader2 size={16} className="animate-spin" />
-                                    Programando...
+                                    {t('scheduleModal.scheduling')}
                                 </>
                             ) : (
                                 <>
                                     <Calendar size={16} />
-                                    Programar {clips?.length || 0} Clips
+                                    {t('scheduleModal.scheduleCount', { count: clips?.length || 0 })}
                                 </>
                             )}
                         </button>
@@ -378,7 +387,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                             className="flex-1 py-3 bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-400 hover:to-purple-500 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 no-underline"
                         >
                             <ExternalLink size={16} />
-                            Ver Calendario
+                            {t('scheduleModal.viewCalendar')}
                         </a>
                     )}
                 </div>

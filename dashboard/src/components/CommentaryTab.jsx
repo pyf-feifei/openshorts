@@ -1,0 +1,1061 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { Activity, CheckCircle, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { getApiUrl } from '../config'
+import { buildGeminiHeaders, mergeGeminiEvents } from '../lib/geminiHeaders'
+import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
+import { COMMENTARY_DEFAULTS, getDefaultEdgeVoiceForLanguage } from './commentaryDefaults'
+
+const STYLE_OPTIONS = [
+  { id: 'documentary', label: '纪录片解说' },
+  { id: 'news', label: '新闻解读' },
+  { id: 'storytelling', label: '故事化旁白' },
+  { id: 'funny', label: '轻松吐槽' },
+  { id: 'educational', label: '知识科普' },
+]
+
+const DURATION_OPTIONS = [
+  { id: 'medium', label: '3-5 分钟' },
+  { id: 'short', label: '60-90 秒' },
+  { id: 'full', label: '尽量完整（自动精简）' },
+]
+
+const VOICE_PREVIEW_TEXT = {
+  zh: '你好，这是当前选择的中文解说声音试听。',
+  en: 'Hello, this is a preview of the selected English narration voice.',
+  es: 'Hola, esta es una prueba de la voz de narración seleccionada.',
+  ja: 'こんにちは。これは選択した日本語ナレーション音声のプレビューです。',
+}
+
+const EDGE_VOICE_OPTIONS = {
+  zh: [
+    { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 普通话女声' },
+    { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 普通话女声' },
+    { id: 'zh-CN-YunjianNeural', label: '云健 · 普通话男声' },
+    { id: 'zh-CN-YunxiNeural', label: '云希 · 普通话男声' },
+    { id: 'zh-CN-YunxiaNeural', label: '云夏 · 普通话男声' },
+    { id: 'zh-CN-YunyangNeural', label: '云扬 · 普通话男声' },
+    { id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北 · 东北话女声' },
+    { id: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮 · 陕西话女声' },
+    { id: 'zh-HK-HiuGaaiNeural', label: '曉佳 · 粤语女声' },
+    { id: 'zh-HK-HiuMaanNeural', label: '曉曼 · 粤语女声' },
+    { id: 'zh-HK-WanLungNeural', label: '雲龍 · 粤语男声' },
+    { id: 'zh-TW-HsiaoChenNeural', label: '曉臻 · 台湾女声' },
+    { id: 'zh-TW-HsiaoYuNeural', label: '曉雨 · 台湾女声' },
+    { id: 'zh-TW-YunJheNeural', label: '雲哲 · 台湾男声' },
+  ],
+  en: [
+    { id: 'en-US-JennyNeural', label: 'Jenny · US Female' },
+    { id: 'en-US-GuyNeural', label: 'Guy · US Male' },
+    { id: 'en-US-AriaNeural', label: 'Aria · US Female' },
+    { id: 'en-US-AvaNeural', label: 'Ava · US Female' },
+    { id: 'en-US-AndrewNeural', label: 'Andrew · US Male' },
+    { id: 'en-US-EmmaNeural', label: 'Emma · US Female' },
+    { id: 'en-US-BrianNeural', label: 'Brian · US Male' },
+    { id: 'en-US-AnaNeural', label: 'Ana · US Female' },
+    { id: 'en-US-ChristopherNeural', label: 'Christopher · US Male' },
+    { id: 'en-US-EricNeural', label: 'Eric · US Male' },
+    { id: 'en-US-MichelleNeural', label: 'Michelle · US Female' },
+    { id: 'en-US-RogerNeural', label: 'Roger · US Male' },
+    { id: 'en-US-SteffanNeural', label: 'Steffan · US Male' },
+    { id: 'en-US-AvaMultilingualNeural', label: 'Ava Multilingual · US Female' },
+    { id: 'en-US-AndrewMultilingualNeural', label: 'Andrew Multilingual · US Male' },
+    { id: 'en-US-BrianMultilingualNeural', label: 'Brian Multilingual · US Male' },
+    { id: 'en-US-EmmaMultilingualNeural', label: 'Emma Multilingual · US Female' },
+    { id: 'en-GB-LibbyNeural', label: 'Libby · UK Female' },
+    { id: 'en-GB-MaisieNeural', label: 'Maisie · UK Female' },
+    { id: 'en-GB-RyanNeural', label: 'Ryan · UK Male' },
+    { id: 'en-GB-SoniaNeural', label: 'Sonia · UK Female' },
+    { id: 'en-GB-ThomasNeural', label: 'Thomas · UK Male' },
+    { id: 'en-AU-NatashaNeural', label: 'Natasha · AU Female' },
+    { id: 'en-AU-WilliamMultilingualNeural', label: 'William Multilingual · AU Male' },
+    { id: 'en-CA-ClaraNeural', label: 'Clara · CA Female' },
+    { id: 'en-CA-LiamNeural', label: 'Liam · CA Male' },
+    { id: 'en-HK-YanNeural', label: 'Yan · HK Female' },
+    { id: 'en-HK-SamNeural', label: 'Sam · HK Male' },
+    { id: 'en-IN-NeerjaExpressiveNeural', label: 'Neerja Expressive · IN Female' },
+    { id: 'en-IN-NeerjaNeural', label: 'Neerja · IN Female' },
+    { id: 'en-IN-PrabhatNeural', label: 'Prabhat · IN Male' },
+    { id: 'en-IE-ConnorNeural', label: 'Connor · IE Male' },
+    { id: 'en-IE-EmilyNeural', label: 'Emily · IE Female' },
+    { id: 'en-KE-AsiliaNeural', label: 'Asilia · KE Female' },
+    { id: 'en-KE-ChilembaNeural', label: 'Chilemba · KE Male' },
+    { id: 'en-NZ-MitchellNeural', label: 'Mitchell · NZ Male' },
+    { id: 'en-NZ-MollyNeural', label: 'Molly · NZ Female' },
+    { id: 'en-NG-AbeoNeural', label: 'Abeo · NG Male' },
+    { id: 'en-NG-EzinneNeural', label: 'Ezinne · NG Female' },
+    { id: 'en-PH-JamesNeural', label: 'James · PH Male' },
+    { id: 'en-PH-RosaNeural', label: 'Rosa · PH Female' },
+    { id: 'en-SG-LunaNeural', label: 'Luna · SG Female' },
+    { id: 'en-SG-WayneNeural', label: 'Wayne · SG Male' },
+    { id: 'en-ZA-LeahNeural', label: 'Leah · ZA Female' },
+    { id: 'en-ZA-LukeNeural', label: 'Luke · ZA Male' },
+    { id: 'en-TZ-ElimuNeural', label: 'Elimu · TZ Male' },
+    { id: 'en-TZ-ImaniNeural', label: 'Imani · TZ Female' },
+  ],
+  es: [
+    { id: 'es-ES-ElviraNeural', label: 'Elvira · Spain Female' },
+    { id: 'es-ES-AlvaroNeural', label: 'Alvaro · Spain Male' },
+    { id: 'es-ES-XimenaNeural', label: 'Ximena · Spain Female' },
+    { id: 'es-MX-DaliaNeural', label: 'Dalia · Mexico Female' },
+    { id: 'es-MX-JorgeNeural', label: 'Jorge · Mexico Male' },
+    { id: 'es-US-AlonsoNeural', label: 'Alonso · US Male' },
+    { id: 'es-US-PalomaNeural', label: 'Paloma · US Female' },
+    { id: 'es-AR-ElenaNeural', label: 'Elena · Argentina Female' },
+    { id: 'es-AR-TomasNeural', label: 'Tomas · Argentina Male' },
+    { id: 'es-BO-MarceloNeural', label: 'Marcelo · Bolivia Male' },
+    { id: 'es-BO-SofiaNeural', label: 'Sofia · Bolivia Female' },
+    { id: 'es-CL-CatalinaNeural', label: 'Catalina · Chile Female' },
+    { id: 'es-CL-LorenzoNeural', label: 'Lorenzo · Chile Male' },
+    { id: 'es-CO-GonzaloNeural', label: 'Gonzalo · Colombia Male' },
+    { id: 'es-CO-SalomeNeural', label: 'Salome · Colombia Female' },
+    { id: 'es-CR-JuanNeural', label: 'Juan · Costa Rica Male' },
+    { id: 'es-CR-MariaNeural', label: 'Maria · Costa Rica Female' },
+    { id: 'es-CU-BelkysNeural', label: 'Belkys · Cuba Female' },
+    { id: 'es-CU-ManuelNeural', label: 'Manuel · Cuba Male' },
+    { id: 'es-DO-EmilioNeural', label: 'Emilio · Dominican Republic Male' },
+    { id: 'es-DO-RamonaNeural', label: 'Ramona · Dominican Republic Female' },
+    { id: 'es-EC-AndreaNeural', label: 'Andrea · Ecuador Female' },
+    { id: 'es-EC-LuisNeural', label: 'Luis · Ecuador Male' },
+    { id: 'es-SV-LorenaNeural', label: 'Lorena · El Salvador Female' },
+    { id: 'es-SV-RodrigoNeural', label: 'Rodrigo · El Salvador Male' },
+    { id: 'es-GQ-JavierNeural', label: 'Javier · Equatorial Guinea Male' },
+    { id: 'es-GQ-TeresaNeural', label: 'Teresa · Equatorial Guinea Female' },
+    { id: 'es-GT-AndresNeural', label: 'Andres · Guatemala Male' },
+    { id: 'es-GT-MartaNeural', label: 'Marta · Guatemala Female' },
+    { id: 'es-HN-CarlosNeural', label: 'Carlos · Honduras Male' },
+    { id: 'es-HN-KarlaNeural', label: 'Karla · Honduras Female' },
+    { id: 'es-NI-FedericoNeural', label: 'Federico · Nicaragua Male' },
+    { id: 'es-NI-YolandaNeural', label: 'Yolanda · Nicaragua Female' },
+    { id: 'es-PA-MargaritaNeural', label: 'Margarita · Panama Female' },
+    { id: 'es-PA-RobertoNeural', label: 'Roberto · Panama Male' },
+    { id: 'es-PY-MarioNeural', label: 'Mario · Paraguay Male' },
+    { id: 'es-PY-TaniaNeural', label: 'Tania · Paraguay Female' },
+    { id: 'es-PE-AlexNeural', label: 'Alex · Peru Male' },
+    { id: 'es-PE-CamilaNeural', label: 'Camila · Peru Female' },
+    { id: 'es-PR-KarinaNeural', label: 'Karina · Puerto Rico Female' },
+    { id: 'es-PR-VictorNeural', label: 'Victor · Puerto Rico Male' },
+    { id: 'es-UY-MateoNeural', label: 'Mateo · Uruguay Male' },
+    { id: 'es-UY-ValentinaNeural', label: 'Valentina · Uruguay Female' },
+    { id: 'es-VE-PaolaNeural', label: 'Paola · Venezuela Female' },
+    { id: 'es-VE-SebastianNeural', label: 'Sebastian · Venezuela Male' },
+  ],
+  ja: [
+    { id: 'ja-JP-NanamiNeural', label: 'Nanami · Female' },
+    { id: 'ja-JP-KeitaNeural', label: 'Keita · Male' },
+  ],
+}
+
+export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfig, openAICompatibleConfig, elevenLabsKey, setGeminiKeyPoolStats }) {
+  const [sourceMode, setSourceMode] = useState('url')
+  const [url, setUrl] = useState('')
+  const [videoFile, setVideoFile] = useState(null)
+  const [language, setLanguage] = useState(COMMENTARY_DEFAULTS.language)
+  const [style, setStyle] = useState(COMMENTARY_DEFAULTS.style)
+  const [targetDuration, setTargetDuration] = useState(COMMENTARY_DEFAULTS.targetDuration)
+  const [analysisMode, setAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
+  const [activeAnalysisMode, setActiveAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
+  const [ttsProvider, setTtsProvider] = useState('edge')
+  const [voiceId, setVoiceId] = useState('21m00Tcm4TlvDq8ikWAM')
+  const [edgeVoice, setEdgeVoice] = useState(COMMENTARY_DEFAULTS.edgeVoice)
+  const [originalAudioVolume, setOriginalAudioVolume] = useState(COMMENTARY_DEFAULTS.originalAudioVolume)
+  const [pauseOriginalAudioVolume, setPauseOriginalAudioVolume] = useState(COMMENTARY_DEFAULTS.pauseOriginalAudioVolume)
+  const [openAIFrameIntervalSeconds, setOpenAIFrameIntervalSeconds] = useState(COMMENTARY_DEFAULTS.openAIFrameIntervalSeconds)
+  const [openAIMaxFrames, setOpenAIMaxFrames] = useState(COMMENTARY_DEFAULTS.openAIMaxFrames)
+  const [openAISceneMaxKeyframes, setOpenAISceneMaxKeyframes] = useState(COMMENTARY_DEFAULTS.openAISceneMaxKeyframes)
+  const [openAIBatchSize, setOpenAIBatchSize] = useState(COMMENTARY_DEFAULTS.openAIBatchSize)
+  const [openAIVisualConcurrency, setOpenAIVisualConcurrency] = useState(COMMENTARY_DEFAULTS.openAIVisualConcurrency)
+  const [subtitles, setSubtitles] = useState(true)
+  const [aspectMode, setAspectMode] = useState('auto')
+  const [jobId, setJobId] = useState(null)
+  const [status, setStatus] = useState('idle')
+  const [logs, setLogs] = useState([])
+  const [backendStage, setBackendStage] = useState(null)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [uploadProgress, setUploadProgress] = useState(null)
+  const [uploadPhase, setUploadPhase] = useState('idle')
+  const [commentaryTasks, setCommentaryTasks] = useState([])
+  const [taskListStatus, setTaskListStatus] = useState('idle')
+  const [retryingJobId, setRetryingJobId] = useState(null)
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState('idle')
+  const audioRef = useRef(null)
+  const audioUrlRef = useRef(null)
+  const statusPollFailuresRef = useRef(0)
+  const eventsMergedRef = useRef(null)
+  const hasGeminiAccess = geminiConfig?.mode === 'official_pool'
+    ? (geminiConfig.keys || []).length > 0
+    : Boolean(geminiApiKey)
+  const hasSelectedAnalysisAccess = (mode = analysisMode) => (
+    mode === 'openai' ? hasOpenAICompatibleAccess(openAICompatibleConfig) : hasGeminiAccess
+  )
+  const buildAnalysisHeaders = (mode = analysisMode, extraHeaders = {}) => (
+    mode === 'openai'
+      ? buildOpenAICompatibleHeaders(openAICompatibleConfig, extraHeaders)
+      : buildGeminiHeaders(geminiConfig || geminiApiKey, geminiBaseUrl, extraHeaders)
+  )
+
+  useEffect(() => {
+    setEdgeVoice(getDefaultEdgeVoiceForLanguage(language))
+  }, [language])
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) audioRef.current.pause()
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current)
+    }
+  }, [])
+
+  const refreshCommentaryTasks = useCallback(async () => {
+    setTaskListStatus('loading')
+    try {
+      const res = await fetch(getApiUrl('/api/commentary/jobs'))
+      if (!res.ok) throw new Error(`Task list failed (${res.status})`)
+      const data = await res.json()
+      setCommentaryTasks(data.jobs || [])
+      setTaskListStatus('idle')
+    } catch {
+      setTaskListStatus('failed')
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshCommentaryTasks()
+  }, [refreshCommentaryTasks])
+
+  useEffect(() => {
+    if (!jobId || status !== 'processing') return undefined
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(getApiUrl(`/api/commentary/status/${jobId}`))
+        if (!res.ok) throw new Error(`Status check failed (${res.status})`)
+        const data = await res.json()
+        statusPollFailuresRef.current = 0
+        setLogs(data.logs || [])
+        setBackendStage(data.stage ? { stage: data.stage, label: data.stage_label, progress: data.stage_progress } : null)
+        setStatus(data.status)
+        if (data.request?.analysis_mode) setActiveAnalysisMode(data.request.analysis_mode)
+        if (data.result) setResult(data.result)
+        if (data.status === 'failed') setError((data.logs || []).slice(-1)[0] || 'Generation failed')
+        if ((data.status === 'completed' || data.status === 'failed') && data.gemini_events?.length && eventsMergedRef.current !== jobId) {
+          eventsMergedRef.current = jobId
+          setGeminiKeyPoolStats?.((prev) => mergeGeminiEvents(prev, data.gemini_events))
+        }
+        if (data.status === 'completed' || data.status === 'failed') refreshCommentaryTasks()
+      } catch (e) {
+        statusPollFailuresRef.current += 1
+        if (statusPollFailuresRef.current >= 5) {
+          setError(e.message)
+          setStatus('failed')
+          return
+        }
+        setError(`状态检查失败，正在重试... (${statusPollFailuresRef.current}/5)`)
+      }
+    }, 2500)
+    return () => clearInterval(timer)
+  }, [jobId, status, setGeminiKeyPoolStats, refreshCommentaryTasks])
+
+  const handleVoicePreview = async () => {
+    if (voicePreviewStatus === 'loading') return
+
+    setError('')
+    setVoicePreviewStatus('loading')
+
+    try {
+      if (audioRef.current) audioRef.current.pause()
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current)
+        audioUrlRef.current = null
+      }
+
+      const res = await fetch(getApiUrl('/api/commentary/voice-preview'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          language,
+          edge_voice: edgeVoice,
+          text: VOICE_PREVIEW_TEXT[language] || VOICE_PREVIEW_TEXT.zh,
+        }),
+      })
+
+      if (!res.ok) {
+        const fallbackMessage = `试听失败（HTTP ${res.status}）`
+        let message = fallbackMessage
+        const rawText = await res.text()
+        if (rawText) {
+          try {
+            const data = JSON.parse(rawText)
+            message = data.detail || data.message || rawText
+          } catch {
+            message = rawText
+          }
+        }
+        throw new Error(message)
+      }
+
+      const blob = await res.blob()
+      const audioUrl = URL.createObjectURL(blob)
+      const audio = new Audio(audioUrl)
+      audioRef.current = audio
+      audioUrlRef.current = audioUrl
+      audio.onended = () => setVoicePreviewStatus('idle')
+      audio.onerror = () => {
+        setVoicePreviewStatus('idle')
+        setError('试听音频播放失败')
+      }
+      setVoicePreviewStatus('playing')
+      await audio.play()
+    } catch (e) {
+      setVoicePreviewStatus('idle')
+      setError(e.message)
+    }
+  }
+
+  const createCommentaryJobWithUploadProgress = (headers, requestBody) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', getApiUrl('/api/commentary/generate'))
+    Object.entries(headers).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) xhr.setRequestHeader(key, value)
+    })
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        setUploadPhase('uploading')
+        return
+      }
+      setUploadPhase('uploading')
+      setUploadProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)))
+    }
+    xhr.onload = () => {
+      const rawText = xhr.responseText || ''
+      if (xhr.status < 200 || xhr.status >= 300) {
+        try {
+          const data = JSON.parse(rawText)
+          reject(new Error(data.detail || 'Generation failed'))
+        } catch {
+          reject(new Error(rawText || 'Generation failed'))
+        }
+        return
+      }
+      setUploadProgress(100)
+      setUploadPhase('creating')
+      try {
+        resolve(JSON.parse(rawText))
+      } catch {
+        reject(new Error('Invalid server response'))
+      }
+    }
+    xhr.onerror = () => reject(new Error('视频上传失败，请检查网络或后端服务'))
+    xhr.onabort = () => reject(new Error('视频上传已取消'))
+    xhr.send(requestBody)
+  })
+
+  const attachCommentaryTask = (task) => {
+    setError(task.error || '')
+    setActiveAnalysisMode(task.request?.analysis_mode || analysisMode)
+    setJobId(task.job_id)
+    setStatus(task.status || 'processing')
+    setLogs(task.logs || [])
+    setBackendStage(task.stage ? { stage: task.stage, label: task.stage_label, progress: task.stage_progress } : null)
+    setResult(task.result || null)
+    setUploadProgress(null)
+    setUploadPhase('idle')
+    statusPollFailuresRef.current = 0
+  }
+
+  const retryCommentaryTask = async (task) => {
+    const taskAnalysisMode = task.request?.analysis_mode || analysisMode
+    if (!hasSelectedAnalysisAccess(taskAnalysisMode)) {
+      setError(taskAnalysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : '请先在 Settings 配置 Gemini API Key')
+      return
+    }
+    setError('')
+    setActiveAnalysisMode(taskAnalysisMode)
+    setRetryingJobId(task.job_id)
+    try {
+      const headers = {
+        ...buildAnalysisHeaders(taskAnalysisMode, { 'Content-Type': 'application/json' }),
+        ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
+      }
+      const res = await fetch(getApiUrl(`/api/commentary/jobs/${task.job_id}/retry`), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({}),
+      })
+      if (!res.ok) {
+        let message = 'Retry failed'
+        try {
+          const responseData = await res.json()
+          message = responseData.detail || message
+        } catch {
+          message = await res.text()
+        }
+        throw new Error(message)
+      }
+      const data = await res.json()
+      setJobId(data.job_id)
+      setStatus('processing')
+      setLogs([...(task.logs || []), 'Retrying commentary remix from saved task checkpoints...'])
+      setBackendStage({ stage: 'queued', label: '准备重试', progress: null })
+      setResult(null)
+      setUploadProgress(null)
+      setUploadPhase('idle')
+      statusPollFailuresRef.current = 0
+      refreshCommentaryTasks()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setRetryingJobId(null)
+    }
+  }
+
+  const positiveNumberOrDefault = (value, fallback) => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+  }
+
+  const buildOpenAISamplingPayload = () => ({
+    openai_frame_interval_seconds: positiveNumberOrDefault(openAIFrameIntervalSeconds, COMMENTARY_DEFAULTS.openAIFrameIntervalSeconds),
+    openai_max_frames: Math.round(positiveNumberOrDefault(openAIMaxFrames, COMMENTARY_DEFAULTS.openAIMaxFrames)),
+    openai_scene_max_keyframes: Math.round(positiveNumberOrDefault(openAISceneMaxKeyframes, COMMENTARY_DEFAULTS.openAISceneMaxKeyframes)),
+    openai_batch_size: Math.round(positiveNumberOrDefault(openAIBatchSize, COMMENTARY_DEFAULTS.openAIBatchSize)),
+    openai_visual_concurrency: Math.round(positiveNumberOrDefault(openAIVisualConcurrency, COMMENTARY_DEFAULTS.openAIVisualConcurrency)),
+  })
+
+  const handleGenerate = async () => {
+    const usingFile = sourceMode === 'file'
+    if (!usingFile && !url.trim()) {
+      setError('请输入 YouTube URL')
+      return
+    }
+    if (usingFile && !videoFile) {
+      setError('请选择要上传的视频文件')
+      return
+    }
+    if (!hasSelectedAnalysisAccess(analysisMode)) {
+      setError(analysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : '请先在 Settings 配置 Gemini API Key')
+      return
+    }
+    if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
+      setError('选择 ElevenLabs 时需要先在 Settings 配置 ElevenLabs API Key')
+      return
+    }
+
+    setError('')
+    setActiveAnalysisMode(analysisMode)
+    setStatus('processing')
+    setLogs([usingFile ? 'Preparing to upload local video...' : 'Starting commentary remix...'])
+    setBackendStage(null)
+    setResult(null)
+    setUploadProgress(usingFile ? 0 : null)
+    setUploadPhase(usingFile ? 'uploading' : 'idle')
+    statusPollFailuresRef.current = 0
+
+    try {
+      const headers = {
+        ...buildAnalysisHeaders(analysisMode),
+        ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
+      }
+      let requestBody
+      if (usingFile) {
+        const formData = new FormData()
+        formData.append('file', videoFile)
+        formData.append('language', language)
+        formData.append('style', style)
+        formData.append('target_duration', targetDuration)
+        formData.append('analysis_mode', analysisMode)
+        if (analysisMode === 'openai') {
+          formData.append('openai_model', openAICompatibleConfig?.model || '')
+          Object.entries(buildOpenAISamplingPayload()).forEach(([key, value]) => {
+            formData.append(key, String(value))
+          })
+        }
+        if (analysisMode !== 'openai' && geminiConfig?.mode === 'official_pool') formData.append('gemini_pool', JSON.stringify(geminiConfig))
+        formData.append('tts_provider', ttsProvider)
+        if (voiceId) formData.append('voice_id', voiceId)
+        if (edgeVoice) formData.append('edge_voice', edgeVoice)
+        formData.append('original_audio_volume', String(Number(originalAudioVolume)))
+        formData.append('pause_original_audio_volume', String(Number(pauseOriginalAudioVolume)))
+        formData.append('subtitles', String(subtitles))
+        formData.append('aspect_mode', aspectMode)
+        formData.append('vertical', String(aspectMode === '9:16'))
+        requestBody = formData
+      } else {
+        headers['Content-Type'] = 'application/json'
+        requestBody = JSON.stringify({
+          url: url.trim(),
+          language,
+          style,
+          target_duration: targetDuration,
+          analysis_mode: analysisMode,
+          openai_model: analysisMode === 'openai' ? openAICompatibleConfig?.model : undefined,
+          ...(analysisMode === 'openai' ? buildOpenAISamplingPayload() : {}),
+          tts_provider: ttsProvider,
+          voice_id: voiceId || undefined,
+          edge_voice: edgeVoice || undefined,
+          original_audio_volume: Number(originalAudioVolume),
+          pause_original_audio_volume: Number(pauseOriginalAudioVolume),
+          subtitles,
+          aspect_mode: aspectMode,
+          vertical: aspectMode === '9:16',
+        })
+      }
+
+      let data
+      if (usingFile) {
+        data = await createCommentaryJobWithUploadProgress(headers, requestBody)
+      } else {
+        const res = await fetch(getApiUrl('/api/commentary/generate'), {
+          method: 'POST',
+          headers,
+          body: requestBody,
+        })
+
+        if (!res.ok) {
+          let message = 'Generation failed'
+          try {
+            const responseData = await res.json()
+            message = responseData.detail || message
+          } catch {
+            message = await res.text()
+          }
+          throw new Error(message)
+        }
+
+        data = await res.json()
+      }
+      setUploadPhase(usingFile ? 'processing' : 'idle')
+      setJobId(data.job_id)
+      refreshCommentaryTasks()
+    } catch (e) {
+      setError(e.message)
+      setStatus('failed')
+      setUploadPhase('idle')
+    }
+  }
+
+  const formatTaskTime = (value) => {
+    if (!value) return ''
+    try {
+      return new Date(value).toLocaleString()
+    } catch {
+      return value
+    }
+  }
+
+  const taskTitle = (task) => task.result?.title || task.source_filename || task.source_value || task.job_id
+
+  const latestLog = logs[logs.length - 1] || ''
+  const displayAnalysisMode = status === 'idle' ? analysisMode : activeAnalysisMode
+  const hasLogMatching = (pattern) => logs.some((line) => pattern.test(line))
+  const backendStepState = (stageName, doneStages = []) => {
+    if (status === 'completed' || doneStages.includes(backendStage?.stage)) return 'done'
+    if (backendStage?.stage === stageName) return 'active'
+    return 'pending'
+  }
+  const sourceStep = {
+    label: sourceMode === 'file' ? '上传原视频' : '准备源视频',
+    detail: sourceMode === 'file'
+      ? uploadProgress === null ? '等待上传' : uploadProgress >= 100 ? '上传完成' : `正在上传 ${uploadProgress}%`
+      : hasLogMatching(/Preparing source video|Downloading/i) ? '已开始' : '等待开始',
+    state: sourceMode === 'file'
+      ? uploadProgress >= 100 ? 'done' : uploadPhase === 'uploading' ? 'active' : status === 'processing' ? 'done' : 'pending'
+      : hasLogMatching(/Preparing source video|Downloading/i) ? 'done' : status === 'processing' ? 'active' : 'pending',
+    percent: sourceMode === 'file' ? uploadProgress : null,
+  }
+
+  const voiceStep = {
+    label: '生成语音并同步画面',
+    detail: backendStage?.stage === 'voice' ? (backendStage.label || latestLog) : hasLogMatching(/Mixing new voiceover/i) ? '语音和画面已同步' : /Generating synced commentary block|Adding original-audio pause block|Generating commentary voiceover|Creating AI-selected visual edit|Aligning edited visuals/i.test(latestLog) ? latestLog : '等待中',
+    state: backendStepState('voice', ['render', 'done']) === 'pending'
+      ? hasLogMatching(/Mixing new voiceover/i) ? 'done' : /Generating synced commentary block|Adding original-audio pause block|Generating commentary voiceover|Creating AI-selected visual edit|Aligning edited visuals/i.test(latestLog) ? 'active' : 'pending'
+      : backendStepState('voice', ['render', 'done']),
+  }
+
+  const renderStep = {
+    label: '合成最终视频',
+    detail: status === 'completed' ? '生成完成' : backendStage?.stage === 'render' ? (backendStage.label || latestLog) : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i.test(latestLog) ? latestLog : '等待中',
+    state: status === 'completed' ? 'done' : backendStage?.stage === 'render' ? 'active' : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i.test(latestLog) ? 'active' : 'pending',
+  }
+
+  const openAIFrameMatch = latestLog.match(/Extracted OpenAI-compatible analysis frames:\s*(\d+)\/(\d+)/i)
+  const openAIFramePercent = openAIFrameMatch ? Math.round((Number(openAIFrameMatch[1]) / Number(openAIFrameMatch[2])) * 100) : null
+  const voiceStarted = backendStage?.stage === 'voice' || hasLogMatching(/Generating synced commentary block|Adding original-audio pause block|Generating \d+ timestamp-synced commentary blocks|Mixing new voiceover/i)
+  const renderStarted = backendStage?.stage === 'render' || status === 'completed' || hasLogMatching(/Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i)
+  const openAIScriptStarted = hasLogMatching(/OpenAI-compatible model is writing|script validation failed|returned a corrected commentary script/i)
+  const openAIVisualStarted = backendStage?.stage === 'openai' || hasLogMatching(/OpenAI-compatible multimodal visual analysis batch/i)
+  const openAIFrameStarted = hasLogMatching(/Extracting dense timestamped frames|Extracted OpenAI-compatible analysis frames/i)
+  const openAITranscriptDone = openAIFrameStarted || openAIVisualStarted || openAIScriptStarted || voiceStarted || renderStarted
+  const openAIFrameDone = openAIVisualStarted || openAIScriptStarted || voiceStarted || renderStarted
+  const openAIVisualDone = openAIScriptStarted || voiceStarted || renderStarted
+  const openAIScriptDone = voiceStarted || renderStarted
+
+  const openAIAnalysisSteps = [
+    {
+      label: '转录完整视频',
+      detail: openAITranscriptDone ? '转录完成' : /Transcribing full video|Transcribing video with Faster-Whisper/i.test(latestLog) ? latestLog : '等待中',
+      state: openAITranscriptDone ? 'done' : /Transcribing full video|Transcribing video with Faster-Whisper/i.test(latestLog) ? 'active' : 'pending',
+    },
+    {
+      label: '抽取时间线画面帧',
+      detail: openAIFrameDone ? '抽帧完成' : openAIFrameMatch ? `正在抽帧 ${openAIFrameMatch[1]}/${openAIFrameMatch[2]}` : /Extracting dense timestamped frames/i.test(latestLog) ? latestLog : '等待中',
+      state: openAIFrameDone ? 'done' : openAIFrameStarted ? 'active' : 'pending',
+      percent: openAIFrameDone ? 100 : openAIFramePercent,
+    },
+    {
+      label: 'OpenAI 多模态分析',
+      detail: openAIVisualDone ? '视觉分析完成' : /OpenAI-compatible multimodal visual analysis batch/i.test(latestLog) ? latestLog : backendStage?.stage === 'openai' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIVisualDone ? 'done' : openAIVisualStarted ? 'active' : 'pending',
+    },
+    {
+      label: 'OpenAI 写解说脚本',
+      detail: openAIScriptDone ? '脚本已通过校验' : openAIScriptStarted ? latestLog : '等待中',
+      state: openAIScriptDone ? 'done' : openAIScriptStarted ? 'active' : 'pending',
+    },
+  ]
+
+  const currentGeminiAnalysisSteps = [
+    {
+      label: '转录并抽取关键帧',
+      detail: hasLogMatching(/Generating original commentary script|Gemini is analyzing/i) ? '视觉上下文已准备' : /Transcribing full video|Extracting keyframes/i.test(latestLog) ? latestLog : '等待中',
+      state: hasLogMatching(/Generating original commentary script|Gemini is analyzing/i) ? 'done' : /Transcribing full video|Extracting keyframes/i.test(latestLog) ? 'active' : 'pending',
+    },
+    {
+      label: 'Gemini 分析并写解说',
+      detail: backendStage?.stage === 'gemini' ? (backendStage.label || latestLog) : hasLogMatching(/returned a commentary script/i) ? '脚本已返回' : /Gemini is analyzing|Generating original commentary script/i.test(latestLog) ? latestLog : '等待中',
+      state: backendStepState('gemini', ['voice', 'render', 'done']) === 'pending'
+        ? hasLogMatching(/returned a commentary script/i) ? 'done' : /Gemini is analyzing|Generating original commentary script/i.test(latestLog) ? 'active' : 'pending'
+        : backendStepState('gemini', ['voice', 'render', 'done']),
+    },
+  ]
+
+  const geminiVideoAnalysisSteps = [
+    {
+      label: '压缩 Gemini 分析视频',
+      detail: backendStage?.stage === 'analysis_compress' && typeof backendStage.progress === 'number'
+        ? `正在压缩 ${backendStage.progress}%`
+        : latestLog.match(/Compressing .*?(\d+)%/)?.[1]
+          ? `正在压缩 ${latestLog.match(/Compressing .*?(\d+)%/)?.[1]}%`
+          : hasLogMatching(/Gemini analysis video ready|No-audio Gemini analysis video ready/i) ? '压缩完成' : '等待中',
+      state: backendStepState('analysis_compress', ['analysis_upload', 'gemini', 'voice', 'render', 'done']) === 'pending'
+        ? hasLogMatching(/Gemini analysis video ready|No-audio Gemini analysis video ready/i)
+          ? 'done'
+          : /Compressing Gemini analysis video|Compressing no-audio Gemini analysis video|creating no-audio fallback/i.test(latestLog)
+            ? 'active'
+            : 'pending'
+        : backendStepState('analysis_compress', ['analysis_upload', 'gemini', 'voice', 'render', 'done']),
+      percent: backendStage?.stage === 'analysis_compress' && typeof backendStage.progress === 'number'
+        ? backendStage.progress
+        : Number(latestLog.match(/Compressing .*?(\d+)%/)?.[1] || '') || null,
+    },
+    {
+      label: '上传 Gemini 分析副本',
+      detail: backendStage?.stage === 'analysis_upload' ? (backendStage.label || latestLog) : hasLogMatching(/ready for model analysis/i) ? 'Gemini 文件已就绪' : /Uploading 360p Gemini|Files API processing|waiting for Files API/i.test(latestLog) ? latestLog : '等待中',
+      state: backendStepState('analysis_upload', ['gemini', 'voice', 'render', 'done']) === 'pending'
+        ? hasLogMatching(/ready for model analysis/i) ? 'done' : /Uploading 360p Gemini|Files API processing|waiting for Files API/i.test(latestLog) ? 'active' : 'pending'
+        : backendStepState('analysis_upload', ['gemini', 'voice', 'render', 'done']),
+    },
+    ...currentGeminiAnalysisSteps.slice(1),
+  ]
+
+  const progressSteps = [
+    sourceStep,
+    ...(displayAnalysisMode === 'openai' ? openAIAnalysisSteps : displayAnalysisMode === 'video' ? geminiVideoAnalysisSteps : currentGeminiAnalysisSteps),
+    voiceStep,
+    renderStep,
+  ]
+
+  const submitLabel = status === 'processing'
+    ? sourceMode === 'file' && uploadPhase === 'uploading' && uploadProgress !== null
+      ? `正在上传视频 ${uploadProgress}%`
+      : sourceMode === 'file' && uploadPhase === 'creating'
+        ? '上传完成，正在创建任务...'
+        : '生成中...'
+    : '生成二创解说视频'
+
+  const reset = () => {
+    setStatus('idle')
+    setJobId(null)
+    setLogs([])
+    setBackendStage(null)
+    setResult(null)
+    setError('')
+    setUploadProgress(null)
+    setUploadPhase('idle')
+    statusPollFailuresRef.current = 0
+  }
+
+  return (
+    <div className="h-full overflow-y-auto p-6 md:p-8 animate-[fadeIn_0.3s_ease-out]">
+      <div className="max-w-[88rem] mx-auto space-y-8">
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+          <div>
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 text-xs font-medium mb-4">
+              <Mic2 size={14} /> Commentary Remix
+            </div>
+            <h1 className="text-3xl md:text-4xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
+              整视频二创解说
+            </h1>
+            <p className="text-zinc-400 mt-3 max-w-2xl">
+              输入 YouTube 链接或上传本地视频，自动转录、生成原创解说稿、合成旁白，并与原视频画面混音输出一个完整解说视频。
+            </p>
+          </div>
+          {status !== 'idle' && (
+            <button onClick={reset} className="btn-secondary flex items-center gap-2">
+              <RefreshCcw size={16} /> 新任务
+            </button>
+          )}
+        </div>
+
+        <div className="grid xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.55fr)] gap-6">
+          <div className="glass-panel p-6 space-y-5">
+            <div className="space-y-3">
+              <div className="flex gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-1">
+                <button
+                  type="button"
+                  onClick={() => setSourceMode('url')}
+                  disabled={status === 'processing'}
+                  className={`flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all ${sourceMode === 'url' ? 'bg-cyan-500/15 text-cyan-200' : 'text-zinc-400 hover:text-white'}`}
+                >
+                  <Youtube size={16} /> YouTube URL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceMode('file')}
+                  disabled={status === 'processing'}
+                  className={`flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all ${sourceMode === 'file' ? 'bg-cyan-500/15 text-cyan-200' : 'text-zinc-400 hover:text-white'}`}
+                >
+                  <Upload size={16} /> 上传视频
+                </button>
+              </div>
+
+              {sourceMode === 'url' ? (
+                <div>
+                  <label className="block text-sm text-zinc-300 mb-2">YouTube URL</label>
+                  <div className="relative">
+                    <Youtube size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      className="input-field pl-10"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      disabled={status === 'processing'}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm text-zinc-300 mb-2">上传本地视频</label>
+                  <div className={`rounded-xl border border-dashed p-4 transition-all ${videoFile ? 'border-cyan-500/40 bg-cyan-500/5' : 'border-white/15 bg-white/[0.03]'}`}>
+                    {videoFile ? (
+                      <div className="flex items-center gap-3">
+                        <FileVideo className="shrink-0 text-cyan-300" size={22} />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-zinc-100">{videoFile.name}</div>
+                          <div className="text-xs text-zinc-500">{(videoFile.size / 1024 / 1024).toFixed(1)} MB</div>
+                        </div>
+                        {uploadProgress !== null && (
+                          <div className="hidden sm:flex min-w-[120px] flex-col gap-1">
+                            <div className="flex items-center justify-between text-[11px] text-cyan-200">
+                              <span>{uploadProgress >= 100 ? '上传完成' : '上传中'}</span>
+                              <span>{uploadProgress}%</span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                              <div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${uploadProgress}%` }} />
+                            </div>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setVideoFile(null)}
+                          disabled={status === 'processing'}
+                          className="rounded-lg p-2 text-zinc-400 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                          aria-label="移除上传视频"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    ) : (
+                      <label className="block cursor-pointer text-center">
+                        <input
+                          type="file"
+                          accept="video/*"
+                          className="hidden"
+                          disabled={status === 'processing'}
+                          onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
+                        />
+                        <Upload className="mx-auto mb-2 text-zinc-500" size={24} />
+                        <div className="text-sm text-zinc-300">点击选择本地视频</div>
+                        <div className="mt-1 text-xs text-zinc-500">上传后服务器会生成 360p Gemini 分析副本；最终剪辑仍使用原始上传视频。</div>
+                      </label>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">输出语言</label>
+                <select value={language} onChange={(e) => setLanguage(e.target.value)} className="input-field">
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                  <option value="es">Español</option>
+                  <option value="ja">日本語</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">解说风格</label>
+                <select value={style} onChange={(e) => setStyle(e.target.value)} className="input-field">
+                  {STYLE_OPTIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">目标长度</label>
+                <select value={targetDuration} onChange={(e) => setTargetDuration(e.target.value)} className="input-field">
+                  {DURATION_OPTIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">AI 分析模式</label>
+                <select value={analysisMode} onChange={(e) => setAnalysisMode(e.target.value)} className="input-field">
+                  <option value="current">当前模式：转录文本 + 关键帧</option>
+                  <option value="video">Gemini 视频输入：完整视频分析</option>
+                  <option value="openai">OpenAI 兼容多模态：抽帧全片分析</option>
+                </select>
+                <p className="text-xs text-zinc-500 mt-1">Gemini 视频模式会上传 360p 分析副本；OpenAI 兼容模式会转录全片并按时间线密集抽帧，分批发送到 Settings 里配置的多模态接口。最终剪辑仍使用高清源视频。</p>
+              </div>
+              {analysisMode === 'openai' && (
+                <div className="sm:col-span-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] p-4 space-y-4">
+                  <div>
+                    <div className="text-sm font-medium text-cyan-100">OpenAI 兼容抽帧设置</div>
+                    <p className="text-xs text-zinc-400 mt-1">这些参数仅在 OpenAI 兼容多模态模式生效；Gemini 模式会忽略。更密集抽帧能提升长视频画面理解，但会增加处理时间和 API 成本。</p>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">抽帧间隔（秒）</label>
+                      <input type="number" min="1" max="60" step="0.5" value={openAIFrameIntervalSeconds} onChange={(e) => setOpenAIFrameIntervalSeconds(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">每隔多少秒采样一帧；数值越小，画面理解越细，但会增加抽帧时间和多模态调用成本。默认 3 秒。</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">全片最多分析帧数</label>
+                      <input type="number" min="1" max="2000" step="1" value={openAIMaxFrames} onChange={(e) => setOpenAIMaxFrames(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">限制整条视频最多发送给 OpenAI 兼容模型的帧数；上限越高，批次数、耗时和费用越高。默认 1800。</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">单场景最多关键帧</label>
+                      <input type="number" min="1" max="600" step="1" value={openAISceneMaxKeyframes} onChange={(e) => setOpenAISceneMaxKeyframes(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">场景感知抽帧时，每个镜头/场景最多保留多少关键帧；动态场景可用更高值覆盖细节。默认 60。</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">每批图片数</label>
+                      <input type="number" min="1" max="32" step="1" value={openAIBatchSize} onChange={(e) => setOpenAIBatchSize(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 32。</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">视觉分析并发数</label>
+                      <input type="number" min="1" max="8" step="1" value={openAIVisualConcurrency} onChange={(e) => setOpenAIVisualConcurrency(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 3。</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">TTS 引擎</label>
+                <select value={ttsProvider} onChange={(e) => setTtsProvider(e.target.value)} className="input-field">
+                  <option value="edge">Edge TTS 免费</option>
+                  <option value="elevenlabs">ElevenLabs 高质量</option>
+                </select>
+              </div>
+              {ttsProvider === 'edge' ? (
+                <div>
+                  <label className="block text-sm text-zinc-300 mb-2">Edge 语音</label>
+                  <div className="flex gap-2">
+                    <select value={edgeVoice} onChange={(e) => setEdgeVoice(e.target.value)} className="input-field flex-1">
+                      {(EDGE_VOICE_OPTIONS[language] || EDGE_VOICE_OPTIONS.zh).map((item) => (
+                        <option key={item.id} value={item.id}>{item.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleVoicePreview}
+                      disabled={status === 'processing' || voicePreviewStatus === 'loading'}
+                      className="shrink-0 inline-flex items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm font-medium text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    >
+                      {voicePreviewStatus === 'loading' ? <Loader2 size={16} className="animate-spin" /> : voicePreviewStatus === 'playing' ? <Volume2 size={16} /> : <Play size={16} />}
+                      试听
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm text-zinc-300 mb-2">ElevenLabs Voice ID</label>
+                  <input value={voiceId} onChange={(e) => setVoiceId(e.target.value)} className="input-field" placeholder="21m00Tcm4TlvDq8ikWAM" />
+                </div>
+              )}
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">解说时原视频音量：{Math.round(originalAudioVolume * 100)}%</label>
+                <input
+                  type="range"
+                  min="0"
+                  max="0.5"
+                  step="0.01"
+                  value={originalAudioVolume}
+                  onChange={(e) => setOriginalAudioVolume(e.target.value)}
+                  className="w-full"
+                />
+                <p className="text-xs text-zinc-500 mt-1">控制 AI 解说说话时保留多少原片声音，建议 5%-10%。</p>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">无解说片段原视频音量：{Math.round(pauseOriginalAudioVolume * 100)}%</label>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={pauseOriginalAudioVolume}
+                  onChange={(e) => setPauseOriginalAudioVolume(e.target.value)}
+                  className="w-full"
+                />
+                <p className="text-xs text-zinc-500 mt-1">控制 pause 无解说片段的原声大小，想保留现场声可设为 50%-100%。</p>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm text-zinc-300 mb-2">视频比例</label>
+              <select value={aspectMode} onChange={(e) => setAspectMode(e.target.value)} className="input-field">
+                <option value="auto">自动保持原比例</option>
+                <option value="9:16">强制 9:16 竖屏</option>
+                <option value="16:9">强制 16:9 横屏</option>
+              </select>
+              <p className="text-xs text-zinc-500 mt-1">未选择强制比例时，原视频是 9:16 就保持竖屏，是 16:9 就保持横屏。</p>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3">
+              <label className="flex items-center gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
+                <input type="checkbox" checked={subtitles} onChange={(e) => setSubtitles(e.target.checked)} />
+                <span className="text-sm text-zinc-300">{targetDuration === 'full' ? '生成外挂字幕' : '生成并烧录字幕'}</span>
+              </label>
+            </div>
+
+            {error && <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-sm">{error}</div>}
+
+            <button
+              onClick={handleGenerate}
+              disabled={status === 'processing' || (sourceMode === 'url' && !url.trim()) || (sourceMode === 'file' && !videoFile)}
+              className="btn-primary w-full flex items-center justify-center gap-2 py-3"
+            >
+              {status === 'processing' ? <Loader2 size={18} className="animate-spin" /> : <Film size={18} />}
+              {submitLabel}
+            </button>
+          </div>
+
+          <div className="space-y-6">
+          <div className="glass-panel p-6 flex flex-col min-h-[420px]">
+            <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
+              <Activity size={18} className={status === 'processing' ? 'text-cyan-400 animate-pulse' : 'text-zinc-400'} />
+              任务状态
+            </h2>
+            <div className="mb-4 space-y-2">
+              {progressSteps.map((step) => (
+                <div key={step.label} className={`rounded-xl border p-3 ${step.state === 'active' ? 'border-cyan-500/30 bg-cyan-500/10' : step.state === 'done' ? 'border-green-500/20 bg-green-500/10' : 'border-white/10 bg-white/[0.03]'}`}>
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className={step.state === 'active' ? 'text-cyan-200' : step.state === 'done' ? 'text-green-300' : 'text-zinc-400'}>{step.label}</span>
+                    <span className="text-xs text-zinc-500">{step.detail}</span>
+                  </div>
+                  {typeof step.percent === 'number' && (
+                    <div className="mt-2 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                      <div className={`h-full rounded-full transition-all ${step.state === 'done' ? 'bg-green-400' : 'bg-cyan-400'}`} style={{ width: `${Math.max(0, Math.min(100, step.percent))}%` }} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex-1 rounded-xl bg-black/30 border border-white/5 p-4 overflow-y-auto custom-scrollbar font-mono text-xs text-zinc-400 space-y-2">
+              {logs.length === 0 && <div>等待开始...</div>}
+              {logs.map((line, idx) => <div key={`${line}-${idx}`}>› {line}</div>)}
+            </div>
+
+            {result && (
+              <div className="mt-5 space-y-4">
+                <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20">
+                  <div className="flex items-center gap-2 text-green-300 font-semibold mb-2">
+                    <CheckCircle size={18} /> 生成完成
+                  </div>
+                  <div className="text-sm text-zinc-300 font-medium">{result.title}</div>
+                  <p className="text-xs text-zinc-500 mt-2 line-clamp-3">{result.summary}</p>
+                </div>
+
+                <video src={getApiUrl(result.video_url)} controls className="w-full rounded-xl border border-white/10 bg-black" />
+
+                <div className="grid grid-cols-2 gap-3">
+                  <a href={getApiUrl(result.video_url)} download className="btn-primary flex items-center justify-center gap-2 text-sm">
+                    <Download size={16} /> 下载视频
+                  </a>
+                  <a href={getApiUrl(`/videos/${jobId}/${result.script_path}`)} target="_blank" rel="noopener noreferrer" className="btn-secondary flex items-center justify-center gap-2 text-sm">
+                    <FileText size={16} /> 查看脚本
+                  </a>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="glass-panel p-6">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold flex items-center gap-2">
+                <History size={18} className="text-zinc-400" /> 历史任务
+              </h2>
+              <button type="button" onClick={refreshCommentaryTasks} className="text-xs text-cyan-300 hover:text-cyan-200">
+                {taskListStatus === 'loading' ? '刷新中...' : '刷新'}
+              </button>
+            </div>
+            <div className="space-y-3 max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
+              {commentaryTasks.length === 0 && (
+                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-zinc-500">
+                  暂无历史任务
+                </div>
+              )}
+              {commentaryTasks.map((task) => (
+                <div key={task.job_id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-zinc-200">{taskTitle(task)}</div>
+                      <div className="mt-1 text-xs text-zinc-500">{task.stage_label || task.status} · {formatTaskTime(task.updated_at || task.created_at)}</div>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] ${task.status === 'completed' ? 'bg-green-500/10 text-green-300' : task.status === 'failed' ? 'bg-red-500/10 text-red-300' : 'bg-cyan-500/10 text-cyan-300'}`}>
+                      {task.status || 'unknown'}
+                    </span>
+                  </div>
+                  {task.error && <div className="line-clamp-2 text-xs text-red-300">{task.error}</div>}
+                  <div className="grid grid-cols-3 gap-2">
+                    <button type="button" onClick={() => attachCommentaryTask(task)} className="btn-secondary text-xs py-2">
+                      查看状态
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => retryCommentaryTask(task)}
+                      disabled={status === 'processing' || task.status === 'processing' || retryingJobId === task.job_id}
+                      className="btn-secondary text-xs py-2 disabled:opacity-50"
+                    >
+                      {retryingJobId === task.job_id ? '重试中...' : '重试'}
+                    </button>
+                    {task.result?.video_url ? (
+                      <a href={getApiUrl(task.result.video_url)} download className="btn-primary text-xs py-2 text-center">
+                        下载结果
+                      </a>
+                    ) : (
+                      <button type="button" disabled className="btn-secondary text-xs py-2 opacity-40">下载结果</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

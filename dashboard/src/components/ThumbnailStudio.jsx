@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Upload, Image, Loader2, Send, Check, Download, ArrowRight, ArrowLeft, Sparkles, Video, Type, X, Plus, MessageSquare, FileText, Youtube, AlertCircle, CheckCircle2, Settings } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { buildGeminiHeaders } from '../lib/geminiHeaders';
 
 const STEPS = ['Input', 'Titles', 'Generate', 'Description', 'Publish'];
 
@@ -92,7 +93,7 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon: Icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId }) {
+export default function ThumbnailStudio({ geminiApiKey, geminiBaseUrl, geminiConfig, uploadPostKey, uploadUserId }) {
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -136,6 +137,10 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const getGeminiHeaders = (extra = {}) => {
+    return buildGeminiHeaders(geminiConfig || geminiApiKey, geminiBaseUrl, extra);
   };
 
   // --- Background Pre-upload (starts Whisper immediately) ---
@@ -182,7 +187,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
       const res = await fetch(getApiUrl('/api/thumbnail/analyze'), {
         method: 'POST',
-        headers: { 'X-Gemini-Key': geminiApiKey },
+        headers: getGeminiHeaders(),
         body: formData
       });
 
@@ -225,10 +230,9 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
       setSessionId(newSessionId);
       fetch(getApiUrl('/api/thumbnail/titles'), {
         method: 'POST',
-        headers: {
+        headers: getGeminiHeaders({
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
-        },
+        }),
         body: JSON.stringify({ title: manualTitle, session_id: newSessionId })
       }).catch(() => { });
     }
@@ -248,10 +252,9 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
     try {
       const res = await fetch(getApiUrl('/api/thumbnail/titles'), {
         method: 'POST',
-        headers: {
+        headers: getGeminiHeaders({
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
-        },
+        }),
         body: JSON.stringify({ session_id: sessionId, message: userMsg })
       });
 
@@ -293,7 +296,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
       const res = await fetch(getApiUrl('/api/thumbnail/generate'), {
         method: 'POST',
-        headers: { 'X-Gemini-Key': geminiApiKey },
+        headers: getGeminiHeaders(),
         body: formData
       });
 
@@ -343,10 +346,9 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
     try {
       const res = await fetch(getApiUrl('/api/thumbnail/describe'), {
         method: 'POST',
-        headers: {
+        headers: getGeminiHeaders({
           'Content-Type': 'application/json',
-          'X-Gemini-Key': geminiApiKey
-        },
+        }),
         body: JSON.stringify({ session_id: sessionId, title: finalTitle })
       });
 

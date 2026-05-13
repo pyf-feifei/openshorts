@@ -3,7 +3,7 @@ services:
     build: .
     container_name: openshorts-backend
     ports:
-      - "8000:8000"
+      - "58001:58001"
     volumes:
       - .:/app
       - /app/__pycache__
