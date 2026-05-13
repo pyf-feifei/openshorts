@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import httpx
@@ -95,6 +95,7 @@ FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION = float(os.environ.get("OPENSHORTS_FULL
 GEMINI_SAFE_INPUT_TOKEN_BUDGET = int(os.environ.get("OPENSHORTS_GEMINI_SAFE_INPUT_TOKEN_BUDGET", "180000"))
 GEMINI_LOW_RES_TOKENS_PER_SECOND = 100.0
 GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "4")))
+COMMENTARY_BANNED_PHRASES = ("画面汇总",)
 
 
 EDGE_VOICES_BY_LANGUAGE = {
@@ -722,11 +723,24 @@ def _normalize_script_narration(data: Dict) -> str:
     return narration
 
 
+def _banned_phrase_instruction() -> str:
+    phrases = "、".join(f"“{phrase}”" for phrase in COMMENTARY_BANNED_PHRASES)
+    return f"- Never use these banned phrases anywhere in the returned JSON: {phrases}. Describe the concrete scene directly instead of using meta-summary wording."
+
+
+def _validate_no_banned_commentary_phrases(data: Dict) -> None:
+    serialized = json.dumps(data, ensure_ascii=False)
+    for phrase in COMMENTARY_BANNED_PHRASES:
+        if phrase in serialized:
+            raise Exception(f"AI commentary output contains banned phrase: {phrase}")
+
+
 def _has_visual_plan(data: Dict) -> bool:
     return bool(data.get("narration_blocks") or data.get("chapters"))
 
 
 def _validate_commentary_script_for_target(data: Dict, duration: float, target_duration: str, language: str) -> None:
+    _validate_no_banned_commentary_phrases(data)
     if target_duration != "full":
         return
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
@@ -851,6 +865,7 @@ REGENERATE FROM THE ATTACHED VIDEO:
 - The final narration_blocks must include selected source ranges from the beginning, middle, and later ending portion of the source; at least one block must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
 - Do not return a continuous near-full-source timeline; select about {int(target_seconds)} seconds of useful visuals, not {int(duration)} seconds.
 - Write detailed scene-by-scene narration for about {int(target_seconds)} seconds of edited visuals.
+{_banned_phrase_instruction()}
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
@@ -887,6 +902,7 @@ FINALIZE COMPLETE COMMENTARY:
 - Do not invent unrelated scenes. Every paragraph must follow the timestamps, visual descriptions, chapters, or edit_segments in the visual plan.
 - If the visual plan preserves a near-full-source continuous timeline, replace it with a real edit decision list that selects about {int(target_seconds)} seconds and removes repetitive, slow, duplicated, waiting, setup, walking, camera drift, and low-value filler ranges.
 - Write a complete Simplified Chinese voiceover for about {int(target_seconds)} seconds of edited visuals.
+{_banned_phrase_instruction()}
 - The final narration must be at least {min_chars} non-whitespace characters.
 - The final narration must be at most {max_chars} non-whitespace characters; keep it paced for the selected visuals instead of stretching the edit.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
@@ -1104,6 +1120,7 @@ VISUAL CONTEXT:
 {visual_instruction}
 {openai_visual_section}
 RULES:
+{_banned_phrase_instruction()}
 - Do not merely translate the transcript.
 - Rewrite it as an original, natural commentary narration.
 - Preserve the important facts, sequence, and context from the source.
@@ -1790,6 +1807,7 @@ REGENERATE FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 - Select chronological edit_segments that cover every major visible process stage across the source timeline while cutting repetitive, slow, duplicated, waiting, setup, walking, camera drift, and low-value filler ranges.
 - The final narration_blocks must include selected source ranges from the beginning, middle, and later ending portion of the source; at least one block must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
 - Do not return a continuous near-full-source timeline; select about {int(target_seconds)} seconds of useful visuals, not {int(duration)} seconds.
+{_banned_phrase_instruction()}
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
@@ -2810,7 +2828,7 @@ def _create_block_synced_visuals_and_audio(
     pause_original_audio_volume: float = 0.6,
     preserve_source_resolution: bool = True,
     progress: Optional[Callable[[str], None]] = None,
-) -> Optional[str]:
+) -> Tuple[Optional[str], List[float]]:
     blocks = _normalize_narration_blocks(narration_blocks, _get_video_duration(video_path))
     if not blocks:
         raise Exception("Cannot build synced commentary without narration_blocks")
@@ -2917,8 +2935,8 @@ def _create_block_synced_visuals_and_audio(
     if ambient_parts:
         _concat_media_parts(ambient_parts, ambient_audio_path, part_dir, codec="aac")
         _force_audio_clip_duration(ambient_audio_path, visual_duration_total, part_dir, bitrate="128k")
-        return ambient_audio_path
-    return None
+        return ambient_audio_path, part_durations
+    return None, part_durations
 
 
 def _mix_voiceover_with_video(
@@ -3044,14 +3062,17 @@ def _write_text_timed_ass(narration: str, audio_path: str, output_path: str) -> 
         f.write("\n".join(lines))
 
 
-def _write_block_timed_ass(narration_blocks: List[Dict], output_path: str) -> None:
+def _write_block_timed_ass(narration_blocks: List[Dict], output_path: str, block_durations: Optional[List[float]] = None) -> None:
     blocks = _normalize_narration_blocks(narration_blocks, max((float(block.get("end") or 0) for block in narration_blocks or [] if isinstance(block, dict)), default=0.0))
     if not blocks:
         raise Exception("Cannot generate subtitles from empty narration blocks")
     lines = _ass_header_lines()
     cursor = 0.0
-    for block in blocks:
-        block_duration = max(0.1, float(block["end"]) - float(block["start"]))
+    for index, block in enumerate(blocks):
+        if block_durations and index < len(block_durations):
+            block_duration = max(0.1, float(block_durations[index] or 0.0))
+        else:
+            block_duration = max(0.1, float(block["end"]) - float(block["start"]))
         _append_weighted_subtitle_lines(lines, _split_narration_sentences(block["narration"]), cursor, block_duration)
         cursor += block_duration
     with open(output_path, "w", encoding="utf-8-sig") as f:
@@ -3298,10 +3319,11 @@ def generate_commentary_video(
     ambient_audio_path = os.path.join(output_dir, f"{slug}_ambient.m4a")
     trim_to_voiceover = True
     preserve_source_resolution = target_duration == "full"
+    synced_block_durations = []
 
     if target_duration == "full" and narration_blocks:
         log(f"Generating {len(narration_blocks)} timestamp-synced commentary blocks with {tts_provider} TTS...")
-        ambient_audio = _create_block_synced_visuals_and_audio(
+        ambient_audio, synced_block_durations = _create_block_synced_visuals_and_audio(
             video_path=video_path,
             narration_blocks=narration_blocks,
             timed_video_path=timed_video_path,
@@ -3368,7 +3390,7 @@ def generate_commentary_video(
         subtitled_path = os.path.join(output_dir, f"{slug}_final.mp4")
         log("Generating text-timed subtitles from the commentary narration...")
         if target_duration == "full" and narration_blocks:
-            _write_block_timed_ass(narration_blocks, subtitle_path)
+            _write_block_timed_ass(narration_blocks, subtitle_path, synced_block_durations)
         else:
             _write_text_timed_ass(script["narration"], voiceover_path, subtitle_path)
         if target_duration == "full":
@@ -3397,6 +3419,7 @@ def generate_commentary_video(
         "tts_provider": tts_provider,
         "voice": edge_voice or voice_id,
         "subtitle": os.path.basename(subtitle_path) if subtitle_path else None,
+        "subtitle_block_durations": synced_block_durations,
         "script_path": os.path.basename(script_path),
         "duration": duration,
         "output_aspect": resolved_aspect,
