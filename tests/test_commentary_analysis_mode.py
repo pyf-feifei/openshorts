@@ -104,6 +104,24 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             commentary.resolve_openai_sampling_options(visual_concurrency=99)["visual_concurrency"],
         )
 
+    def test_commentary_block_concurrency_defaults_to_three(self):
+        with patch.object(commentary, "COMMENTARY_BLOCK_CONCURRENCY", 3):
+            self.assertEqual(3, commentary.resolve_commentary_block_concurrency())
+
+    def test_commentary_block_concurrency_clamps_to_limits(self):
+        self.assertEqual(1, commentary.resolve_commentary_block_concurrency(0))
+        self.assertEqual(
+            commentary.COMMENTARY_BLOCK_CONCURRENCY_LIMIT,
+            commentary.resolve_commentary_block_concurrency(99),
+        )
+
+    def test_openai_sampling_options_allow_larger_batch_size(self):
+        self.assertEqual(64, commentary.resolve_openai_sampling_options(batch_size=64)["batch_size"])
+        self.assertEqual(
+            commentary.OPENAI_BATCH_SIZE_LIMIT,
+            commentary.resolve_openai_sampling_options(batch_size=999)["batch_size"],
+        )
+
     def test_openai_uniform_frame_samples_respect_interval_and_max_frames(self):
         with patch.object(commentary, "OPENAI_MAX_FRAMES", 5), \
              patch.object(commentary, "OPENAI_FRAME_INTERVAL_SECONDS", 10):
@@ -846,7 +864,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual(result["edited_visual"], result["timed_visual"])
         self.assertTrue(mix_video.call_args.kwargs["trim_to_voiceover"])
 
-    def test_full_duration_writes_subtitles_without_burning_full_video(self):
+    def test_full_duration_burns_subtitles_into_final_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = os.path.join(tmpdir, "source.mp4")
             open(source_path, "wb").close()
@@ -895,8 +913,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         mix_video.assert_called_once()
         write_subtitles.assert_called_once()
-        burn_subtitles.assert_not_called()
-        self.assertEqual("Remix_mixed.mp4", result["video_filename"])
+        burn_subtitles.assert_called_once()
+        self.assertEqual("Remix_final.mp4", result["video_filename"])
         self.assertEqual("Remix_commentary.ass", result["subtitle"])
 
     def test_full_duration_targets_comprehensive_edit_not_raw_full_source(self):

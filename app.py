@@ -459,7 +459,7 @@ from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
-from commentary import DEFAULT_ANALYSIS_MODE, generate_commentary_video, generate_edge_voiceover, resolve_openai_sampling_options
+from commentary import DEFAULT_ANALYSIS_MODE, generate_commentary_video, generate_edge_voiceover, resolve_commentary_block_concurrency, resolve_openai_sampling_options
 
 commentary_jobs: Dict[str, Dict] = {}
 COMMENTARY_TASK_FILE = "commentary_task.json"
@@ -614,10 +614,11 @@ class CommentaryRequest(BaseModel):
     openai_scene_max_keyframes: Optional[int] = None
     openai_batch_size: Optional[int] = None
     openai_visual_concurrency: Optional[int] = None
+    commentary_block_concurrency: Optional[int] = None
     tts_provider: str = "edge"
     voice_id: Optional[str] = None
     edge_voice: Optional[str] = None
-    original_audio_volume: float = 0.08
+    original_audio_volume: float = 0.3
     pause_original_audio_volume: float = 0.6
     subtitles: bool = True
     vertical: bool = False
@@ -686,10 +687,11 @@ def commentary_request_from_form(form) -> CommentaryRequest:
         openai_scene_max_keyframes=parse_form_optional_int(form.get("openai_scene_max_keyframes")),
         openai_batch_size=parse_form_optional_int(form.get("openai_batch_size")),
         openai_visual_concurrency=parse_form_optional_int(form.get("openai_visual_concurrency")),
+        commentary_block_concurrency=parse_form_optional_int(form.get("commentary_block_concurrency")),
         tts_provider=str(form.get("tts_provider") or "edge"),
         voice_id=str(form.get("voice_id") or "") or None,
         edge_voice=str(form.get("edge_voice") or "") or None,
-        original_audio_volume=parse_form_float(form.get("original_audio_volume"), 0.08),
+        original_audio_volume=parse_form_float(form.get("original_audio_volume"), 0.3),
         pause_original_audio_volume=parse_form_float(form.get("pause_original_audio_volume"), 0.6),
         subtitles=parse_form_bool(form.get("subtitles"), True),
         vertical=parse_form_bool(form.get("vertical"), False),
@@ -1034,6 +1036,7 @@ async def commentary_generate(
         raise HTTPException(status_code=400, detail="Unsupported TTS provider")
     if tts_provider == "elevenlabs" and not elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+    req.commentary_block_concurrency = resolve_commentary_block_concurrency(req.commentary_block_concurrency)
 
     job_id = str(uuid.uuid4())
     job_output_dir = commentary_job_dir(job_id)
@@ -1145,6 +1148,7 @@ async def commentary_generate(
                 openai_scene_max_keyframes=req.openai_scene_max_keyframes,
                 openai_batch_size=req.openai_batch_size,
                 openai_visual_concurrency=req.openai_visual_concurrency,
+                commentary_block_concurrency=req.commentary_block_concurrency,
                 progress=log,
                 checkpoint=checkpoint,
             )
@@ -1236,6 +1240,8 @@ async def commentary_retry(
     tts_provider = (req.tts_provider or "edge").lower()
     if tts_provider == "elevenlabs" and not elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+    req.commentary_block_concurrency = resolve_commentary_block_concurrency(req.commentary_block_concurrency)
+    job["request"] = commentary_request_to_dict(req)
 
     source_path = job.get("source_path")
     if source_path and not os.path.exists(source_path):
@@ -1316,6 +1322,7 @@ async def commentary_retry(
                 openai_scene_max_keyframes=req.openai_scene_max_keyframes,
                 openai_batch_size=req.openai_batch_size,
                 openai_visual_concurrency=req.openai_visual_concurrency,
+                commentary_block_concurrency=req.commentary_block_concurrency,
                 progress=log,
                 checkpoint=checkpoint,
                 prepared_analysis_video_path=prepared_analysis_video_path,

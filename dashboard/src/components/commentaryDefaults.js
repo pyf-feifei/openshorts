@@ -4,13 +4,14 @@ export const COMMENTARY_DEFAULTS = {
   targetDuration: 'full',
   analysisMode: 'openai',
   edgeVoice: 'zh-CN-YunjianNeural',
-  originalAudioVolume: 0.08,
+  originalAudioVolume: 0.3,
   pauseOriginalAudioVolume: 0.6,
   openAIFrameIntervalSeconds: 3,
   openAIMaxFrames: 1800,
   openAISceneMaxKeyframes: 60,
   openAIBatchSize: 32,
   openAIVisualConcurrency: 3,
+  commentaryBlockConcurrency: 3,
 };
 
 export const DEFAULT_EDGE_VOICES_BY_LANGUAGE = {

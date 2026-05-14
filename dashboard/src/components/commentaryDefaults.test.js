@@ -13,13 +13,14 @@ test('commentary tab defaults match preferred Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.targetDuration, 'full');
   assert.equal(COMMENTARY_DEFAULTS.analysisMode, 'openai');
   assert.equal(COMMENTARY_DEFAULTS.edgeVoice, 'zh-CN-YunjianNeural');
-  assert.equal(COMMENTARY_DEFAULTS.originalAudioVolume, 0.08);
+  assert.equal(COMMENTARY_DEFAULTS.originalAudioVolume, 0.3);
   assert.equal(COMMENTARY_DEFAULTS.pauseOriginalAudioVolume, 0.6);
   assert.equal(COMMENTARY_DEFAULTS.openAIFrameIntervalSeconds, 3);
   assert.equal(COMMENTARY_DEFAULTS.openAIMaxFrames, 1800);
   assert.equal(COMMENTARY_DEFAULTS.openAISceneMaxKeyframes, 60);
   assert.equal(COMMENTARY_DEFAULTS.openAIBatchSize, 32);
   assert.equal(COMMENTARY_DEFAULTS.openAIVisualConcurrency, 3);
+  assert.equal(COMMENTARY_DEFAULTS.commentaryBlockConcurrency, 3);
 });
 
 test('Chinese Edge voice default is Yunjian and other languages keep first option fallback', () => {
@@ -52,6 +53,8 @@ test('commentary supports OpenAI-compatible multimodal analysis mode', () => {
   assert.match(source, /hasOpenAICompatibleAccess/);
   assert.match(source, /openai_model/);
   assert.match(source, /openai_visual_concurrency/);
+  assert.match(source, /commentary_block_concurrency/);
+  assert.match(source, /解说分块生成并发数/);
 });
 
 test('commentary sends separate pause original audio volume', () => {
@@ -60,6 +63,13 @@ test('commentary sends separate pause original audio volume', () => {
   assert.match(source, /pauseOriginalAudioVolume/);
   assert.match(source, /pause_original_audio_volume/);
   assert.match(source, /无解说片段原视频音量/);
+});
+
+test('commentary allows larger OpenAI-compatible visual batches', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /max="128"/);
+  assert.match(source, /默认 32，最大 128/);
 });
 
 test('commentary status steps use the active job analysis mode', () => {

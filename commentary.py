@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
@@ -26,8 +27,12 @@ SUPPORTED_ANALYSIS_MODES = {"current", "video", "openai"}
 DEFAULT_ANALYSIS_MODE = "video"
 OPENAI_FRAME_INTERVAL_SECONDS = max(1.0, float(os.environ.get("OPENSHORTS_OPENAI_FRAME_INTERVAL_SECONDS", "3")))
 OPENAI_MAX_FRAMES = max(1, int(os.environ.get("OPENSHORTS_OPENAI_MAX_FRAMES", "1800")))
-OPENAI_BATCH_SIZE = max(1, min(32, int(os.environ.get("OPENSHORTS_OPENAI_BATCH_SIZE", "32"))))
-OPENAI_VISUAL_CONCURRENCY = max(1, min(8, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_CONCURRENCY", "3"))))
+OPENAI_BATCH_SIZE_LIMIT = 128
+OPENAI_VISUAL_CONCURRENCY_LIMIT = 8
+COMMENTARY_BLOCK_CONCURRENCY_LIMIT = 8
+OPENAI_BATCH_SIZE = max(1, min(OPENAI_BATCH_SIZE_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_BATCH_SIZE", "32"))))
+OPENAI_VISUAL_CONCURRENCY = max(1, min(OPENAI_VISUAL_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_CONCURRENCY", "3"))))
+COMMENTARY_BLOCK_CONCURRENCY = max(1, min(COMMENTARY_BLOCK_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_COMMENTARY_BLOCK_CONCURRENCY", "3"))))
 OPENAI_SCENE_AWARE_SAMPLING = os.environ.get(
     "OPENSHORTS_OPENAI_SCENE_AWARE_SAMPLING",
     "true",
@@ -38,8 +43,6 @@ OPENAI_FRAME_INTERVAL_MIN_SECONDS = 1.0
 OPENAI_FRAME_INTERVAL_MAX_SECONDS = 60.0
 OPENAI_MAX_FRAMES_LIMIT = 2000
 OPENAI_SCENE_MAX_KEYFRAMES_LIMIT = 600
-OPENAI_BATCH_SIZE_LIMIT = 32
-OPENAI_VISUAL_CONCURRENCY_LIMIT = 8
 OPENAI_SCENE_STATIC_MOTION_THRESHOLD = max(
     0.0,
     float(os.environ.get("OPENSHORTS_OPENAI_SCENE_STATIC_MOTION_THRESHOLD", "0.06")),
@@ -335,6 +338,10 @@ def _clamp_int(value, default: int, min_value: int, max_value: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(min_value, min(max_value, parsed))
+
+
+def resolve_commentary_block_concurrency(value: Optional[int] = None) -> int:
+    return _clamp_int(value, COMMENTARY_BLOCK_CONCURRENCY, 1, COMMENTARY_BLOCK_CONCURRENCY_LIMIT)
 
 
 def resolve_openai_sampling_options(
@@ -2827,6 +2834,7 @@ def _create_block_synced_visuals_and_audio(
     original_audio_volume: float,
     pause_original_audio_volume: float = 0.6,
     preserve_source_resolution: bool = True,
+    block_concurrency: Optional[int] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> Tuple[Optional[str], List[float]]:
     blocks = _normalize_narration_blocks(narration_blocks, _get_video_duration(video_path))
@@ -2836,35 +2844,41 @@ def _create_block_synced_visuals_and_audio(
     part_dir = os.path.join(work_dir, "synced_blocks")
     os.makedirs(part_dir, exist_ok=True)
     vf_aspect = "setsar=1" if preserve_source_resolution else _video_filter_for_aspect(aspect_mode)
-    video_parts = []
-    voice_parts = []
-    ambient_parts = []
-    part_durations = []
     spoken_volume = max(0.0, min(original_audio_volume, 1.0))
     pause_volume = max(0.0, min(pause_original_audio_volume, 1.0))
     needs_ambient_track = spoken_volume > 0 or any(bool(block.get("pause")) and pause_volume > 0 for block in blocks)
-
     total_blocks = len(blocks)
-    for index, block in enumerate(blocks, start=1):
+    resolved_concurrency = min(resolve_commentary_block_concurrency(block_concurrency), total_blocks)
+    progress_lock = threading.Lock()
+
+    def report(message: str) -> None:
+        if not progress:
+            return
+        with progress_lock:
+            progress(message)
+
+    def process_block(index: int, block: Dict) -> Dict:
         is_pause = bool(block.get("pause"))
-        if progress:
-            if is_pause:
-                progress(f"Adding original-audio pause block {index}/{total_blocks}...")
-            else:
-                progress(f"Generating synced commentary block {index}/{total_blocks}...")
+        if is_pause:
+            report(f"Adding original-audio pause block {index}/{total_blocks}...")
+        else:
+            report(f"Generating synced commentary block {index}/{total_blocks}...")
         source_duration = max(0.1, float(block["end"]) - float(block["start"]))
         fitted_voice_path = os.path.join(part_dir, f"block_voice_fit_{index:03d}.m4a")
         block_video_path = os.path.join(part_dir, f"block_video_{index:03d}.mp4")
-        if os.path.exists(block_video_path) and os.path.exists(fitted_voice_path):
-            visual_duration = max(0.1, _get_audio_duration(fitted_voice_path))
-            video_parts.append(block_video_path)
-            voice_parts.append(fitted_voice_path)
-            part_durations.append(visual_duration)
-            if needs_ambient_track:
-                ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}.m4a")
-                if os.path.exists(ambient_path):
-                    ambient_parts.append(ambient_path)
-            continue
+        block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}.m4a") if needs_ambient_track else None
+        if (
+            os.path.exists(block_video_path)
+            and os.path.exists(fitted_voice_path)
+            and (not needs_ambient_track or os.path.exists(block_ambient_path))
+        ):
+            return {
+                "index": index,
+                "video_path": block_video_path,
+                "voice_path": fitted_voice_path,
+                "ambient_path": block_ambient_path,
+                "duration": max(0.1, _get_audio_duration(fitted_voice_path)),
+            }
         if is_pause:
             visual_duration = source_duration
             _create_silent_audio_clip(fitted_voice_path, visual_duration)
@@ -2890,21 +2904,15 @@ def _create_block_synced_visuals_and_audio(
             "-t", f"{visual_duration:.3f}",
             "-i", video_path,
             "-an",
-        ]
-        cmd.extend([
             "-vf", vf_aspect,
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "22",
-        ])
-        cmd.append(block_video_path)
+            block_video_path,
+        ]
         _run_command(cmd)
-        video_parts.append(block_video_path)
-        voice_parts.append(fitted_voice_path)
-        part_durations.append(visual_duration)
 
-        if needs_ambient_track:
-            block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}.m4a")
+        if block_ambient_path:
             try:
                 if is_pause and pause_volume > 0:
                     _extract_original_audio_clip(video_path, float(block["start"]), visual_duration, block_ambient_path, volume=pause_volume)
@@ -2926,7 +2934,26 @@ def _create_block_synced_visuals_and_audio(
                     _create_silent_audio_clip(block_ambient_path, visual_duration)
             except Exception:
                 _create_silent_audio_clip(block_ambient_path, visual_duration)
-            ambient_parts.append(block_ambient_path)
+        return {
+            "index": index,
+            "video_path": block_video_path,
+            "voice_path": fitted_voice_path,
+            "ambient_path": block_ambient_path,
+            "duration": visual_duration,
+        }
+
+    if resolved_concurrency > 1:
+        with ThreadPoolExecutor(max_workers=resolved_concurrency) as executor:
+            futures = [executor.submit(process_block, index, block) for index, block in enumerate(blocks, start=1)]
+            block_results = [future.result() for future in as_completed(futures)]
+    else:
+        block_results = [process_block(index, block) for index, block in enumerate(blocks, start=1)]
+
+    block_results.sort(key=lambda item: item["index"])
+    video_parts = [item["video_path"] for item in block_results]
+    voice_parts = [item["voice_path"] for item in block_results]
+    part_durations = [item["duration"] for item in block_results]
+    ambient_parts = [item["ambient_path"] for item in block_results if item.get("ambient_path")]
 
     visual_duration_total = sum(part_durations)
     _concat_media_parts(video_parts, timed_video_path, part_dir)
@@ -2943,7 +2970,7 @@ def _mix_voiceover_with_video(
     video_path: str,
     voiceover_path: str,
     output_path: str,
-    original_audio_volume: float = 0.08,
+    original_audio_volume: float = 0.3,
     ambient_audio_path: Optional[str] = None,
     trim_to_voiceover: bool = True,
 ) -> None:
@@ -3109,7 +3136,7 @@ def generate_commentary_video(
     language: str = "zh",
     style: str = "documentary",
     target_duration: str = "medium",
-    original_audio_volume: float = 0.08,
+    original_audio_volume: float = 0.3,
     pause_original_audio_volume: float = 0.6,
     subtitles: bool = True,
     vertical: bool = False,
@@ -3126,6 +3153,7 @@ def generate_commentary_video(
     openai_scene_max_keyframes: Optional[int] = None,
     openai_batch_size: Optional[int] = None,
     openai_visual_concurrency: Optional[int] = None,
+    commentary_block_concurrency: Optional[int] = None,
     gemini_pool: Optional[GeminiKeyPool] = None,
     progress: Optional[Callable[[str], None]] = None,
     checkpoint: Optional[Callable[[Dict], None]] = None,
@@ -3142,6 +3170,7 @@ def generate_commentary_video(
         batch_size=openai_batch_size,
         visual_concurrency=openai_visual_concurrency,
     ) if analysis_mode == "openai" else None
+    resolved_block_concurrency = resolve_commentary_block_concurrency(commentary_block_concurrency)
 
     def log(message: str) -> None:
         print(f"[Commentary] {message}")
@@ -3158,6 +3187,7 @@ def generate_commentary_video(
             f"batch_size={openai_sampling_options['batch_size']}, "
             f"visual_concurrency={openai_sampling_options['visual_concurrency']}"
         )
+    log(f"Commentary block generation concurrency: {resolved_block_concurrency}")
     log("Preparing source video...")
 
     video_path = None
@@ -3339,6 +3369,7 @@ def generate_commentary_video(
             original_audio_volume=original_audio_volume,
             pause_original_audio_volume=pause_original_audio_volume,
             preserve_source_resolution=preserve_source_resolution,
+            block_concurrency=resolved_block_concurrency,
             progress=log,
         )
         edited_video_path = timed_video_path
@@ -3393,12 +3424,9 @@ def generate_commentary_video(
             _write_block_timed_ass(narration_blocks, subtitle_path, synced_block_durations)
         else:
             _write_text_timed_ass(script["narration"], voiceover_path, subtitle_path)
-        if target_duration == "full":
-            log("Skipping full-length subtitle burn-in to avoid heavy local re-encode...")
-        else:
-            log("Burning subtitles into final video...")
-            _burn_subtitles(mixed_path, subtitle_path, subtitled_path)
-            final_path = subtitled_path
+        log("Burning subtitles into final video...")
+        _burn_subtitles(mixed_path, subtitle_path, subtitled_path)
+        final_path = subtitled_path
 
     metadata = {
         "video_path": final_path,
@@ -3412,6 +3440,7 @@ def generate_commentary_video(
         "openai_model": openai_model if analysis_mode == "openai" else None,
         "openai_analysis": script.get("_openai_analysis") if analysis_mode == "openai" else None,
         "openai_sampling_options": openai_sampling_options if analysis_mode == "openai" else None,
+        "commentary_block_concurrency": resolved_block_concurrency,
         "edited_visual": os.path.basename(edited_video_path),
         "timed_visual": os.path.basename(timed_video_path),
         "ambient_audio": os.path.basename(ambient_audio) if ambient_audio else None,

@@ -164,6 +164,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [openAISceneMaxKeyframes, setOpenAISceneMaxKeyframes] = useState(COMMENTARY_DEFAULTS.openAISceneMaxKeyframes)
   const [openAIBatchSize, setOpenAIBatchSize] = useState(COMMENTARY_DEFAULTS.openAIBatchSize)
   const [openAIVisualConcurrency, setOpenAIVisualConcurrency] = useState(COMMENTARY_DEFAULTS.openAIVisualConcurrency)
+  const [commentaryBlockConcurrency, setCommentaryBlockConcurrency] = useState(COMMENTARY_DEFAULTS.commentaryBlockConcurrency)
   const [subtitles, setSubtitles] = useState(true)
   const [aspectMode, setAspectMode] = useState('auto')
   const [jobId, setJobId] = useState(null)
@@ -418,6 +419,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     openai_scene_max_keyframes: Math.round(positiveNumberOrDefault(openAISceneMaxKeyframes, COMMENTARY_DEFAULTS.openAISceneMaxKeyframes)),
     openai_batch_size: Math.round(positiveNumberOrDefault(openAIBatchSize, COMMENTARY_DEFAULTS.openAIBatchSize)),
     openai_visual_concurrency: Math.round(positiveNumberOrDefault(openAIVisualConcurrency, COMMENTARY_DEFAULTS.openAIVisualConcurrency)),
+    commentary_block_concurrency: Math.round(positiveNumberOrDefault(commentaryBlockConcurrency, COMMENTARY_DEFAULTS.commentaryBlockConcurrency)),
   })
 
   const handleGenerate = async () => {
@@ -572,14 +574,14 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
 
   const renderStep = {
     label: '合成最终视频',
-    detail: status === 'completed' ? '生成完成' : backendStage?.stage === 'render' ? (backendStage.label || latestLog) : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i.test(latestLog) ? latestLog : '等待中',
-    state: status === 'completed' ? 'done' : backendStage?.stage === 'render' ? 'active' : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i.test(latestLog) ? 'active' : 'pending',
+    detail: status === 'completed' ? '生成完成' : backendStage?.stage === 'render' ? (backendStage.label || latestLog) : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles/i.test(latestLog) ? latestLog : '等待中',
+    state: status === 'completed' ? 'done' : backendStage?.stage === 'render' ? 'active' : /Mixing new voiceover|Generating text-timed subtitles|Burning subtitles/i.test(latestLog) ? 'active' : 'pending',
   }
 
   const openAIFrameMatch = latestLog.match(/Extracted OpenAI-compatible analysis frames:\s*(\d+)\/(\d+)/i)
   const openAIFramePercent = openAIFrameMatch ? Math.round((Number(openAIFrameMatch[1]) / Number(openAIFrameMatch[2])) * 100) : null
   const voiceStarted = backendStage?.stage === 'voice' || hasLogMatching(/Generating synced commentary block|Adding original-audio pause block|Generating \d+ timestamp-synced commentary blocks|Mixing new voiceover/i)
-  const renderStarted = backendStage?.stage === 'render' || status === 'completed' || hasLogMatching(/Mixing new voiceover|Generating text-timed subtitles|Burning subtitles|Skipping full-length subtitle/i)
+  const renderStarted = backendStage?.stage === 'render' || status === 'completed' || hasLogMatching(/Mixing new voiceover|Generating text-timed subtitles|Burning subtitles/i)
   const openAIScriptStarted = hasLogMatching(/OpenAI-compatible model is writing|script validation failed|returned a corrected commentary script/i)
   const openAIVisualStarted = backendStage?.stage === 'openai' || hasLogMatching(/OpenAI-compatible multimodal visual analysis batch/i)
   const openAIFrameStarted = hasLogMatching(/Extracting dense timestamped frames|Extracted OpenAI-compatible analysis frames/i)
@@ -847,13 +849,18 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">每批图片数</label>
-                      <input type="number" min="1" max="32" step="1" value={openAIBatchSize} onChange={(e) => setOpenAIBatchSize(e.target.value)} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 32。</p>
+                      <input type="number" min="1" max="128" step="1" value={openAIBatchSize} onChange={(e) => setOpenAIBatchSize(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 32，最大 128。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">视觉分析并发数</label>
                       <input type="number" min="1" max="8" step="1" value={openAIVisualConcurrency} onChange={(e) => setOpenAIVisualConcurrency(e.target.value)} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 3。</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">解说分块生成并发数</label>
+                      <input type="number" min="1" max="8" step="1" value={commentaryBlockConcurrency} onChange={(e) => setCommentaryBlockConcurrency(e.target.value)} className="input-field" />
+                      <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 3。</p>
                     </div>
                   </div>
                 </div>
