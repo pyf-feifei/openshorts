@@ -99,6 +99,7 @@ GEMINI_SAFE_INPUT_TOKEN_BUDGET = int(os.environ.get("OPENSHORTS_GEMINI_SAFE_INPU
 GEMINI_LOW_RES_TOKENS_PER_SECOND = 100.0
 GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "4")))
 COMMENTARY_BANNED_PHRASES = ("画面汇总",)
+ASS_SUBTITLE_MAX_LINE_UNITS = 34
 
 
 EDGE_VOICES_BY_LANGUAGE = {
@@ -588,6 +589,18 @@ def _safe_edge_pitch(value: str) -> str:
     return f"{amount:+d}Hz"
 
 
+def _safe_video_speed(value) -> float:
+    if isinstance(value, bool):
+        return 1.5 if value else 1.0
+    if isinstance(value, str) and value.strip().lower() in {"true", "yes", "y"}:
+        return 1.5
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    return round(max(1.0, min(2.5, speed)), 3)
+
+
 def _normalize_narration_blocks(raw_blocks: List[Dict], duration: float) -> List[Dict]:
     normalized = []
     for item in raw_blocks or []:
@@ -615,6 +628,9 @@ def _normalize_narration_blocks(raw_blocks: List[Dict], duration: float) -> List
             "pause": is_pause,
             "rate": _safe_edge_rate(item.get("rate") or "+0%"),
             "pitch": _safe_edge_pitch(item.get("pitch") or "+0Hz"),
+            "video_speed": _safe_video_speed(
+                item.get("video_speed", item.get("playback_speed", item.get("speed", item.get("speed_up"))))
+            ),
         })
     normalized.sort(key=lambda block: block["start"])
     return normalized
@@ -758,15 +774,6 @@ def _validate_commentary_script_for_target(data: Dict, duration: float, target_d
         )
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     visual_seconds = _segments_total_duration(_narration_blocks_to_edit_segments(blocks))
-    if duration > target_seconds * 1.6:
-        latest_end = max(float(block.get("end") or 0.0) for block in blocks)
-        required_latest_end = duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION
-        if latest_end < required_latest_end:
-            raise Exception(
-                "AI narration_blocks stopped before the end of the full source timeline. "
-                f"Latest selected source timestamp is {latest_end:.1f}s, but this {duration:.1f}s source requires at least one selected block after {required_latest_end:.1f}s. "
-                "The generated edit would ignore the later part of the video."
-            )
     if target_seconds > 0 and (len(blocks) <= 1 or visual_seconds < target_seconds * 0.65 or visual_seconds > target_seconds * 1.6):
         raise Exception(
             "AI narration_blocks do not match the selected full-mode edit target. "
@@ -808,6 +815,15 @@ def _validate_commentary_script_for_target(data: Dict, duration: float, target_d
         )
     if max_consecutive_pauses > FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS:
         raise Exception("AI returned consecutive no-commentary pause blocks; pauses must be separated by narrated blocks.")
+    if duration > target_seconds * 1.6:
+        latest_end = max(float(block.get("end") or 0.0) for block in blocks)
+        required_latest_end = duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION
+        if latest_end < required_latest_end:
+            raise Exception(
+                "AI narration_blocks stopped before the end of the full source timeline. "
+                f"Latest selected source timestamp is {latest_end:.1f}s, but this {duration:.1f}s source requires at least one selected block after {required_latest_end:.1f}s. "
+                "The generated edit would ignore the later part of the video."
+            )
     narration = re.sub(r"\s+", "", str(data.get("narration") or ""))
     min_chars = _minimum_narration_chars_for_blocks(blocks, duration, target_duration, language)
     accepted_min_chars = _accepted_minimum_narration_chars(min_chars)
@@ -875,10 +891,11 @@ REGENERATE FROM THE ATTACHED VIDEO:
 {_banned_phrase_instruction()}
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
-- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
+- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
 - Each non-pause narration block must be speakable inside that block's visual duration; do not cram long narration into a short range.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
+- Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
 - Vary rate and pitch across non-pause blocks so the voice has cadence; do not return every block as +0% and +0Hz.
 - Do not summarize the whole video in one short paragraph.
 - Explain what is happening on screen in each selected visual section and transition naturally between stages.
@@ -912,10 +929,11 @@ FINALIZE COMPLETE COMMENTARY:
 {_banned_phrase_instruction()}
 - The final narration must be at least {min_chars} non-whitespace characters.
 - The final narration must be at most {max_chars} non-whitespace characters; keep it paced for the selected visuals instead of stretching the edit.
-- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
+- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
+- Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
 - Vary rate and pitch across non-pause blocks so the voice has cadence; do not return every block as +0% and +0Hz.
 - Preserve chronological order and keep the commentary matched to the visible factory process.
 - Return valid JSON only.
@@ -927,8 +945,8 @@ JSON FORMAT:
   "hook": "opening hook",
   "narration": "complete final voiceover text",
   "narration_blocks": [
-    {{"start": 0, "end": 30, "visual": "visual plan item", "narration": "final voiceover for this range", "pause": false, "rate": "+0%", "pitch": "+0Hz"}},
-    {{"start": 30, "end": 40, "visual": "original footage moment that should breathe", "narration": "", "pause": true, "rate": "+0%", "pitch": "+0Hz"}}
+    {{"start": 0, "end": 30, "visual": "visual plan item", "narration": "final voiceover for this range", "pause": false, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}},
+    {{"start": 30, "end": 40, "visual": "original footage moment that should breathe", "narration": "", "pause": true, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}}
   ],
   "edit_segments": [
     {{"start": 0, "end": 30, "reason": "why this range is kept"}}
@@ -1076,7 +1094,7 @@ def _build_commentary_prompt(
     visual_analysis_text = ""
     if mode == "video":
         visual_instruction = (
-            "- A low-resolution complete-source video is attached for Gemini visual analysis only; final editing, audio bed, "
+            "- A low-resolution video copy of the complete source is attached for Gemini visual analysis only; final editing, audio bed, "
             "and muxing use the separate high-quality source video.\n"
             "- You must inspect the entire attached video timeline from 0.0 seconds to the source duration before writing the script; do not analyze only the opening, a few highlights, or isolated sampled moments.\n"
             "- All edit_segments and narration_blocks must use timestamps from the original full source video timeline and must be selected from across the complete beginning, middle, and ending timeline."
@@ -1142,16 +1160,18 @@ RULES:
 - For TARGET DURATION full, produce a real edit decision list: select only about {int(target_seconds)} seconds of the best visual ranges from the complete source timeline, and intentionally skip redundant or low-value ranges.
 - For TARGET DURATION full, do not output one continuous 0-to-{duration:.1f} timeline unless the source duration is already close to {int(target_seconds)} seconds. For this source, the selected visual duration should be near {int(target_seconds)} seconds, not {int(duration)} seconds.
 - For TARGET DURATION full, write a detailed scene-by-scene commentary that covers the chosen visual ranges from start to finish across the full source timeline, including beginning, middle, and ending portions. Do not return a 60-second summary over a long source.
+- For TARGET DURATION full, if the source has a final payoff, result reveal, before/after comparison, effect showcase, completed product, or conclusion, include the visual range where that result actually appears and let it play through.
 - For TARGET DURATION full, the selected blocks must not stop in the first half of a long source; at least one narration_blocks item must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
-- For TARGET DURATION full, narration_blocks is required: output exactly {block_count} chronological blocks. Each block must have start, end, visual, narration, pause, rate, and pitch.
+- For TARGET DURATION full, narration_blocks is required: output exactly {block_count} chronological blocks. Each block must have start, end, visual, narration, pause, rate, pitch, and video_speed.
 - For TARGET DURATION full, narration_blocks must cover about {int(target_seconds)} seconds of selected visuals across the complete source timeline and must cover the same ranges as edit_segments; do not create narration for ranges that are not kept.
-- For TARGET DURATION full, most selected visual blocks should contain narration; avoid long stretches where footage plays without commentary unless the source audio itself is essential.
+- For TARGET DURATION full, most selected visual blocks should contain narration, but do not narrate every second like a robot; use short breathing room only when the footage benefits from it, and avoid long stretches where footage plays without commentary unless the source audio itself is essential.
 - For TARGET DURATION full, use pause=true blocks sparingly when the original footage genuinely needs to be heard without commentary: key reveals, machine/process sounds, skilled hand work, visual proof, emotional beats, transitions, or moments where the picture explains itself. Pause blocks must leave narration empty and should usually last 2-8 seconds.
 - For TARGET DURATION full, pause blocks should use the original source audio as the main sound, but total pause time must stay under about 15% of selected visual time. Do not place pause blocks back-to-back.
 - For TARGET DURATION full, each non-pause block's narration must be speakable inside that block's visual duration; do not put 2 minutes of words into a 20-second visual range.
 - For TARGET DURATION full, each non-pause narration_blocks item must contain at least {min_chars_per_block} non-whitespace characters in its narration field.
 - For TARGET DURATION full, use rate to create cadence: slower values like "-10%" for important reveals or emotional emphasis, faster values like "+12%" for energetic process sections. Valid range: "-30%" to "+30%".
 - For TARGET DURATION full, use pitch lightly for tone: lower values like "-3Hz" for weight, higher values like "+3Hz" for excitement. Valid range: "-15Hz" to "+15Hz".
+- For TARGET DURATION full, use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
 - For TARGET DURATION full, vary rate and pitch across blocks; do not leave every non-pause block at "+0%" and "+0Hz".
 - For TARGET DURATION full, total narration must be at least {min_chars} non-whitespace characters and should cover about {int(target_seconds)} seconds of edited visuals.
 - For TARGET DURATION full, total narration must be at most {max_chars} non-whitespace characters so the voiceover does not exceed the selected visuals.
@@ -1170,8 +1190,8 @@ JSON FORMAT:
   "hook": "opening hook",
   "narration": "full voiceover narration text",
   "narration_blocks": [
-    {{"start": 0, "end": 30, "visual": "what is visible in this range", "narration": "voiceover for this visual range", "pause": false, "rate": "+0%", "pitch": "+0Hz"}},
-    {{"start": 30, "end": 40, "visual": "original footage moment that should breathe", "narration": "", "pause": true, "rate": "+0%", "pitch": "+0Hz"}}
+    {{"start": 0, "end": 30, "visual": "what is visible in this range", "narration": "voiceover for this visual range", "pause": false, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}},
+    {{"start": 30, "end": 40, "visual": "original footage moment that should breathe", "narration": "", "pause": true, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}}
   ],
   "edit_segments": [
     {{"start": 0, "end": 30, "reason": "why this visual part should be kept and what redundant source time is skipped around it"}}
@@ -1817,10 +1837,11 @@ REGENERATE FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 {_banned_phrase_instruction()}
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
-- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, and pitch.
+- Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
+- Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
 - Vary rate and pitch across non-pause blocks so the voice has cadence.
 - Return valid JSON only, using the same JSON FORMAT.
 """
@@ -2802,20 +2823,48 @@ def _force_audio_clip_duration(audio_path: str, duration: float, work_dir: str, 
     os.replace(tmp_path, audio_path)
 
 
-def _extract_original_audio_clip(video_path: str, start: float, duration: float, output_path: str, volume: float = 1.0) -> None:
+def _extract_original_audio_clip(
+    video_path: str,
+    start: float,
+    duration: float,
+    output_path: str,
+    volume: float = 1.0,
+    speed: float = 1.0,
+    output_duration: Optional[float] = None,
+) -> None:
     volume = max(0.0, min(volume, 1.0))
+    speed = _safe_video_speed(speed)
+    filters = [f"volume={volume}"]
+    if speed > 1.0001:
+        filters.append(_atempo_filter(speed))
+    if output_duration is not None:
+        filters.extend(["apad", f"atrim=0:{max(0.1, float(output_duration or 0.0)):.3f}", "asetpts=N/SR/TB"])
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{float(start):.3f}",
         "-t", f"{max(0.1, float(duration or 0.0)):.3f}",
         "-i", video_path,
         "-vn",
-        "-af", f"volume={volume}",
+        "-af", ",".join(filters),
+    ]
+    if output_duration is not None:
+        cmd.extend(["-t", f"{max(0.1, float(output_duration or 0.0)):.3f}"])
+    cmd.extend([
         "-c:a", "aac",
         "-b:a", "128k",
         output_path,
-    ]
+    ])
     _run_command(cmd)
+
+
+def _block_video_filter(aspect_filter: str, speed: float) -> str:
+    filters = []
+    speed = _safe_video_speed(speed)
+    if speed > 1.0001:
+        filters.append(f"setpts=PTS/{speed:.6f}")
+    if aspect_filter:
+        filters.append(aspect_filter)
+    return ",".join(filters) or "setsar=1"
 
 
 def _create_block_synced_visuals_and_audio(
@@ -2864,9 +2913,12 @@ def _create_block_synced_visuals_and_audio(
         else:
             report(f"Generating synced commentary block {index}/{total_blocks}...")
         source_duration = max(0.1, float(block["end"]) - float(block["start"]))
-        fitted_voice_path = os.path.join(part_dir, f"block_voice_fit_{index:03d}.m4a")
-        block_video_path = os.path.join(part_dir, f"block_video_{index:03d}.mp4")
-        block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}.m4a") if needs_ambient_track else None
+        video_speed = _safe_video_speed(block.get("video_speed"))
+        visual_duration = max(0.1, source_duration / video_speed)
+        speed_token = int(round(video_speed * 1000))
+        fitted_voice_path = os.path.join(part_dir, f"block_voice_fit_{index:03d}_s{speed_token}.m4a")
+        block_video_path = os.path.join(part_dir, f"block_video_{index:03d}_s{speed_token}.mp4")
+        block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}_s{speed_token}.m4a") if needs_ambient_track else None
         if (
             os.path.exists(block_video_path)
             and os.path.exists(fitted_voice_path)
@@ -2877,10 +2929,9 @@ def _create_block_synced_visuals_and_audio(
                 "video_path": block_video_path,
                 "voice_path": fitted_voice_path,
                 "ambient_path": block_ambient_path,
-                "duration": max(0.1, _get_audio_duration(fitted_voice_path)),
+                "duration": visual_duration,
             }
         if is_pause:
-            visual_duration = source_duration
             _create_silent_audio_clip(fitted_voice_path, visual_duration)
         else:
             block_voice_path = os.path.join(part_dir, f"block_voice_{index:03d}.mp3")
@@ -2895,16 +2946,14 @@ def _create_block_synced_visuals_and_audio(
                 rate=block.get("rate") or "+0%",
                 pitch=block.get("pitch") or "+0Hz",
             )
-            voice_duration = max(0.1, _get_audio_duration(block_voice_path))
-            visual_duration = min(source_duration, voice_duration)
-            _trim_audio_part_to_duration(block_voice_path, fitted_voice_path, visual_duration)
+            _fit_audio_part_to_duration(block_voice_path, fitted_voice_path, visual_duration)
         cmd = [
             "ffmpeg", "-y",
             "-ss", f"{float(block['start']):.3f}",
-            "-t", f"{visual_duration:.3f}",
+            "-t", f"{source_duration:.3f}",
             "-i", video_path,
             "-an",
-            "-vf", vf_aspect,
+            "-vf", _block_video_filter(vf_aspect, video_speed),
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "22",
@@ -2915,21 +2964,25 @@ def _create_block_synced_visuals_and_audio(
         if block_ambient_path:
             try:
                 if is_pause and pause_volume > 0:
-                    _extract_original_audio_clip(video_path, float(block["start"]), visual_duration, block_ambient_path, volume=pause_volume)
-                elif not is_pause and spoken_volume > 0:
-                    ambient_filter = _ambient_audio_filter(spoken_volume)
-                    ambient_cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", f"{float(block['start']):.3f}",
-                        "-t", f"{visual_duration:.3f}",
-                        "-i", video_path,
-                        "-vn",
-                        "-af", ambient_filter,
-                        "-c:a", "aac",
-                        "-b:a", "128k",
+                    _extract_original_audio_clip(
+                        video_path,
+                        float(block["start"]),
+                        source_duration,
                         block_ambient_path,
-                    ]
-                    _run_command(ambient_cmd)
+                        volume=pause_volume,
+                        speed=video_speed,
+                        output_duration=visual_duration,
+                    )
+                elif not is_pause and spoken_volume > 0:
+                    _extract_original_audio_clip(
+                        video_path,
+                        float(block["start"]),
+                        source_duration,
+                        block_ambient_path,
+                        volume=spoken_volume,
+                        speed=video_speed,
+                        output_duration=visual_duration,
+                    )
                 else:
                     _create_silent_audio_clip(block_ambient_path, visual_duration)
             except Exception:
@@ -3047,7 +3100,7 @@ def _ass_header_lines() -> List[str]:
     return [
         "[Script Info]",
         "ScriptType: v4.00+",
-        "WrapStyle: 2",
+        "WrapStyle: 0",
         "ScaledBorderAndShadow: yes",
         "PlayResX: 1080",
         "PlayResY: 1920",
@@ -3059,6 +3112,49 @@ def _ass_header_lines() -> List[str]:
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
+
+
+def _subtitle_char_units(char: str) -> int:
+    return 1 if char.isascii() else 2
+
+
+def _wrap_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> str:
+    clean = (text or "").replace("\n", " ").replace("{", "").replace("}", "")
+    words = re.split(r"(\s+)", clean)
+    lines = []
+    current = ""
+    current_units = 0
+
+    def push_current() -> None:
+        nonlocal current, current_units
+        if current.strip():
+            lines.append(current.strip())
+        current = ""
+        current_units = 0
+
+    for token in words:
+        if not token:
+            continue
+        token_units = sum(_subtitle_char_units(char) for char in token)
+        if token.isspace():
+            if current and current_units + 1 <= max_units:
+                current += " "
+                current_units += 1
+            continue
+        if token_units > max_units:
+            for char in token:
+                char_units = _subtitle_char_units(char)
+                if current and current_units + char_units > max_units:
+                    push_current()
+                current += char
+                current_units += char_units
+            continue
+        if current and current_units + token_units > max_units:
+            push_current()
+        current += token
+        current_units += token_units
+    push_current()
+    return r"\N".join(lines) if lines else clean.strip()
 
 
 def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], start_time: float, duration: float) -> None:
@@ -3073,7 +3169,7 @@ def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], star
         start = cursor
         end = block_end if index == len(sentences) - 1 else min(block_end, cursor + segment_duration)
         cursor = end
-        clean = sentence.replace("\n", " ").replace("{", "").replace("}", "")
+        clean = _wrap_ass_subtitle_text(sentence)
         lines.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{clean}")
 
 

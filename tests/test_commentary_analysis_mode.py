@@ -20,14 +20,17 @@ def scene_matched_block_text():
 
 def scene_matched_blocks(count=12, seconds=100.0, text=None):
     block_text = text or scene_matched_block_text()
+    starts = [i * seconds for i in range(count)]
+    if count == 12 and seconds == 100.0:
+        starts = [i * 300.0 for i in range(count - 1)] + [3600.0]
     return [
         {
-            "start": i * seconds,
-            "end": i * seconds + seconds,
+            "start": start,
+            "end": start + seconds,
             "visual": "workers handle copper motor scrap in this exact process stage",
             "narration": block_text,
         }
-        for i in range(count)
+        for start in starts
     ]
 
 
@@ -157,8 +160,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
              patch.object(commentary, "OPENAI_MAX_FRAMES", 20):
             samples = commentary._select_openai_scene_aware_frame_samples("video.mp4", 20)
 
-        self.assertEqual(6, len(samples))
-        self.assertEqual([1, 2, 2, 2, 3, 3], [sample["scene_index"] for sample in samples])
+        self.assertEqual(9, len(samples))
+        self.assertEqual([1, 2, 2, 2, 2, 2, 3, 3, 3], [sample["scene_index"] for sample in samples])
         self.assertIn("scene_start", samples[0])
         self.assertIn("motion_score", samples[0])
 
@@ -579,7 +582,10 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
     def test_commentary_ffmpeg_thread_limiter_preserves_existing_threads(self):
         cmd = ["ffmpeg", "-y", "-threads", "1", "-i", "in.mp4", "out.mp4"]
 
-        self.assertEqual(cmd, commentary._limit_ffmpeg_threads(cmd))
+        limited = commentary._limit_ffmpeg_threads(cmd)
+        self.assertEqual("-threads", limited[2])
+        self.assertEqual("1", limited[3])
+        self.assertEqual(cmd[4:], limited[4:])
 
     def test_burn_subtitles_uses_thread_limited_runner(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -595,6 +601,25 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         run_command.assert_called_once()
         raw_run.assert_not_called()
+
+    def test_ass_subtitle_header_enables_smart_wrapping(self):
+        header = commentary._ass_header_lines()
+
+        self.assertIn("WrapStyle: 0", header)
+        self.assertNotIn("WrapStyle: 2", header)
+
+    def test_long_ass_subtitle_text_is_wrapped_before_burning(self):
+        lines = commentary._ass_header_lines()
+        sentence = "这是一个非常长的二创解说字幕句子需要自动换行否则会超出竖屏视频的左右边界影响观看体验。"
+
+        commentary._append_weighted_subtitle_lines(lines, [sentence], 0.0, 4.0)
+
+        dialogue = lines[-1]
+        self.assertIn(r"\N", dialogue)
+        rendered_text = dialogue.rsplit(",", 1)[-1]
+        for line in rendered_text.split(r"\N"):
+            units = sum(commentary._subtitle_char_units(char) for char in line)
+            self.assertLessEqual(units, commentary.ASS_SUBTITLE_MAX_LINE_UNITS)
 
     def test_downloader_quality_settings_cap_high_default_at_1080p_and_keep_low_suffix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -747,7 +772,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=lambda **kwargs: open(kwargs["output_path"], "wb").close()), \
                 patch.object(commentary, "_get_audio_duration", return_value=120), \
                 patch.object(commentary, "_create_visual_edit", side_effect=fake_create_visual) as create_visual, \
-                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value="ambient.m4a") as create_synced, \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [])) as create_synced, \
                 patch.object(commentary, "_fit_video_to_voiceover") as fit_video, \
                 patch.object(commentary, "_create_ambient_audio_bed", return_value="ambient.m4a"), \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video:
@@ -800,7 +825,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 }), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
                 patch.object(commentary, "_get_audio_duration", return_value=5000), \
-                patch.object(commentary, "_create_block_synced_visuals_and_audio", side_effect=lambda **kwargs: open(kwargs["voiceover_path"], "wb").close()), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", side_effect=lambda **kwargs: (open(kwargs["voiceover_path"], "wb").close(), (None, []))[1]), \
                 patch.object(commentary, "_create_visual_edit") as create_visual:
 
                 with self.assertRaisesRegex(Exception, "voiceover is too long"):
@@ -952,10 +977,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("pause=true blocks", prompt)
         self.assertIn("original source audio", prompt)
         self.assertIn("vary rate and pitch", prompt)
+        self.assertIn("final payoff", prompt)
+        self.assertIn("effect showcase", prompt)
+        self.assertIn("video_speed", prompt)
         self.assertIn('"narration_blocks"', prompt)
         self.assertIn('"pause"', prompt)
         self.assertIn('"rate"', prompt)
         self.assertIn('"pitch"', prompt)
+        self.assertIn('"video_speed"', prompt)
         self.assertIn(f"at least {commentary._minimum_narration_chars(3935, 'full', 'zh')}", prompt)
 
     def test_funny_style_prompt_requires_visual_grounded_china_international_comparison(self):
@@ -1086,10 +1115,10 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
     def test_full_duration_validation_counts_pause_blocks_as_non_spoken_time(self):
         blocks = [
             {"start": 0, "end": 390, "visual": "opening process", "narration": "讲" * 650, "pause": False},
-            {"start": 390, "end": 400, "visual": "machine sound reveal", "narration": "", "pause": True},
-            {"start": 400, "end": 790, "visual": "main process", "narration": "讲" * 850, "pause": False},
-            {"start": 790, "end": 800, "visual": "original audio beat", "narration": "", "pause": True},
-            {"start": 800, "end": 1200, "visual": "ending process", "narration": "讲" * 700, "pause": False},
+            {"start": 390, "end": 402, "visual": "machine sound reveal", "narration": "", "pause": True},
+            {"start": 402, "end": 792, "visual": "main process", "narration": "讲" * 850, "pause": False},
+            {"start": 792, "end": 804, "visual": "original audio beat", "narration": "", "pause": True},
+            {"start": 3400, "end": 3796, "visual": "ending process", "narration": "讲" * 700, "pause": False},
         ]
         spoken_text = "".join(block["narration"] for block in blocks)
         normalized = commentary._normalize_narration_blocks(blocks, 3935)
@@ -1104,13 +1133,13 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             language="zh",
         )
 
-    def test_normalize_narration_blocks_preserves_pause_rate_and_pitch(self):
+    def test_normalize_narration_blocks_preserves_pause_rate_pitch_and_video_speed(self):
         blocks = commentary._normalize_narration_blocks(
             [
                 {"start": 0, "end": 8, "visual": "machine sound", "narration": "", "pause": True},
-                {"start": 8, "end": 20, "visual": "worker action", "narration": "画面里工人正在处理铜料。", "rate": "-15%", "pitch": "+4Hz"},
+                {"start": 8, "end": 20, "visual": "worker action", "narration": "画面里工人正在处理铜料。", "rate": "-15%", "pitch": "+4Hz", "video_speed": 1.75},
                 {"start": 20, "end": 30, "visual": "empty bad block", "narration": ""},
-                {"start": 30, "end": 40, "visual": "invalid prosody", "narration": "继续讲这个画面。", "rate": "fast", "pitch": "high"},
+                {"start": 30, "end": 40, "visual": "invalid prosody", "narration": "继续讲这个画面。", "rate": "fast", "pitch": "high", "speed_up": True},
             ],
             duration=60,
         )
@@ -1120,11 +1149,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("", blocks[0]["narration"])
         self.assertEqual("+0%", blocks[0]["rate"])
         self.assertEqual("+0Hz", blocks[0]["pitch"])
+        self.assertEqual(1.0, blocks[0]["video_speed"])
         self.assertFalse(blocks[1]["pause"])
         self.assertEqual("-15%", blocks[1]["rate"])
         self.assertEqual("+4Hz", blocks[1]["pitch"])
+        self.assertEqual(1.75, blocks[1]["video_speed"])
         self.assertEqual("+0%", blocks[2]["rate"])
         self.assertEqual("+0Hz", blocks[2]["pitch"])
+        self.assertEqual(1.5, blocks[2]["video_speed"])
 
     def test_edge_voiceover_passes_rate_and_pitch_to_edge_tts(self):
         calls = []
@@ -1171,6 +1203,29 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual("volume=0.6", commands[0][commands[0].index("-af") + 1])
 
+    def test_extract_original_audio_clip_applies_speed_and_output_duration(self):
+        commands = []
+
+        def fake_run_command(cmd, cwd=None):
+            commands.append(cmd)
+
+        with patch.object(commentary, "_run_command", side_effect=fake_run_command):
+            commentary._extract_original_audio_clip(
+                "source.mp4",
+                1.0,
+                12.0,
+                "out.m4a",
+                volume=0.6,
+                speed=2.0,
+                output_duration=6.0,
+            )
+
+        audio_filter = commands[0][commands[0].index("-af") + 1]
+        self.assertIn("volume=0.6", audio_filter)
+        self.assertIn("atempo=2.000000", audio_filter)
+        self.assertIn("atrim=0:6.000", audio_filter)
+        self.assertEqual("6.000", commands[0][commands[0].index("-t", commands[0].index("-i")) + 1])
+
     def test_block_synced_render_pause_block_skips_tts_and_uses_original_audio(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = os.path.join(tmpdir, "source.mp4")
@@ -1186,7 +1241,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(kwargs["output_path"], "wb") as f:
                     f.write(b"voice")
 
-            def fake_trim_audio(_input_audio_path, output_audio_path, _target_duration):
+            def fake_fit_audio(_input_audio_path, output_audio_path, _target_duration):
                 with open(output_audio_path, "wb") as f:
                     f.write(b"fit")
 
@@ -1195,8 +1250,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(output_path, "wb") as f:
                     f.write(b"silence")
 
-            def fake_original_audio(_video_path, start, duration, output_path, volume=1.0):
-                original_audio_calls.append((start, duration, os.path.basename(output_path), volume))
+            def fake_original_audio(_video_path, start, duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                original_audio_calls.append((start, duration, os.path.basename(output_path), volume, speed, output_duration))
                 with open(output_path, "wb") as f:
                     f.write(b"original")
 
@@ -1212,11 +1267,11 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             with patch.object(commentary, "_get_video_duration", return_value=20.0), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover) as voiceover, \
                 patch.object(commentary, "_get_audio_duration", return_value=4.0), \
-                patch.object(commentary, "_trim_audio_part_to_duration", side_effect=fake_trim_audio) as trim_audio, \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio) as fit_audio, \
                 patch.object(commentary, "_create_silent_audio_clip", side_effect=fake_silence), \
                 patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
                 patch.object(commentary, "_run_command", side_effect=fake_run_command):
-                ambient = commentary._create_block_synced_visuals_and_audio(
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
                     video_path=video_path,
                     narration_blocks=blocks,
                     timed_video_path=timed_video_path,
@@ -1237,16 +1292,18 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual(1, voiceover.call_count)
         self.assertEqual("+12%", voiceover.call_args.kwargs["rate"])
         self.assertEqual("+3Hz", voiceover.call_args.kwargs["pitch"])
-        self.assertEqual(1, trim_audio.call_count)
+        self.assertEqual(1, fit_audio.call_count)
+        self.assertEqual(12.0, fit_audio.call_args.args[2])
         self.assertEqual(1, len(silence_calls))
-        self.assertEqual((12.0, 8.0, "block_ambient_002.m4a", 0.6), original_audio_calls[0])
-        ambient_filter_commands = [cmd for cmd in commands if "-af" in cmd and cmd[-1].endswith("block_ambient_001.m4a")]
-        self.assertEqual(1, len(ambient_filter_commands))
-        self.assertEqual("4.000", ambient_filter_commands[0][ambient_filter_commands[0].index("-t") + 1])
-        self.assertIn(commentary._ambient_audio_filter(0.08), ambient_filter_commands[0])
+        self.assertEqual(2, len(original_audio_calls))
+        self.assertIn((0.0, 12.0, "block_ambient_001_s1000.m4a", 0.08, 1.0, 12.0), original_audio_calls)
+        self.assertIn((12.0, 8.0, "block_ambient_002_s1000.m4a", 0.6, 1.0, 8.0), original_audio_calls)
+        video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
+        self.assertIn("12.000", [cmd[cmd.index("-t") + 1] for cmd in video_cmds])
         self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual([12.0, 8.0], block_durations)
 
-    def test_block_synced_render_uses_tts_duration_for_narrated_visual_blocks(self):
+    def test_block_synced_render_preserves_selected_visual_ranges_for_narrated_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = os.path.join(tmpdir, "source.mp4")
             open(video_path, "wb").close()
@@ -1254,14 +1311,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
             ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
             commands = []
-            trim_calls = []
+            fit_calls = []
 
             def fake_voiceover(**kwargs):
                 with open(kwargs["output_path"], "wb") as f:
                     f.write(b"voice")
 
-            def fake_trim_audio(input_audio_path, output_audio_path, target_duration):
-                trim_calls.append((os.path.basename(input_audio_path), os.path.basename(output_audio_path), target_duration))
+            def fake_fit_audio(input_audio_path, output_audio_path, target_duration):
+                fit_calls.append((os.path.basename(input_audio_path), os.path.basename(output_audio_path), target_duration))
                 with open(output_audio_path, "wb") as f:
                     f.write(b"fit")
 
@@ -1274,9 +1331,9 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             with patch.object(commentary, "_get_video_duration", return_value=24.0), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover) as voiceover, \
                 patch.object(commentary, "_get_audio_duration", return_value=5.0), \
-                patch.object(commentary, "_trim_audio_part_to_duration", side_effect=fake_trim_audio), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
                 patch.object(commentary, "_run_command", side_effect=fake_run_command):
-                ambient = commentary._create_block_synced_visuals_and_audio(
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
                     video_path=video_path,
                     narration_blocks=blocks,
                     timed_video_path=timed_video_path,
@@ -1294,15 +1351,86 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 )
 
         self.assertEqual(2, voiceover.call_count)
-        self.assertEqual(2, len(trim_calls))
-        self.assertEqual(5.0, trim_calls[0][2])
+        self.assertEqual(2, len(fit_calls))
+        self.assertEqual(12.0, fit_calls[0][2])
         video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
         self.assertEqual(2, len(video_cmds))
         self.assertIn("-t", video_cmds[0])
-        self.assertEqual("5.000", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertEqual("12.000", video_cmds[0][video_cmds[0].index("-t") + 1])
         self.assertIn("setsar=1", video_cmds[0])
         self.assertNotIn("setpts=PTS/", " ".join(video_cmds[0]))
         self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual([12.0, 12.0], block_durations)
+
+    def test_block_synced_render_applies_ai_video_speed_to_video_and_ambient_audio(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "source.mp4")
+            open(video_path, "wb").close()
+            timed_video_path = os.path.join(tmpdir, "timed.mp4")
+            voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
+            ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
+            commands = []
+            fit_calls = []
+            original_audio_calls = []
+
+            def fake_voiceover(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"voice")
+
+            def fake_fit_audio(input_audio_path, output_audio_path, target_duration):
+                fit_calls.append((os.path.basename(input_audio_path), os.path.basename(output_audio_path), target_duration))
+                with open(output_audio_path, "wb") as f:
+                    f.write(b"fit")
+
+            def fake_original_audio(_video_path, start, duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                original_audio_calls.append((start, duration, os.path.basename(output_path), volume, speed, output_duration))
+                with open(output_path, "wb") as f:
+                    f.write(b"original")
+
+            def fake_run_command(cmd, cwd=None):
+                commands.append(cmd)
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"media")
+
+            blocks = [{
+                "start": 0,
+                "end": 12,
+                "visual": "slow transport section",
+                "narration": "这段运输过程可以稍微加速，但保留完整起止动作。",
+                "video_speed": 2.0,
+            }]
+            with patch.object(commentary, "_get_video_duration", return_value=12.0), \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+                patch.object(commentary, "_get_audio_duration", return_value=3.0), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
+                patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
+                    video_path=video_path,
+                    narration_blocks=blocks,
+                    timed_video_path=timed_video_path,
+                    voiceover_path=voiceover_path,
+                    ambient_audio_path=ambient_audio_path,
+                    aspect_mode="16:9",
+                    work_dir=tmpdir,
+                    tts_provider="edge",
+                    language="zh",
+                    elevenlabs_key=None,
+                    voice_id="voice",
+                    edge_voice="zh-CN-YunjianNeural",
+                    original_audio_volume=0.08,
+                    preserve_source_resolution=True,
+                )
+
+        self.assertEqual(1, len(fit_calls))
+        self.assertEqual(6.0, fit_calls[0][2])
+        video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
+        self.assertEqual(1, len(video_cmds))
+        self.assertEqual("12.000", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertIn("setpts=PTS/2.000000", video_cmds[0][video_cmds[0].index("-vf") + 1])
+        self.assertEqual((0.0, 12.0, "block_ambient_001_s2000.m4a", 0.08, 2.0, 6.0), original_audio_calls[0])
+        self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual([6.0], block_durations)
 
     def test_full_duration_rejects_missing_narration_blocks(self):
         with self.assertRaisesRegex(Exception, "narration_blocks are required"):
