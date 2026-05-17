@@ -615,6 +615,7 @@ class CommentaryRequest(BaseModel):
     openai_batch_size: Optional[int] = None
     openai_visual_concurrency: Optional[int] = None
     commentary_block_concurrency: Optional[int] = None
+    auto_video_speed: bool = True
     tts_provider: str = "edge"
     voice_id: Optional[str] = None
     edge_voice: Optional[str] = None
@@ -688,6 +689,7 @@ def commentary_request_from_form(form) -> CommentaryRequest:
         openai_batch_size=parse_form_optional_int(form.get("openai_batch_size")),
         openai_visual_concurrency=parse_form_optional_int(form.get("openai_visual_concurrency")),
         commentary_block_concurrency=parse_form_optional_int(form.get("commentary_block_concurrency")),
+        auto_video_speed=parse_form_bool(form.get("auto_video_speed"), True),
         tts_provider=str(form.get("tts_provider") or "edge"),
         voice_id=str(form.get("voice_id") or "") or None,
         edge_voice=str(form.get("edge_voice") or "") or None,
@@ -1149,6 +1151,7 @@ async def commentary_generate(
                 openai_batch_size=req.openai_batch_size,
                 openai_visual_concurrency=req.openai_visual_concurrency,
                 commentary_block_concurrency=req.commentary_block_concurrency,
+                auto_video_speed=req.auto_video_speed,
                 progress=log,
                 checkpoint=checkpoint,
             )
@@ -1323,6 +1326,7 @@ async def commentary_retry(
                 openai_batch_size=req.openai_batch_size,
                 openai_visual_concurrency=req.openai_visual_concurrency,
                 commentary_block_concurrency=req.commentary_block_concurrency,
+                auto_video_speed=req.auto_video_speed,
                 progress=log,
                 checkpoint=checkpoint,
                 prepared_analysis_video_path=prepared_analysis_video_path,

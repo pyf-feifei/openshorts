@@ -94,10 +94,14 @@ FULL_MODE_MAX_VOICEOVER_DURATION_RATIO = float(os.environ.get("OPENSHORTS_FULL_M
 FULL_MODE_MAX_PAUSE_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_PAUSE_RATIO", "0.18"))
 FULL_MODE_MAX_PAUSE_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_PAUSE_SECONDS", "12"))
 FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS = int(os.environ.get("OPENSHORTS_FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS", "1"))
+FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS", "1.5"))
+FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED = float(os.environ.get("OPENSHORTS_FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED", "4.0"))
 FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION = float(os.environ.get("OPENSHORTS_FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION", "0.85"))
+FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP", "1.18"))
+FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO", "0.72"))
 GEMINI_SAFE_INPUT_TOKEN_BUDGET = int(os.environ.get("OPENSHORTS_GEMINI_SAFE_INPUT_TOKEN_BUDGET", "180000"))
 GEMINI_LOW_RES_TOKENS_PER_SECOND = 100.0
-GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "4")))
+GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "6")))
 COMMENTARY_BANNED_PHRASES = ("画面汇总",)
 ASS_SUBTITLE_MAX_LINE_UNITS = 34
 
@@ -601,6 +605,22 @@ def _safe_video_speed(value) -> float:
     return round(max(1.0, min(2.5, speed)), 3)
 
 
+def _safe_render_video_speed(value) -> float:
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    return round(max(1.0, min(FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED, speed)), 3)
+
+
+def _block_source_duration(block: Dict) -> float:
+    return max(0.0, float(block.get("end") or 0.0) - float(block.get("start") or 0.0))
+
+
+def _block_visual_duration(block: Dict) -> float:
+    return max(0.0, _block_source_duration(block) / _safe_video_speed(block.get("video_speed")))
+
+
 def _normalize_narration_blocks(raw_blocks: List[Dict], duration: float) -> List[Dict]:
     normalized = []
     for item in raw_blocks or []:
@@ -636,6 +656,91 @@ def _normalize_narration_blocks(raw_blocks: List[Dict], duration: float) -> List
     return normalized
 
 
+_AUTO_SPEED_CANDIDATE_KEYWORDS = {
+    "slow", "repetitive", "waiting", "setup", "walking", "transport", "transition", "moving", "loading", "unloading",
+    "conveyor", "sorting", "cleanup", "preparing", "carry", "push", "pull", "move", "repeat",
+    "缓慢", "慢慢", "重复", "等待", "准备", "运输", "搬运", "转运", "移动", "推进", "拖动", "传送",
+    "上料", "下料", "分拣", "清理", "过渡", "转场", "路上", "来回", "反复", "铺垫",
+}
+_AUTO_SPEED_PROTECTED_KEYWORDS = {
+    "reveal", "final", "result", "ending", "showcase", "close-up", "text", "label", "title", "readable",
+    "关键", "揭晓", "最终", "结果", "成品", "亮相", "展示", "特写", "文字", "标签", "标题", "结尾", "完成", "成果",
+}
+
+
+def _auto_speed_text(block: Dict) -> str:
+    return f"{block.get('visual') or ''} {block.get('narration') or ''}".lower()
+
+
+def _auto_speed_candidate_score(block: Dict) -> float:
+    if bool(block.get("pause")):
+        return 0.0
+    duration = max(0.0, float(block.get("end") or 0.0) - float(block.get("start") or 0.0))
+    if duration < 8.0:
+        return 0.0
+    text = _auto_speed_text(block)
+    if any(keyword in text for keyword in _AUTO_SPEED_PROTECTED_KEYWORDS):
+        return 0.0
+    keyword_hits = sum(1 for keyword in _AUTO_SPEED_CANDIDATE_KEYWORDS if keyword in text)
+    if keyword_hits <= 0 and duration < 18.0:
+        return 0.0
+    return keyword_hits * 10.0 + min(duration, 45.0)
+
+
+def _apply_auto_video_speed_to_blocks(blocks: List[Dict], enabled: bool) -> List[Dict]:
+    adjusted = [dict(block) for block in blocks or []]
+    if not adjusted:
+        return adjusted
+    if not enabled:
+        for block in adjusted:
+            block["video_speed"] = 1.0
+        return adjusted
+    if any(_safe_video_speed(block.get("video_speed")) > 1.0001 for block in adjusted):
+        for block in adjusted:
+            block["video_speed"] = _safe_video_speed(block.get("video_speed"))
+        return adjusted
+
+    scored = [
+        (score, index, block)
+        for index, block in enumerate(adjusted)
+        for score in [_auto_speed_candidate_score(block)]
+        if score > 0
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    max_count = min(3, max(1, len([block for block in adjusted if not bool(block.get("pause"))]) // 5))
+    for _, _, block in scored[:max_count]:
+        duration = max(0.0, float(block.get("end") or 0.0) - float(block.get("start") or 0.0))
+        block["video_speed"] = 1.5 if duration >= 20.0 else 1.25
+    return adjusted
+
+
+def _summarize_auto_video_speed(blocks: List[Dict], enabled: bool) -> Dict:
+    accelerated = []
+    saved_seconds = 0.0
+    for index, block in enumerate(blocks or [], start=1):
+        speed = _safe_video_speed(block.get("video_speed"))
+        if speed <= 1.0001:
+            continue
+        source_duration = max(0.0, float(block.get("end") or 0.0) - float(block.get("start") or 0.0))
+        saved = max(0.0, source_duration - (source_duration / speed))
+        saved_seconds += saved
+        accelerated.append({
+            "index": index,
+            "start": block.get("start"),
+            "end": block.get("end"),
+            "video_speed": speed,
+            "saved_seconds": round(saved, 1),
+            "visual": str(block.get("visual") or "")[:120],
+        })
+    return {
+        "enabled": bool(enabled),
+        "total_blocks": len(blocks or []),
+        "accelerated_count": len(accelerated),
+        "saved_seconds": round(saved_seconds, 1),
+        "accelerated_blocks": accelerated,
+    }
+
+
 def _narration_blocks_to_edit_segments(blocks: List[Dict]) -> List[Dict]:
     return [
         {
@@ -663,8 +768,26 @@ def _resolve_edit_segments_for_target(raw_segments: List[Dict], duration: float,
 
 def _minimum_narration_chars_for_seconds(target_seconds: float, language: str) -> int:
     if (language or "").lower().startswith("zh"):
-        return int(min(16000, max(1200, target_seconds * 1.8)))
-    return int(min(12000, max(900, target_seconds * 1.7)))
+        return int(min(16000, max(1200, target_seconds * 4.2)))
+    return int(min(12000, max(900, target_seconds * 2.6)))
+
+
+def _spoken_block_chars_per_second(language: str) -> float:
+    if (language or "").lower().startswith("zh"):
+        return 4.2
+    return 2.6
+
+
+def _prompt_spoken_block_chars_per_second(language: str) -> float:
+    if (language or "").lower().startswith("zh"):
+        return 5.4
+    return 3.4
+
+
+def _minimum_spoken_block_chars(target_seconds: float, language: str) -> int:
+    if (language or "").lower().startswith("zh"):
+        return int(max(36, target_seconds * _spoken_block_chars_per_second(language)))
+    return int(max(24, target_seconds * _spoken_block_chars_per_second(language)))
 
 
 def _minimum_narration_chars(duration: float, target_duration: str, language: str) -> int:
@@ -679,7 +802,7 @@ def _minimum_narration_chars_for_blocks(blocks: List[Dict], duration: float, tar
     if target_duration != "full":
         return base_min
     spoken_seconds = sum(
-        max(0.0, float(block.get("end") or 0) - float(block.get("start") or 0))
+        _block_visual_duration(block)
         for block in blocks
         if not bool(block.get("pause"))
     )
@@ -693,15 +816,26 @@ def _accepted_minimum_narration_chars(min_chars: int) -> int:
     return max(1, int(math.floor(min_chars * ratio)))
 
 
+def _block_narration_density_instruction(language: str) -> str:
+    validation_chars_per_second = _spoken_block_chars_per_second(language)
+    prompt_chars_per_second = _prompt_spoken_block_chars_per_second(language)
+    return (
+        f"For every non-pause narration_blocks item, calculate playable_visual_seconds = (end - start) / video_speed. "
+        f"Its narration must contain at least ceil(playable_visual_seconds * {prompt_chars_per_second:.1f}) non-whitespace characters so it clears the hard validator at {validation_chars_per_second:.1f} chars/second with safety margin. "
+        "If the block would need fewer words, do not leave silent footage: either shorten that source range, split it into smaller narrated ranges, "
+        "or use video_speed only when the visible action is genuinely slow or repetitive."
+    )
+
+
 def _maximum_narration_chars(duration: float, target_duration: str, language: str) -> int:
     if target_duration != "full":
         return 0
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     min_chars = _minimum_narration_chars(duration, target_duration, language)
     if (language or "").lower().startswith("zh"):
-        readable_limit = int(max(min_chars + 1200, target_seconds * 5.2))
+        readable_limit = int(max(min_chars + 1800, target_seconds * 6.2))
         return int(min(FULL_MODE_MAX_NARRATION_CHARS_ZH, readable_limit))
-    readable_limit = int(max(min_chars + 1600, target_seconds * 3.6))
+    readable_limit = int(max(min_chars + 2200, target_seconds * 4.2))
     return int(min(FULL_MODE_MAX_NARRATION_CHARS_OTHER, readable_limit))
 
 
@@ -710,8 +844,8 @@ def _target_narration_block_count(duration: float, target_duration: str) -> int:
         return 0
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     if target_seconds <= 0:
-        return 12
-    return int(min(40, max(12, math.ceil(target_seconds / 120.0))))
+        return 16
+    return int(min(48, max(16, math.ceil(target_seconds / 42.0))))
 
 
 def _narration_from_blocks(data: Dict) -> str:
@@ -726,11 +860,44 @@ def _narration_from_blocks(data: Dict) -> str:
     return "\n\n".join(parts)
 
 
-def _normalize_script_timeline(data: Dict, duration: float, target_duration: str) -> None:
+def _repair_near_miss_narration_density_blocks(data: Dict, language: str) -> None:
+    blocks = data.get("narration_blocks") or []
+    changed = False
+    for block in blocks:
+        if not isinstance(block, dict) or bool(block.get("pause")):
+            continue
+        block_duration = _block_visual_duration(block)
+        if block_duration <= 0:
+            continue
+        block_chars = len(re.sub(r"\s+", "", str(block.get("narration") or "")))
+        min_block_chars = _accepted_minimum_narration_chars(_minimum_spoken_block_chars(block_duration, language))
+        if block_chars <= 0 or block_chars >= min_block_chars:
+            continue
+        if block_chars / max(1, min_block_chars) < FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO:
+            continue
+        source_duration = _block_source_duration(block)
+        if source_duration <= 0:
+            continue
+        accepted_chars_per_second = _spoken_block_chars_per_second(language) * max(0.5, min(1.0, FULL_MODE_MIN_NARRATION_ACCEPTANCE_RATIO))
+        target_visual_duration = max(0.1, block_chars / accepted_chars_per_second)
+        required_speed = source_duration / target_visual_duration
+        current_speed = _safe_video_speed(block.get("video_speed"))
+        max_allowed_speed = min(FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED, current_speed * FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP)
+        if required_speed <= current_speed or required_speed > max_allowed_speed:
+            continue
+        block["video_speed"] = round(required_speed, 3)
+        changed = True
+    if changed:
+        data["narration_blocks"] = blocks
+        data["edit_segments"] = _narration_blocks_to_edit_segments(blocks)
+
+
+def _normalize_script_timeline(data: Dict, duration: float, target_duration: str, language: str = "") -> None:
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
     if target_duration == "full" and blocks:
         data["narration_blocks"] = blocks
-        data["edit_segments"] = _narration_blocks_to_edit_segments(blocks)
+        _repair_near_miss_narration_density_blocks(data, language)
+        data["edit_segments"] = _narration_blocks_to_edit_segments(data.get("narration_blocks") or blocks)
         data.setdefault("cut_strategy", [])
     else:
         data["edit_segments"] = _resolve_edit_segments_for_target(data.get("edit_segments", []), duration, target_duration)
@@ -773,24 +940,26 @@ def _validate_commentary_script_for_target(data: Dict, duration: float, target_d
             "OpenShorts needs timestamped narration blocks so each voiceover section can stay synced with the matching selected visual range."
         )
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
-    visual_seconds = _segments_total_duration(_narration_blocks_to_edit_segments(blocks))
+    edit_segments = _narration_blocks_to_edit_segments(blocks)
+    visual_seconds = sum(_block_visual_duration(block) for block in blocks)
     if target_seconds > 0 and (len(blocks) <= 1 or visual_seconds < target_seconds * 0.65 or visual_seconds > target_seconds * 1.6):
         raise Exception(
             "AI narration_blocks do not match the selected full-mode edit target. "
             f"Got {visual_seconds:.1f}s of block-matched visuals for a {target_seconds:.1f}s target."
         )
-    if not _segments_have_real_cuts(_narration_blocks_to_edit_segments(blocks), duration, target_seconds):
+    if not _segments_have_real_cuts(edit_segments, duration, target_seconds):
+        selected_source_seconds = _segments_total_duration(edit_segments)
         raise Exception(
             "AI returned a near-full-source timeline instead of an edited full-mode cut strategy. "
-            f"Got {visual_seconds:.1f}s selected from a {duration:.1f}s source for a {target_seconds:.1f}s target."
+            f"Got {selected_source_seconds:.1f}s selected from a {duration:.1f}s source for a {target_seconds:.1f}s target."
         )
     pause_seconds = 0.0
     longest_pause = 0.0
     consecutive_pauses = 0
     max_consecutive_pauses = 0
     spoken_blocks = 0
-    for block in blocks:
-        block_duration = max(0.0, float(block["end"]) - float(block["start"]))
+    for index, block in enumerate(blocks, start=1):
+        block_duration = _block_visual_duration(block)
         if bool(block.get("pause")):
             pause_seconds += block_duration
             longest_pause = max(longest_pause, block_duration)
@@ -799,6 +968,15 @@ def _validate_commentary_script_for_target(data: Dict, duration: float, target_d
         else:
             spoken_blocks += 1
             consecutive_pauses = 0
+            block_chars = len(re.sub(r"\s+", "", str(block.get("narration") or "")))
+            min_block_chars = _accepted_minimum_narration_chars(_minimum_spoken_block_chars(block_duration, language))
+            if block_chars < min_block_chars:
+                raise Exception(
+                    "AI narration block is too short for its selected visual range. "
+                    f"Block {index} has {block_chars} chars for {block_duration:.1f}s of playable visuals; "
+                    f"expected at least {min_block_chars}. Rewrite this block from the source visuals: add richer scene-matched commentary, shorten the range, split it, or mark only a brief intentional pause. "
+                    "Do not leave visible footage with no commentary."
+                )
     pause_ratio = pause_seconds / visual_seconds if visual_seconds > 0 else 0.0
     if spoken_blocks <= 0:
         raise Exception("AI returned only no-commentary footage. Full-mode commentary needs narrated blocks between any pause blocks.")
@@ -863,6 +1041,58 @@ def _validate_voiceover_duration_for_target(
         )
 
 
+def _focused_validation_repair_instruction(
+    validation_error: Optional[Exception],
+    invalid_script: Dict,
+    language: str,
+    block_count: int,
+) -> str:
+    if not validation_error:
+        return ""
+    error_text = str(validation_error)
+    density_match = re.search(
+        r"Block\s+(\d+)\s+has\s+(\d+)\s+chars\s+for\s+([0-9.]+)s\s+of playable visuals;\s+expected at least\s+(\d+)",
+        error_text,
+    )
+    if density_match:
+        block_index = int(density_match.group(1))
+        current_chars = int(density_match.group(2))
+        playable_seconds = float(density_match.group(3))
+        expected_chars = int(density_match.group(4))
+        block = {}
+        blocks = invalid_script.get("narration_blocks") or []
+        if 1 <= block_index <= len(blocks) and isinstance(blocks[block_index - 1], dict):
+            block = blocks[block_index - 1]
+        validation_chars_per_second = _spoken_block_chars_per_second(language)
+        prompt_chars_per_second = _prompt_spoken_block_chars_per_second(language)
+        repair_chars = max(expected_chars + 24, int(math.ceil(playable_seconds * prompt_chars_per_second)))
+        max_seconds_for_current_text = max(1.0, current_chars / validation_chars_per_second)
+        return f"""
+FOCUSED REPAIR REQUIRED:
+- The previous JSON failed specifically at narration_blocks[{block_index - 1}] / Block {block_index}.
+- That block has {current_chars} non-whitespace characters for {playable_seconds:.1f}s of playable visuals, but it needs at least {expected_chars} characters to pass validation.
+- Failing block from previous JSON: {json.dumps(block, ensure_ascii=False)}
+- In the next JSON, fix this exact block instead of only changing unrelated blocks: either expand its narration to at least {repair_chars} scene-matched characters, shorten its source range so playable visuals are about {max_seconds_for_current_text:.1f}s or less, increase video_speed only if the footage is visibly slow/repetitive, or split this visual idea across adjacent chronological blocks while preserving exactly {block_count} total narration_blocks.
+- Re-check every non-pause block before returning JSON: len(non_whitespace(narration)) must be >= ceil(((end - start) / video_speed) * {prompt_chars_per_second:.1f}) so it clears the hard validator at {validation_chars_per_second:.1f} chars/second.
+- Do not convert this block to pause=true unless it is a short intentional visual-only reveal; do not leave ordinary process footage without commentary.
+""".strip()
+    near_full_match = re.search(
+        r"Got\s+([0-9.]+)s\s+selected from a\s+([0-9.]+)s\s+source for a\s+([0-9.]+)s\s+target",
+        error_text,
+    )
+    if near_full_match:
+        selected_seconds = float(near_full_match.group(1))
+        source_seconds = float(near_full_match.group(2))
+        target_seconds = float(near_full_match.group(3))
+        return f"""
+FOCUSED REPAIR REQUIRED:
+- The previous JSON selected {selected_seconds:.1f}s from a {source_seconds:.1f}s source for a {target_seconds:.1f}s edited target, so it was too close to a continuous source timeline.
+- In the next JSON, make real editorial cuts: choose only the strongest process stages, remove waiting/setup/transport/repeated hammering/camera drift, and keep total playable visual time close to {target_seconds:.1f}s.
+- Preserve chronological coverage from beginning, middle, and ending, but do not keep long uncut ranges just to cover time.
+""".strip()
+    return ""
+
+
 def _build_regeneration_prompt(
     original_prompt: str,
     short_script: Dict,
@@ -870,16 +1100,25 @@ def _build_regeneration_prompt(
     target_duration: str,
     language: str,
     attempt: int = 1,
+    validation_error: Optional[Exception] = None,
 ) -> str:
     min_chars = _minimum_narration_chars(duration, target_duration, language)
     max_chars = _maximum_narration_chars(duration, target_duration, language)
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     block_count = _target_narration_block_count(duration, target_duration)
-    min_chars_per_block = max(80, math.ceil(min_chars / max(1, block_count)))
+    min_chars_per_block = max(120, math.ceil((min_chars / max(1, block_count)) * 1.25))
+    target_block_seconds = target_seconds / max(1, block_count)
+    block_density_instruction = _block_narration_density_instruction(language)
+    focused_repair_instruction = _focused_validation_repair_instruction(validation_error, short_script, language, block_count)
     return f"""{original_prompt}
 
 PREVIOUS RESPONSE WAS INVALID:
 {json.dumps(short_script, ensure_ascii=False)}
+
+VALIDATION ERROR:
+{validation_error or "The previous script failed full-mode commentary validation."}
+
+{focused_repair_instruction}
 
 REGENERATE FROM THE ATTACHED VIDEO:
 - This is regeneration attempt {attempt}. Discard the previous narration; do not expand it.
@@ -892,7 +1131,9 @@ REGENERATE FROM THE ATTACHED VIDEO:
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration; do not cram long narration into a short range.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
 - Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
@@ -910,16 +1151,25 @@ def _build_visual_plan_finalization_prompt(
     target_duration: str,
     language: str,
     attempt: int = 1,
+    validation_error: Optional[Exception] = None,
 ) -> str:
     min_chars = _minimum_narration_chars(duration, target_duration, language)
     max_chars = _maximum_narration_chars(duration, target_duration, language)
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     block_count = _target_narration_block_count(duration, target_duration)
-    min_chars_per_block = max(80, math.ceil(min_chars / max(1, block_count)))
+    min_chars_per_block = max(120, math.ceil((min_chars / max(1, block_count)) * 1.25))
+    target_block_seconds = target_seconds / max(1, block_count)
+    block_density_instruction = _block_narration_density_instruction(language)
+    focused_repair_instruction = _focused_validation_repair_instruction(validation_error, visual_plan, language, block_count)
     return f"""You are writing the final voiceover for a commentary remix.
 
 VIDEO-DERIVED VISUAL PLAN:
 {json.dumps(visual_plan, ensure_ascii=False)}
+
+VALIDATION ERROR:
+{validation_error or "The previous script needs full-mode validation before rendering."}
+
+{focused_repair_instruction}
 
 FINALIZE COMPLETE COMMENTARY:
 - This is finalization attempt {attempt}; use the video-derived visual plan above as the source of visual truth.
@@ -930,7 +1180,9 @@ FINALIZE COMPLETE COMMENTARY:
 - The final narration must be at least {min_chars} non-whitespace characters.
 - The final narration must be at most {max_chars} non-whitespace characters; keep it paced for the selected visuals instead of stretching the edit.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
 - Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
@@ -1088,7 +1340,9 @@ def _build_commentary_prompt(
     max_chars = _maximum_narration_chars(duration, target_duration, language)
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     block_count = _target_narration_block_count(duration, target_duration)
-    min_chars_per_block = max(80, math.ceil(min_chars / max(1, block_count)))
+    min_chars_per_block = max(120, math.ceil((min_chars / max(1, block_count)) * 1.25))
+    target_block_seconds = target_seconds / max(1, block_count)
+    block_density_instruction = _block_narration_density_instruction(language)
     style_grounding = _style_grounding_instruction(style, language)
 
     visual_analysis_text = ""
@@ -1163,12 +1417,15 @@ RULES:
 - For TARGET DURATION full, if the source has a final payoff, result reveal, before/after comparison, effect showcase, completed product, or conclusion, include the visual range where that result actually appears and let it play through.
 - For TARGET DURATION full, the selected blocks must not stop in the first half of a long source; at least one narration_blocks item must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
 - For TARGET DURATION full, narration_blocks is required: output exactly {block_count} chronological blocks. Each block must have start, end, visual, narration, pause, rate, pitch, and video_speed.
+- For TARGET DURATION full, aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed. Do not create 70-100s blocks unless the narration is dense enough for the entire range.
 - For TARGET DURATION full, narration_blocks must cover about {int(target_seconds)} seconds of selected visuals across the complete source timeline and must cover the same ranges as edit_segments; do not create narration for ranges that are not kept.
 - For TARGET DURATION full, most selected visual blocks should contain narration, but do not narrate every second like a robot; use short breathing room only when the footage benefits from it, and avoid long stretches where footage plays without commentary unless the source audio itself is essential.
 - For TARGET DURATION full, use pause=true blocks sparingly when the original footage genuinely needs to be heard without commentary: key reveals, machine/process sounds, skilled hand work, visual proof, emotional beats, transitions, or moments where the picture explains itself. Pause blocks must leave narration empty and should usually last 2-8 seconds.
 - For TARGET DURATION full, pause blocks should use the original source audio as the main sound, but total pause time must stay under about 15% of selected visual time. Do not place pause blocks back-to-back.
 - For TARGET DURATION full, each non-pause block's narration must be speakable inside that block's visual duration; do not put 2 minutes of words into a 20-second visual range.
 - For TARGET DURATION full, each non-pause narration_blocks item must contain at least {min_chars_per_block} non-whitespace characters in its narration field.
+- For TARGET DURATION full, {block_density_instruction}
+- For TARGET DURATION full, if a selected visual range is too long for a high-quality natural commentary paragraph, shorten the range or split it; do not rely on silent padding, extreme TTS pacing, or later render-time fixes.
 - For TARGET DURATION full, use rate to create cadence: slower values like "-10%" for important reveals or emotional emphasis, faster values like "+12%" for energetic process sections. Valid range: "-30%" to "+30%".
 - For TARGET DURATION full, use pitch lightly for tone: lower values like "-3Hz" for weight, higher values like "+3Hz" for excitement. Valid range: "-15Hz" to "+15Hz".
 - For TARGET DURATION full, use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
@@ -1819,7 +2076,10 @@ def _build_openai_regeneration_prompt(
     max_chars = _maximum_narration_chars(duration, target_duration, language)
     target_seconds = _target_visual_duration_seconds(duration, target_duration)
     block_count = _target_narration_block_count(duration, target_duration)
-    min_chars_per_block = max(80, math.ceil(min_chars / max(1, block_count)))
+    min_chars_per_block = max(120, math.ceil((min_chars / max(1, block_count)) * 1.25))
+    target_block_seconds = target_seconds / max(1, block_count)
+    block_density_instruction = _block_narration_density_instruction(language)
+    focused_repair_instruction = _focused_validation_repair_instruction(validation_error, invalid_script, language, block_count)
     return f"""{original_prompt}
 
 PREVIOUS RESPONSE WAS INVALID:
@@ -1827,6 +2087,8 @@ PREVIOUS RESPONSE WAS INVALID:
 
 VALIDATION ERROR:
 {validation_error}
+
+{focused_repair_instruction}
 
 REGENERATE FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 - This is regeneration attempt {attempt}. Discard the previous narration; do not expand it.
@@ -1838,7 +2100,9 @@ REGENERATE FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
 - Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
 - Use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
@@ -1919,7 +2183,7 @@ def generate_openai_commentary_script(
         data["narration"] = narration
         data.setdefault("title", video_title or "Commentary Remix")
         data.setdefault("summary", "")
-        _normalize_script_timeline(data, duration, target_duration)
+        _normalize_script_timeline(data, duration, target_duration, language)
         data["narration"] = _normalize_script_narration(data)
         try:
             _validate_commentary_script_for_target(data, duration, target_duration, language)
@@ -2510,7 +2774,7 @@ def generate_commentary_script(
         data["narration"] = narration
         data.setdefault("title", video_title or "Commentary Remix")
         data.setdefault("summary", "")
-        _normalize_script_timeline(data, duration, target_duration)
+        _normalize_script_timeline(data, duration, target_duration, language)
         data["narration"] = _normalize_script_narration(data)
         try:
             _validate_commentary_script_for_target(data, duration, target_duration, language)
@@ -2534,6 +2798,7 @@ def generate_commentary_script(
                         target_duration,
                         language,
                         attempt=script_attempt,
+                        validation_error=exc,
                     )
                 ]
             else:
@@ -2544,6 +2809,7 @@ def generate_commentary_script(
                     target_duration,
                     language,
                     attempt=script_attempt,
+                    validation_error=exc,
                 )
                 next_contents = _replace_prompt_in_contents(contents, regeneration_prompt)
             if progress:
@@ -2833,7 +3099,7 @@ def _extract_original_audio_clip(
     output_duration: Optional[float] = None,
 ) -> None:
     volume = max(0.0, min(volume, 1.0))
-    speed = _safe_video_speed(speed)
+    speed = _safe_render_video_speed(speed)
     filters = [f"volume={volume}"]
     if speed > 1.0001:
         filters.append(_atempo_filter(speed))
@@ -2859,7 +3125,7 @@ def _extract_original_audio_clip(
 
 def _block_video_filter(aspect_filter: str, speed: float) -> str:
     filters = []
-    speed = _safe_video_speed(speed)
+    speed = _safe_render_video_speed(speed)
     if speed > 1.0001:
         filters.append(f"setpts=PTS/{speed:.6f}")
     if aspect_filter:
@@ -2908,33 +3174,20 @@ def _create_block_synced_visuals_and_audio(
 
     def process_block(index: int, block: Dict) -> Dict:
         is_pause = bool(block.get("pause"))
-        if is_pause:
-            report(f"Adding original-audio pause block {index}/{total_blocks}...")
-        else:
-            report(f"Generating synced commentary block {index}/{total_blocks}...")
-        source_duration = max(0.1, float(block["end"]) - float(block["start"]))
-        video_speed = _safe_video_speed(block.get("video_speed"))
+        source_start = float(block["start"])
+        source_duration = max(0.1, float(block["end"]) - source_start)
+        requested_video_speed = _safe_render_video_speed(block.get("video_speed"))
+        video_speed = requested_video_speed
         visual_duration = max(0.1, source_duration / video_speed)
-        speed_token = int(round(video_speed * 1000))
-        fitted_voice_path = os.path.join(part_dir, f"block_voice_fit_{index:03d}_s{speed_token}.m4a")
-        block_video_path = os.path.join(part_dir, f"block_video_{index:03d}_s{speed_token}.mp4")
-        block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}_s{speed_token}.m4a") if needs_ambient_track else None
-        if (
-            os.path.exists(block_video_path)
-            and os.path.exists(fitted_voice_path)
-            and (not needs_ambient_track or os.path.exists(block_ambient_path))
-        ):
-            return {
-                "index": index,
-                "video_path": block_video_path,
-                "voice_path": fitted_voice_path,
-                "ambient_path": block_ambient_path,
-                "duration": visual_duration,
-            }
+        render_source_duration = source_duration
+        speed_label = f" at {video_speed:g}x" if video_speed > 1.0001 else ""
         if is_pause:
-            _create_silent_audio_clip(fitted_voice_path, visual_duration)
+            report(f"Adding original-audio pause block {index}/{total_blocks}{speed_label}...")
         else:
-            block_voice_path = os.path.join(part_dir, f"block_voice_{index:03d}.mp3")
+            report(f"Generating synced commentary block {index}/{total_blocks}{speed_label}...")
+
+        block_voice_path = os.path.join(part_dir, f"block_voice_{index:03d}.mp3")
+        if not is_pause:
             generate_commentary_voiceover(
                 text=block["narration"],
                 output_path=block_voice_path,
@@ -2946,11 +3199,42 @@ def _create_block_synced_visuals_and_audio(
                 rate=block.get("rate") or "+0%",
                 pitch=block.get("pitch") or "+0Hz",
             )
+
+        if not is_pause:
+            voice_duration = max(0.1, _get_audio_duration(block_voice_path))
+            max_synced_visual_duration = max(0.1, voice_duration + FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS)
+            if visual_duration > max_synced_visual_duration:
+                desired_speed = source_duration / max_synced_visual_duration
+                video_speed = _safe_render_video_speed(max(requested_video_speed, desired_speed))
+                visual_duration = min(visual_duration, max_synced_visual_duration)
+                render_source_duration = min(source_duration, max(0.1, visual_duration * video_speed))
+                visual_duration = max(0.1, render_source_duration / video_speed)
+                if render_source_duration < source_duration * 0.75:
+                    raise Exception(
+                        "Generated TTS is much shorter than its selected visual range. "
+                        f"Block {index} has {voice_duration:.1f}s of narration for {source_duration:.1f}s of source visuals. "
+                        "Regenerate the commentary with denser scene-matched narration or shorter visual ranges; refusing to over-trim footage because that would hurt commentary quality."
+                    )
+                report(
+                    f"Tightening commentary block {index}/{total_blocks} to {visual_duration:.1f}s "
+                    "so narration stays synced with the visuals..."
+                )
+
+        speed_token = int(round(video_speed * 1000))
+        source_token = int(round(render_source_duration * 1000))
+        duration_token = int(round(visual_duration * 1000))
+        cache_token = f"s{speed_token}_src{source_token}_dur{duration_token}"
+        fitted_voice_path = os.path.join(part_dir, f"block_voice_fit_{index:03d}_{cache_token}.m4a")
+        block_video_path = os.path.join(part_dir, f"block_video_{index:03d}_{cache_token}.mp4")
+        block_ambient_path = os.path.join(part_dir, f"block_ambient_{index:03d}_{cache_token}.m4a") if needs_ambient_track else None
+        if is_pause:
+            _create_silent_audio_clip(fitted_voice_path, visual_duration)
+        else:
             _fit_audio_part_to_duration(block_voice_path, fitted_voice_path, visual_duration)
         cmd = [
             "ffmpeg", "-y",
-            "-ss", f"{float(block['start']):.3f}",
-            "-t", f"{source_duration:.3f}",
+            "-ss", f"{source_start:.3f}",
+            "-t", f"{render_source_duration:.3f}",
             "-i", video_path,
             "-an",
             "-vf", _block_video_filter(vf_aspect, video_speed),
@@ -2966,8 +3250,8 @@ def _create_block_synced_visuals_and_audio(
                 if is_pause and pause_volume > 0:
                     _extract_original_audio_clip(
                         video_path,
-                        float(block["start"]),
-                        source_duration,
+                        source_start,
+                        render_source_duration,
                         block_ambient_path,
                         volume=pause_volume,
                         speed=video_speed,
@@ -2976,8 +3260,8 @@ def _create_block_synced_visuals_and_audio(
                 elif not is_pause and spoken_volume > 0:
                     _extract_original_audio_clip(
                         video_path,
-                        float(block["start"]),
-                        source_duration,
+                        source_start,
+                        render_source_duration,
                         block_ambient_path,
                         volume=spoken_volume,
                         speed=video_speed,
@@ -3250,6 +3534,7 @@ def generate_commentary_video(
     openai_batch_size: Optional[int] = None,
     openai_visual_concurrency: Optional[int] = None,
     commentary_block_concurrency: Optional[int] = None,
+    auto_video_speed: bool = True,
     gemini_pool: Optional[GeminiKeyPool] = None,
     progress: Optional[Callable[[str], None]] = None,
     checkpoint: Optional[Callable[[Dict], None]] = None,
@@ -3423,6 +3708,13 @@ def generate_commentary_video(
             previous_error=previous_error,
         )
 
+    _normalize_script_timeline(script, duration, target_duration)
+    if target_duration != "full" or script.get("narration_blocks"):
+        _validate_commentary_script_for_target(script, duration, target_duration, language)
+    if target_duration == "full" and script.get("narration_blocks"):
+        script["narration_blocks"] = _apply_auto_video_speed_to_blocks(script.get("narration_blocks") or [], auto_video_speed)
+        script["edit_segments"] = _narration_blocks_to_edit_segments(script["narration_blocks"])
+
     slug = _safe_slug(script.get("title") or video_title)
     script_path = os.path.join(output_dir, f"{slug}_commentary_script.json")
     with open(script_path, "w", encoding="utf-8") as f:
@@ -3432,7 +3724,18 @@ def generate_commentary_video(
 
     voiceover_path = os.path.join(output_dir, f"{slug}_voiceover.mp3")
     narration_blocks = _normalize_narration_blocks(script.get("narration_blocks") or [], duration)
+    auto_video_speed_summary = _summarize_auto_video_speed(narration_blocks, auto_video_speed)
     if target_duration == "full" and narration_blocks:
+        if not auto_video_speed:
+            log("AI auto video speed disabled; rendering all commentary blocks at 1.0x.")
+        elif auto_video_speed_summary["accelerated_count"] > 0:
+            log(
+                "AI auto video speed: "
+                f"{auto_video_speed_summary['accelerated_count']}/{auto_video_speed_summary['total_blocks']} blocks accelerated, "
+                f"saved about {auto_video_speed_summary['saved_seconds']:.1f}s."
+            )
+        else:
+            log("AI auto video speed: no eligible slow or repetitive blocks selected; rendering all blocks at 1.0x.")
         voiceover_path = os.path.join(output_dir, f"{slug}_voiceover.m4a")
         edit_segments = _narration_blocks_to_edit_segments(narration_blocks)
     else:
@@ -3537,6 +3840,8 @@ def generate_commentary_video(
         "openai_analysis": script.get("_openai_analysis") if analysis_mode == "openai" else None,
         "openai_sampling_options": openai_sampling_options if analysis_mode == "openai" else None,
         "commentary_block_concurrency": resolved_block_concurrency,
+        "auto_video_speed": bool(auto_video_speed),
+        "auto_video_speed_summary": auto_video_speed_summary,
         "edited_visual": os.path.basename(edited_video_path),
         "timed_visual": os.path.basename(timed_video_path),
         "ambient_audio": os.path.basename(ambient_audio) if ambient_audio else None,

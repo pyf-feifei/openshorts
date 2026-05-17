@@ -165,6 +165,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [openAIBatchSize, setOpenAIBatchSize] = useState(COMMENTARY_DEFAULTS.openAIBatchSize)
   const [openAIVisualConcurrency, setOpenAIVisualConcurrency] = useState(COMMENTARY_DEFAULTS.openAIVisualConcurrency)
   const [commentaryBlockConcurrency, setCommentaryBlockConcurrency] = useState(COMMENTARY_DEFAULTS.commentaryBlockConcurrency)
+  const [autoVideoSpeed, setAutoVideoSpeed] = useState(COMMENTARY_DEFAULTS.autoVideoSpeed)
   const [subtitles, setSubtitles] = useState(true)
   const [aspectMode, setAspectMode] = useState('auto')
   const [jobId, setJobId] = useState(null)
@@ -179,6 +180,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [taskListStatus, setTaskListStatus] = useState('idle')
   const [retryingJobId, setRetryingJobId] = useState(null)
   const [voicePreviewStatus, setVoicePreviewStatus] = useState('idle')
+  const [attachedTaskRequest, setAttachedTaskRequest] = useState(null)
   const audioRef = useRef(null)
   const audioUrlRef = useRef(null)
   const statusPollFailuresRef = useRef(0)
@@ -234,6 +236,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         setLogs(data.logs || [])
         setBackendStage(data.stage ? { stage: data.stage, label: data.stage_label, progress: data.stage_progress } : null)
         setStatus(data.status)
+        if (data.request) applyCommentaryRequestToControls(data.request, data.source_type)
         if (data.request?.analysis_mode) setActiveAnalysisMode(data.request.analysis_mode)
         if (data.result) setResult(data.result)
         if (data.status === 'failed') setError((data.logs || []).slice(-1)[0] || 'Generation failed')
@@ -311,6 +314,30 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     }
   }
 
+  const applyCommentaryRequestToControls = (request = {}, sourceType = null) => {
+    setAttachedTaskRequest(request)
+    if (sourceType) setSourceMode(sourceType === 'file' ? 'file' : 'url')
+    if (request.url !== undefined) setUrl(request.url || '')
+    if (request.language) setLanguage(request.language)
+    if (request.style) setStyle(request.style)
+    if (request.target_duration) setTargetDuration(request.target_duration)
+    if (request.analysis_mode) setAnalysisMode(request.analysis_mode)
+    if (request.tts_provider) setTtsProvider(request.tts_provider)
+    if (request.voice_id) setVoiceId(request.voice_id)
+    if (request.edge_voice) setEdgeVoice(request.edge_voice)
+    if (request.original_audio_volume !== undefined) setOriginalAudioVolume(request.original_audio_volume)
+    if (request.pause_original_audio_volume !== undefined) setPauseOriginalAudioVolume(request.pause_original_audio_volume)
+    if (request.openai_frame_interval_seconds !== undefined) setOpenAIFrameIntervalSeconds(request.openai_frame_interval_seconds)
+    if (request.openai_max_frames !== undefined) setOpenAIMaxFrames(request.openai_max_frames)
+    if (request.openai_scene_max_keyframes !== undefined) setOpenAISceneMaxKeyframes(request.openai_scene_max_keyframes)
+    if (request.openai_batch_size !== undefined) setOpenAIBatchSize(request.openai_batch_size)
+    if (request.openai_visual_concurrency !== undefined) setOpenAIVisualConcurrency(request.openai_visual_concurrency)
+    if (request.commentary_block_concurrency !== undefined) setCommentaryBlockConcurrency(request.commentary_block_concurrency)
+    if (request.auto_video_speed !== undefined) setAutoVideoSpeed(Boolean(request.auto_video_speed))
+    if (request.subtitles !== undefined) setSubtitles(Boolean(request.subtitles))
+    if (request.aspect_mode) setAspectMode(request.aspect_mode)
+  }
+
   const createCommentaryJobWithUploadProgress = (headers, requestBody) => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', getApiUrl('/api/commentary/generate'))
@@ -349,14 +376,23 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     xhr.send(requestBody)
   })
 
-  const attachCommentaryTask = (task) => {
-    setError(task.error || '')
-    setActiveAnalysisMode(task.request?.analysis_mode || analysisMode)
-    setJobId(task.job_id)
-    setStatus(task.status || 'processing')
-    setLogs(task.logs || [])
-    setBackendStage(task.stage ? { stage: task.stage, label: task.stage_label, progress: task.stage_progress } : null)
-    setResult(task.result || null)
+  const attachCommentaryTask = async (task) => {
+    let currentTask = task
+    try {
+      const res = await fetch(getApiUrl(`/api/commentary/status/${task.job_id}`))
+      if (res.ok) currentTask = await res.json()
+    } catch {
+      currentTask = task
+    }
+
+    setError(currentTask.error || '')
+    if (currentTask.request) applyCommentaryRequestToControls(currentTask.request, currentTask.source_type)
+    setActiveAnalysisMode(currentTask.request?.analysis_mode || analysisMode)
+    setJobId(currentTask.job_id)
+    setStatus(currentTask.status || 'processing')
+    setLogs(currentTask.logs || [])
+    setBackendStage(currentTask.stage ? { stage: currentTask.stage, label: currentTask.stage_label, progress: currentTask.stage_progress } : null)
+    setResult(currentTask.result || null)
     setUploadProgress(null)
     setUploadPhase('idle')
     statusPollFailuresRef.current = 0
@@ -392,6 +428,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         throw new Error(message)
       }
       const data = await res.json()
+      setAttachedTaskRequest(task.request || null)
       setJobId(data.job_id)
       setStatus('processing')
       setLogs([...(task.logs || []), 'Retrying commentary remix from saved task checkpoints...'])
@@ -442,6 +479,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     }
 
     setError('')
+    setAttachedTaskRequest(null)
     setActiveAnalysisMode(analysisMode)
     setStatus('processing')
     setLogs([usingFile ? 'Preparing to upload local video...' : 'Starting commentary remix...'])
@@ -476,6 +514,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         if (edgeVoice) formData.append('edge_voice', edgeVoice)
         formData.append('original_audio_volume', String(Number(originalAudioVolume)))
         formData.append('pause_original_audio_volume', String(Number(pauseOriginalAudioVolume)))
+        formData.append('auto_video_speed', String(autoVideoSpeed))
         formData.append('subtitles', String(subtitles))
         formData.append('aspect_mode', aspectMode)
         formData.append('vertical', String(aspectMode === '9:16'))
@@ -495,6 +534,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
           edge_voice: edgeVoice || undefined,
           original_audio_volume: Number(originalAudioVolume),
           pause_original_audio_volume: Number(pauseOriginalAudioVolume),
+          auto_video_speed: autoVideoSpeed,
           subtitles,
           aspect_mode: aspectMode,
           vertical: aspectMode === '9:16',
@@ -673,9 +713,19 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         : '生成中...'
     : '生成二创解说视频'
 
+  const displayedOpenAIFrameIntervalSeconds = attachedTaskRequest?.openai_frame_interval_seconds ?? openAIFrameIntervalSeconds
+  const displayedOpenAIMaxFrames = attachedTaskRequest?.openai_max_frames ?? openAIMaxFrames
+  const displayedOpenAISceneMaxKeyframes = attachedTaskRequest?.openai_scene_max_keyframes ?? openAISceneMaxKeyframes
+  const displayedOpenAIBatchSize = attachedTaskRequest?.openai_batch_size ?? openAIBatchSize
+  const displayedOpenAIVisualConcurrency = attachedTaskRequest?.openai_visual_concurrency ?? openAIVisualConcurrency
+  const displayedCommentaryBlockConcurrency = attachedTaskRequest?.commentary_block_concurrency ?? commentaryBlockConcurrency
+  const displayedAutoVideoSpeed = attachedTaskRequest?.auto_video_speed ?? autoVideoSpeed
+  const speedSummary = result?.auto_video_speed_summary
+
   const reset = () => {
     setStatus('idle')
     setJobId(null)
+    setAttachedTaskRequest(null)
     setLogs([])
     setBackendStage(null)
     setResult(null)
@@ -834,32 +884,32 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   <div className="grid sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">抽帧间隔（秒）</label>
-                      <input type="number" min="1" max="60" step="0.5" value={openAIFrameIntervalSeconds} onChange={(e) => setOpenAIFrameIntervalSeconds(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="60" step="0.5" value={displayedOpenAIFrameIntervalSeconds} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIFrameIntervalSeconds(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">每隔多少秒采样一帧；数值越小，画面理解越细，但会增加抽帧时间和多模态调用成本。默认 3 秒。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">全片最多分析帧数</label>
-                      <input type="number" min="1" max="2000" step="1" value={openAIMaxFrames} onChange={(e) => setOpenAIMaxFrames(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="2000" step="1" value={displayedOpenAIMaxFrames} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIMaxFrames(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">限制整条视频最多发送给 OpenAI 兼容模型的帧数；上限越高，批次数、耗时和费用越高。默认 1800。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">单场景最多关键帧</label>
-                      <input type="number" min="1" max="600" step="1" value={openAISceneMaxKeyframes} onChange={(e) => setOpenAISceneMaxKeyframes(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="600" step="1" value={displayedOpenAISceneMaxKeyframes} onChange={(e) => { setAttachedTaskRequest(null); setOpenAISceneMaxKeyframes(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">场景感知抽帧时，每个镜头/场景最多保留多少关键帧；动态场景可用更高值覆盖细节。默认 60。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">每批图片数</label>
-                      <input type="number" min="1" max="128" step="1" value={openAIBatchSize} onChange={(e) => setOpenAIBatchSize(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="128" step="1" value={displayedOpenAIBatchSize} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIBatchSize(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 32，最大 128。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">视觉分析并发数</label>
-                      <input type="number" min="1" max="8" step="1" value={openAIVisualConcurrency} onChange={(e) => setOpenAIVisualConcurrency(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="8" step="1" value={displayedOpenAIVisualConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIVisualConcurrency(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 3。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">解说分块生成并发数</label>
-                      <input type="number" min="1" max="8" step="1" value={commentaryBlockConcurrency} onChange={(e) => setCommentaryBlockConcurrency(e.target.value)} className="input-field" />
+                      <input type="number" min="1" max="8" step="1" value={displayedCommentaryBlockConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setCommentaryBlockConcurrency(e.target.value) }} className="input-field" />
                       <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 3。</p>
                     </div>
                   </div>
@@ -940,6 +990,13 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
             </div>
 
             <div className="grid sm:grid-cols-2 gap-3">
+              <label className="flex items-start gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
+                <input type="checkbox" className="mt-1" checked={autoVideoSpeed} onChange={(e) => { setAttachedTaskRequest(null); setAutoVideoSpeed(e.target.checked) }} />
+                <span>
+                  <span className="block text-sm text-zinc-300">AI 自动变速</span>
+                  <span className="block text-xs text-zinc-500 mt-1">慢节奏、重复、搬运或转场片段会自动加速，关键展示保持 1x。</span>
+                </span>
+              </label>
               <label className="flex items-center gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
                 <input type="checkbox" checked={subtitles} onChange={(e) => setSubtitles(e.target.checked)} />
                 <span className="text-sm text-zinc-300">{targetDuration === 'full' ? '生成外挂字幕' : '生成并烧录字幕'}</span>
@@ -964,6 +1021,30 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               <Activity size={18} className={status === 'processing' ? 'text-cyan-400 animate-pulse' : 'text-zinc-400'} />
               任务状态
             </h2>
+            {attachedTaskRequest && (
+              <div className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] p-4">
+                <div className="text-sm font-medium text-cyan-100 mb-3">当前任务参数</div>
+                <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                  <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                    <div className="text-zinc-500 mb-1">每批图片数</div>
+                    <div className="text-zinc-100 font-semibold">{attachedTaskRequest.openai_batch_size ?? '—'}</div>
+                  </div>
+                  <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                    <div className="text-zinc-500 mb-1">视觉分析并发数</div>
+                    <div className="text-zinc-100 font-semibold">{attachedTaskRequest.openai_visual_concurrency ?? '—'}</div>
+                  </div>
+                  <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                    <div className="text-zinc-500 mb-1">解说分块生成并发数</div>
+                    <div className="text-zinc-100 font-semibold">{attachedTaskRequest.commentary_block_concurrency ?? '—'}</div>
+                  </div>
+                  <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                    <div className="text-zinc-500 mb-1">AI 自动变速</div>
+                    <div className="text-zinc-100 font-semibold">{displayedAutoVideoSpeed ? '开启' : '关闭'}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="mb-4 space-y-2">
               {progressSteps.map((step) => (
                 <div key={step.label} className={`rounded-xl border p-3 ${step.state === 'active' ? 'border-cyan-500/30 bg-cyan-500/10' : step.state === 'done' ? 'border-green-500/20 bg-green-500/10' : 'border-white/10 bg-white/[0.03]'}`}>
@@ -993,6 +1074,15 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   </div>
                   <div className="text-sm text-zinc-300 font-medium">{result.title}</div>
                   <p className="text-xs text-zinc-500 mt-2 line-clamp-3">{result.summary}</p>
+                  {speedSummary && (
+                    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-zinc-300">
+                      {speedSummary.enabled
+                        ? speedSummary.accelerated_count > 0
+                          ? `AI 自动变速：${speedSummary.accelerated_count}/${speedSummary.total_blocks} 个片段加速，约节省 ${speedSummary.saved_seconds} 秒。`
+                          : 'AI 自动变速：未发现适合加速的慢节奏片段，全部保持 1x。'
+                        : 'AI 自动变速：已关闭，全部保持 1x。'}
+                    </div>
+                  )}
                 </div>
 
                 <video src={getApiUrl(result.video_url)} controls className="w-full rounded-xl border border-white/10 bg-black" />

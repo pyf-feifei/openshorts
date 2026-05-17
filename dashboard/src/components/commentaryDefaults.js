@@ -12,6 +12,7 @@ export const COMMENTARY_DEFAULTS = {
   openAIBatchSize: 32,
   openAIVisualConcurrency: 3,
   commentaryBlockConcurrency: 3,
+  autoVideoSpeed: true,
 };
 
 export const DEFAULT_EDGE_VOICES_BY_LANGUAGE = {
