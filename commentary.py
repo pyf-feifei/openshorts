@@ -30,9 +30,9 @@ OPENAI_MAX_FRAMES = max(1, int(os.environ.get("OPENSHORTS_OPENAI_MAX_FRAMES", "1
 OPENAI_BATCH_SIZE_LIMIT = 128
 OPENAI_VISUAL_CONCURRENCY_LIMIT = 8
 COMMENTARY_BLOCK_CONCURRENCY_LIMIT = 8
-OPENAI_BATCH_SIZE = max(1, min(OPENAI_BATCH_SIZE_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_BATCH_SIZE", "32"))))
-OPENAI_VISUAL_CONCURRENCY = max(1, min(OPENAI_VISUAL_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_CONCURRENCY", "3"))))
-COMMENTARY_BLOCK_CONCURRENCY = max(1, min(COMMENTARY_BLOCK_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_COMMENTARY_BLOCK_CONCURRENCY", "3"))))
+OPENAI_BATCH_SIZE = max(1, min(OPENAI_BATCH_SIZE_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_BATCH_SIZE", "46"))))
+OPENAI_VISUAL_CONCURRENCY = max(1, min(OPENAI_VISUAL_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_CONCURRENCY", "5"))))
+COMMENTARY_BLOCK_CONCURRENCY = max(1, min(COMMENTARY_BLOCK_CONCURRENCY_LIMIT, int(os.environ.get("OPENSHORTS_COMMENTARY_BLOCK_CONCURRENCY", "5"))))
 OPENAI_SCENE_AWARE_SAMPLING = os.environ.get(
     "OPENSHORTS_OPENAI_SCENE_AWARE_SAMPLING",
     "true",
@@ -60,7 +60,7 @@ OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS = max(
 )
 OPENAI_REQUEST_RETRIES = max(1, int(os.environ.get("OPENSHORTS_OPENAI_REQUEST_RETRIES", "3")))
 OPENAI_VISUAL_MAX_TOKENS = max(1000, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_MAX_TOKENS", "6000")))
-OPENAI_SCRIPT_MAX_TOKENS = max(2000, int(os.environ.get("OPENSHORTS_OPENAI_SCRIPT_MAX_TOKENS", "16000")))
+OPENAI_SCRIPT_MAX_TOKENS = max(2000, int(os.environ.get("OPENSHORTS_OPENAI_SCRIPT_MAX_TOKENS", "64000")))
 OPENAI_ANALYSIS_FRAMES_MANIFEST = "openai_analysis_frames_manifest.json"
 OPENAI_VISUAL_ANALYSIS_CACHE = "openai_visual_analysis.json"
 OPENAI_VISUAL_PROMPT_MAX_CHARS = max(10000, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_PROMPT_MAX_CHARS", "45000")))
@@ -82,7 +82,7 @@ GEMINI_FILE_PROCESSING_MAX_TIMEOUT_SECONDS = max(
 )
 GEMINI_FILE_PROCESSING_POLL_SECONDS = max(1, int(os.environ.get("OPENSHORTS_GEMINI_FILE_PROCESSING_POLL_SECONDS", "2")))
 DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
-DEFAULT_EDGE_VOICE = "zh-CN-XiaoxiaoNeural"
+DEFAULT_EDGE_VOICE = "zh-CN-YunyangNeural"
 FULL_MODE_MIN_VISUAL_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MIN_VISUAL_SECONDS", "600"))
 FULL_MODE_MAX_VISUAL_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_VISUAL_SECONDS", "1800"))
 FULL_MODE_SOURCE_FRACTION = float(os.environ.get("OPENSHORTS_FULL_MODE_SOURCE_FRACTION", "0.30"))
@@ -97,17 +97,27 @@ FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS = int(os.environ.get("OPENSHORTS_FULL_MOD
 FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS", "1.5"))
 FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED = float(os.environ.get("OPENSHORTS_FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED", "4.0"))
 FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION = float(os.environ.get("OPENSHORTS_FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION", "0.85"))
-FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP", "1.18"))
-FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO", "0.72"))
+FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP", "1.75"))
+FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO", "0.55"))
 GEMINI_SAFE_INPUT_TOKEN_BUDGET = int(os.environ.get("OPENSHORTS_GEMINI_SAFE_INPUT_TOKEN_BUDGET", "180000"))
 GEMINI_LOW_RES_TOKENS_PER_SECOND = 100.0
 GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "6")))
 COMMENTARY_BANNED_PHRASES = ("画面汇总",)
+COMMENTARY_NARRATION_BANNED_PATTERNS = (
+    re.compile(r"镜头", re.I),
+)
 ASS_SUBTITLE_MAX_LINE_UNITS = 34
+ASS_SUBTITLE_DEFAULT_WIDTH = 1080
+ASS_SUBTITLE_DEFAULT_HEIGHT = 1920
+ASS_SUBTITLE_FONT_HEIGHT_RATIO = 0.045
+ASS_SUBTITLE_MARGIN_X_RATIO = 0.06
+ASS_SUBTITLE_MARGIN_Y_RATIO = 0.073
+ASS_SUBTITLE_MIN_FONT_SIZE = 28
+ASS_SUBTITLE_MAX_FONT_SIZE = 104
 
 
 EDGE_VOICES_BY_LANGUAGE = {
-    "zh": "zh-CN-XiaoxiaoNeural",
+    "zh": "zh-CN-YunyangNeural",
     "en": "en-US-JennyNeural",
     "es": "es-ES-ElviraNeural",
     "ja": "ja-JP-NanamiNeural",
@@ -820,10 +830,11 @@ def _block_narration_density_instruction(language: str) -> str:
     validation_chars_per_second = _spoken_block_chars_per_second(language)
     prompt_chars_per_second = _prompt_spoken_block_chars_per_second(language)
     return (
-        f"For every non-pause narration_blocks item, calculate playable_visual_seconds = (end - start) / video_speed. "
-        f"Its narration must contain at least ceil(playable_visual_seconds * {prompt_chars_per_second:.1f}) non-whitespace characters so it clears the hard validator at {validation_chars_per_second:.1f} chars/second with safety margin. "
-        "If the block would need fewer words, do not leave silent footage: either shorten that source range, split it into smaller narrated ranges, "
-        "or use video_speed only when the visible action is genuinely slow or repetitive."
+        "Hard requirement before style, jokes, title, or pacing: every non-pause narration_blocks item must either pass the character-density check or be redesigned. "
+        f"For every non-pause item, calculate playable_visual_seconds = (end - start) / video_speed and required_min_chars = ceil(playable_visual_seconds * {prompt_chars_per_second:.1f}) non-whitespace characters; this safely clears the backend validator at {validation_chars_per_second:.1f} chars/second. "
+        "Before returning JSON, audit every block one by one and write those numbers into density_audit. "
+        "If a sparse visual moment does not justify that much natural commentary, do not pad it with meaningless words: shorten the source range, split the block, mark only a brief pause=true section with empty narration, or use video_speed only when the visible action is genuinely slow or repetitive. "
+        "The correct fix for a low-information scene is better block design, not filler narration."
     )
 
 
@@ -892,6 +903,100 @@ def _repair_near_miss_narration_density_blocks(data: Dict, language: str) -> Non
         data["edit_segments"] = _narration_blocks_to_edit_segments(blocks)
 
 
+def _episode_block_range_from_source(blocks: List[Dict], start: float, end: float) -> Tuple[int, int]:
+    matched = []
+    for index, block in enumerate(blocks, start=1):
+        block_start = float(block.get("start") or 0.0)
+        block_end = float(block.get("end") or block_start)
+        if block_end > start and block_start < end:
+            matched.append(index)
+    if not matched:
+        nearest = min(
+            range(1, len(blocks) + 1),
+            key=lambda idx: abs(float(blocks[idx - 1].get("start") or 0.0) - start),
+        )
+        return nearest, nearest
+    return matched[0], matched[-1]
+
+
+def _derive_commentary_episodes_from_blocks(blocks: List[Dict], title: str) -> List[Dict]:
+    if len(blocks) < 4:
+        return []
+    episode_count = min(6, max(2, math.ceil(len(blocks) / 4)))
+    chunk_size = math.ceil(len(blocks) / episode_count)
+    episodes = []
+    for index, start_block in enumerate(range(1, len(blocks) + 1, chunk_size), start=1):
+        end_block = min(len(blocks), start_block + chunk_size - 1)
+        episodes.append({
+            "episode_number": index,
+            "title": f"第{index}集：{title or '二创解说'}",
+            "summary": "按完整解说时间线拆分的连续观看分集。",
+            "start_block": start_block,
+            "end_block": end_block,
+        })
+    return episodes
+
+
+def _normalize_commentary_episodes(data: Dict, duration: float, target_duration: str) -> None:
+    raw_plan = data.get("episode_plan") if isinstance(data.get("episode_plan"), dict) else {}
+    raw_episodes = data.get("episodes") if isinstance(data.get("episodes"), list) else []
+    should_split = bool(raw_plan.get("should_split")) or bool(raw_episodes)
+    reason = str(raw_plan.get("reason") or "").strip()
+    blocks = data.get("narration_blocks") or []
+    if target_duration != "full" or not blocks:
+        data["episode_plan"] = {"should_split": False, "reason": reason}
+        data["episodes"] = []
+        return
+
+    episodes = []
+    previous_end_block = 0
+    for default_number, raw in enumerate(raw_episodes, start=1):
+        if not isinstance(raw, dict):
+            continue
+        source_start = raw.get("start")
+        source_end = raw.get("end")
+        if raw.get("start_block") is None and raw.get("end_block") is None and source_start is not None and source_end is not None:
+            start_block, end_block = _episode_block_range_from_source(
+                blocks,
+                _clamp_float(source_start, 0.0, 0.0, duration),
+                _clamp_float(source_end, duration, 0.0, duration),
+            )
+        else:
+            start_block = _clamp_int(raw.get("start_block"), previous_end_block + 1, 1, len(blocks))
+            end_block = _clamp_int(raw.get("end_block"), start_block, start_block, len(blocks))
+        if start_block <= previous_end_block:
+            start_block = previous_end_block + 1
+        if start_block > len(blocks) or end_block < start_block:
+            continue
+        end_block = min(end_block, len(blocks))
+        first_block = blocks[start_block - 1]
+        last_block = blocks[end_block - 1]
+        episode_number = _clamp_int(raw.get("episode_number"), len(episodes) + 1, 1, 99)
+        episodes.append({
+            "episode_number": episode_number,
+            "title": str(raw.get("title") or f"第{len(episodes) + 1}集").strip(),
+            "summary": str(raw.get("summary") or "").strip(),
+            "start_block": start_block,
+            "end_block": end_block,
+            "start": float(first_block.get("start") or 0.0),
+            "end": float(last_block.get("end") or first_block.get("start") or 0.0),
+            "block_count": end_block - start_block + 1,
+        })
+        previous_end_block = end_block
+
+    if should_split and not episodes:
+        episodes = _derive_commentary_episodes_from_blocks(blocks, str(data.get("title") or ""))
+        reason = reason or "AI 判断适合分集，已按完整解说时间线对齐拆分。"
+
+    for index, episode in enumerate(episodes, start=1):
+        episode["episode_number"] = index
+        if not episode.get("title"):
+            episode["title"] = f"第{index}集"
+
+    data["episode_plan"] = {"should_split": bool(episodes), "reason": reason}
+    data["episodes"] = episodes
+
+
 def _normalize_script_timeline(data: Dict, duration: float, target_duration: str, language: str = "") -> None:
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
     if target_duration == "full" and blocks:
@@ -903,6 +1008,7 @@ def _normalize_script_timeline(data: Dict, duration: float, target_duration: str
         data["edit_segments"] = _resolve_edit_segments_for_target(data.get("edit_segments", []), duration, target_duration)
         if blocks:
             data["narration_blocks"] = blocks
+    _normalize_commentary_episodes(data, duration, target_duration)
 
 
 def _normalize_script_narration(data: Dict) -> str:
@@ -915,7 +1021,10 @@ def _normalize_script_narration(data: Dict) -> str:
 
 def _banned_phrase_instruction() -> str:
     phrases = "、".join(f"“{phrase}”" for phrase in COMMENTARY_BANNED_PHRASES)
-    return f"- Never use these banned phrases anywhere in the returned JSON: {phrases}. Describe the concrete scene directly instead of using meta-summary wording."
+    return (
+        f"- Never use these banned phrases anywhere in the returned JSON: {phrases}. Describe the concrete scene directly instead of using meta-summary wording.\n"
+        "- In narration and narration_blocks.narration, do not use the word '镜头' or camera/meta phrasing like '镜头切到', '镜头拉近', '镜头里', '镜头展示', or '镜头带我们'. Describe the subject and action directly instead."
+    )
 
 
 def _validate_no_banned_commentary_phrases(data: Dict) -> None:
@@ -925,12 +1034,25 @@ def _validate_no_banned_commentary_phrases(data: Dict) -> None:
             raise Exception(f"AI commentary output contains banned phrase: {phrase}")
 
 
+def _validate_no_banned_narration_patterns(data: Dict) -> None:
+    narration_parts = [str(data.get("narration") or "")]
+    for block in data.get("narration_blocks") or []:
+        if isinstance(block, dict):
+            narration_parts.append(str(block.get("narration") or ""))
+    narration = "\n".join(narration_parts)
+    for pattern in COMMENTARY_NARRATION_BANNED_PATTERNS:
+        match = pattern.search(narration)
+        if match:
+            raise Exception(f"AI commentary narration contains camera/meta phrasing: {match.group(0)}")
+
+
 def _has_visual_plan(data: Dict) -> bool:
     return bool(data.get("narration_blocks") or data.get("chapters"))
 
 
 def _validate_commentary_script_for_target(data: Dict, duration: float, target_duration: str, language: str) -> None:
     _validate_no_banned_commentary_phrases(data)
+    _validate_no_banned_narration_patterns(data)
     if target_duration != "full":
         return
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
@@ -1041,6 +1163,29 @@ def _validate_voiceover_duration_for_target(
         )
 
 
+def _density_validation_failure_details(validation_error: Optional[Exception], invalid_script: Dict) -> Optional[Dict]:
+    if not validation_error:
+        return None
+    density_match = re.search(
+        r"Block\s+(\d+)\s+has\s+(\d+)\s+chars\s+for\s+([0-9.]+)s\s+of playable visuals;\s+expected at least\s+(\d+)",
+        str(validation_error),
+    )
+    if not density_match:
+        return None
+    block_index = int(density_match.group(1))
+    blocks = invalid_script.get("narration_blocks") or []
+    if not (1 <= block_index <= len(blocks)) or not isinstance(blocks[block_index - 1], dict):
+        return None
+    return {
+        "block_index": block_index,
+        "array_index": block_index - 1,
+        "current_chars": int(density_match.group(2)),
+        "playable_seconds": float(density_match.group(3)),
+        "expected_chars": int(density_match.group(4)),
+        "block": blocks[block_index - 1],
+    }
+
+
 def _focused_validation_repair_instruction(
     validation_error: Optional[Exception],
     invalid_script: Dict,
@@ -1050,19 +1195,13 @@ def _focused_validation_repair_instruction(
     if not validation_error:
         return ""
     error_text = str(validation_error)
-    density_match = re.search(
-        r"Block\s+(\d+)\s+has\s+(\d+)\s+chars\s+for\s+([0-9.]+)s\s+of playable visuals;\s+expected at least\s+(\d+)",
-        error_text,
-    )
-    if density_match:
-        block_index = int(density_match.group(1))
-        current_chars = int(density_match.group(2))
-        playable_seconds = float(density_match.group(3))
-        expected_chars = int(density_match.group(4))
-        block = {}
-        blocks = invalid_script.get("narration_blocks") or []
-        if 1 <= block_index <= len(blocks) and isinstance(blocks[block_index - 1], dict):
-            block = blocks[block_index - 1]
+    density_details = _density_validation_failure_details(validation_error, invalid_script)
+    if density_details:
+        block_index = density_details["block_index"]
+        current_chars = density_details["current_chars"]
+        playable_seconds = density_details["playable_seconds"]
+        expected_chars = density_details["expected_chars"]
+        block = density_details["block"]
         validation_chars_per_second = _spoken_block_chars_per_second(language)
         prompt_chars_per_second = _prompt_spoken_block_chars_per_second(language)
         repair_chars = max(expected_chars + 24, int(math.ceil(playable_seconds * prompt_chars_per_second)))
@@ -1072,7 +1211,9 @@ FOCUSED REPAIR REQUIRED:
 - The previous JSON failed specifically at narration_blocks[{block_index - 1}] / Block {block_index}.
 - That block has {current_chars} non-whitespace characters for {playable_seconds:.1f}s of playable visuals, but it needs at least {expected_chars} characters to pass validation.
 - Failing block from previous JSON: {json.dumps(block, ensure_ascii=False)}
-- In the next JSON, fix this exact block instead of only changing unrelated blocks: either expand its narration to at least {repair_chars} scene-matched characters, shorten its source range so playable visuals are about {max_seconds_for_current_text:.1f}s or less, increase video_speed only if the footage is visibly slow/repetitive, or split this visual idea across adjacent chronological blocks while preserving exactly {block_count} total narration_blocks.
+- First priority: make this exact block pass the character-density validator; do not spend tokens rewriting already-valid blocks.
+- In the next JSON, keep all unrelated narration_blocks unchanged. Fix only this block, or this block plus its immediate neighbors if a timestamp boundary must move.
+- Preferred fix: expand this block's narration to at least {repair_chars} scene-matched characters while staying speakable. Alternative fixes: shorten its source range so playable visuals are about {max_seconds_for_current_text:.1f}s or less, increase video_speed only if the footage is visibly slow/repetitive, or split this visual idea across adjacent chronological blocks while preserving exactly {block_count} total narration_blocks.
 - Re-check every non-pause block before returning JSON: len(non_whitespace(narration)) must be >= ceil(((end - start) / video_speed) * {prompt_chars_per_second:.1f}) so it clears the hard validator at {validation_chars_per_second:.1f} chars/second.
 - Do not convert this block to pause=true unless it is a short intentional visual-only reveal; do not leave ordinary process footage without commentary.
 """.strip()
@@ -1091,6 +1232,7 @@ FOCUSED REPAIR REQUIRED:
 - Preserve chronological coverage from beginning, middle, and ending, but do not keep long uncut ranges just to cover time.
 """.strip()
     return ""
+
 
 
 def _build_regeneration_prompt(
@@ -1131,8 +1273,9 @@ REGENERATE FROM THE ATTACHED VIDEO:
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- If episode_plan.should_split=true, keep episodes aligned to the repaired 1-based narration_blocks indexes using start_block and end_block.
 - Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
-- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; this is a blocking requirement, not a style suggestion. pause=true blocks must leave narration empty.
 - {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration; do not cram long narration into a short range.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
@@ -1177,11 +1320,13 @@ FINALIZE COMPLETE COMMENTARY:
 - If the visual plan preserves a near-full-source continuous timeline, replace it with a real edit decision list that selects about {int(target_seconds)} seconds and removes repetitive, slow, duplicated, waiting, setup, walking, camera drift, and low-value filler ranges.
 - Write a complete Simplified Chinese voiceover for about {int(target_seconds)} seconds of edited visuals.
 {_banned_phrase_instruction()}
+- The top-level title must clearly say what the video is doing: name the concrete subject, process/action, and result or purpose. Use titles like "废旧电机拆解回收铜线全过程" instead of vague hype titles like "震撼工厂全过程" or "不可思议的改造".
 - The final narration must be at least {min_chars} non-whitespace characters.
 - The final narration must be at most {max_chars} non-whitespace characters; keep it paced for the selected visuals instead of stretching the edit.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- If episode_plan.should_split=true, keep episodes aligned to the repaired 1-based narration_blocks indexes using start_block and end_block.
 - Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
-- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; this is a blocking requirement, not a style suggestion. pause=true blocks must leave narration empty.
 - {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
@@ -1192,7 +1337,7 @@ FINALIZE COMPLETE COMMENTARY:
 
 JSON FORMAT:
 {{
-  "title": "remix video title",
+  "title": "specific title that says what the video does",
   "summary": "brief summary",
   "hook": "opening hook",
   "narration": "complete final voiceover text",
@@ -1343,6 +1488,12 @@ def _build_commentary_prompt(
     min_chars_per_block = max(120, math.ceil((min_chars / max(1, block_count)) * 1.25))
     target_block_seconds = target_seconds / max(1, block_count)
     block_density_instruction = _block_narration_density_instruction(language)
+    openai_one_shot_density_instruction = ""
+    if mode == "openai" and target_duration == "full":
+        openai_one_shot_density_instruction = (
+            "- For OpenAI-compatible mode, the first complete JSON response must pass every per-block density check; "
+            "the backend will not send follow-up repair requests just to fix under-length narration blocks."
+        )
     style_grounding = _style_grounding_instruction(style, language)
 
     visual_analysis_text = ""
@@ -1423,17 +1574,23 @@ RULES:
 - For TARGET DURATION full, use pause=true blocks sparingly when the original footage genuinely needs to be heard without commentary: key reveals, machine/process sounds, skilled hand work, visual proof, emotional beats, transitions, or moments where the picture explains itself. Pause blocks must leave narration empty and should usually last 2-8 seconds.
 - For TARGET DURATION full, pause blocks should use the original source audio as the main sound, but total pause time must stay under about 15% of selected visual time. Do not place pause blocks back-to-back.
 - For TARGET DURATION full, each non-pause block's narration must be speakable inside that block's visual duration; do not put 2 minutes of words into a 20-second visual range.
-- For TARGET DURATION full, each non-pause narration_blocks item must contain at least {min_chars_per_block} non-whitespace characters in its narration field.
+- For TARGET DURATION full, use about {min_chars_per_block} non-whitespace characters as a planning average for a normal {target_block_seconds:.0f}s narrated block, not as a reason to overfill short or sparse visual moments.
 - For TARGET DURATION full, {block_density_instruction}
-- For TARGET DURATION full, if a selected visual range is too long for a high-quality natural commentary paragraph, shorten the range or split it; do not rely on silent padding, extreme TTS pacing, or later render-time fixes.
+{openai_one_shot_density_instruction}
+- For TARGET DURATION full, if a selected visual range is too long or too visually sparse for a high-quality natural commentary paragraph, redesign the block: shorten the range, split it, or use a brief pause=true moment for original audio/visual breathing room. Do not rely on silent padding, meaningless word padding, extreme TTS pacing, or later render-time fixes.
 - For TARGET DURATION full, use rate to create cadence: slower values like "-10%" for important reveals or emotional emphasis, faster values like "+12%" for energetic process sections. Valid range: "-30%" to "+30%".
 - For TARGET DURATION full, use pitch lightly for tone: lower values like "-3Hz" for weight, higher values like "+3Hz" for excitement. Valid range: "-15Hz" to "+15Hz".
 - For TARGET DURATION full, use video_speed above 1.0 only for visibly slow, repetitive, waiting, setup, walking, transport, or process-transition ranges; valid range is 1.0 to 2.5. Keep key reveals, endings, readable text, final results, and effect showcases at 1.0 unless the footage is clearly slow and still understandable.
 - For TARGET DURATION full, vary rate and pitch across blocks; do not leave every non-pause block at "+0%" and "+0Hz".
 - For TARGET DURATION full, total narration must be at least {min_chars} non-whitespace characters and should cover about {int(target_seconds)} seconds of edited visuals.
 - For TARGET DURATION full, total narration must be at most {max_chars} non-whitespace characters so the voiceover does not exceed the selected visuals.
+- For TARGET DURATION full, decide whether the completed commentary should also be released as continuous episodes. Set episode_plan.should_split=true only when the source has natural chapters, process stages, tutorial steps, story progression, interview sections, or a long timeline that benefits from serial viewing.
+- For TARGET DURATION full, if should_split=true, return episodes that cover consecutive narration_blocks in order. Each episode must use 1-based start_block and end_block indexes from narration_blocks; do not split inside a block, overlap episodes, or skip blocks between episodes unless that block is an intentional bridge better left only in the full video.
+- For TARGET DURATION full, if the source is short or does not have clear episode boundaries, set episode_plan.should_split=false and episodes=[]; the complete commentary video will still be generated.
 - The top-level narration must be the complete voiceover text, preferably the non-pause narration_blocks joined in order.
-- Add a strong hook in the first sentence.
+- The opening must follow the 3-second retention rule: the first sentence and the first narration block must immediately create curiosity, contrast, stakes, surprise, or payoff expectation while still matching the first visible action.
+- Add a strong hook in the first sentence; do not start with generic setup, greetings, or slow background explanation.
+- The top-level title must clearly say what the video is doing: name the concrete subject, process/action, and result or purpose. Use titles like "废旧电机拆解回收铜线全过程" instead of vague hype titles like "震撼工厂全过程" or "不可思议的改造".
 - Make it suitable for a video with the original footage under the narration.
 - Avoid claiming things that are not supported by the transcript.
 - If the original video contains a speaker narration, assume it will be replaced by this new voiceover; keep only useful visual context and ambient sound.
@@ -1442,13 +1599,20 @@ RULES:
 
 JSON FORMAT:
 {{
-  "title": "remix video title",
+  "title": "specific title that says what the video does",
   "summary": "brief summary of the source video",
   "hook": "opening hook",
   "narration": "full voiceover narration text",
   "narration_blocks": [
     {{"start": 0, "end": 30, "visual": "what is visible in this range", "narration": "voiceover for this visual range", "pause": false, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}},
     {{"start": 30, "end": 40, "visual": "original footage moment that should breathe", "narration": "", "pause": true, "rate": "+0%", "pitch": "+0Hz", "video_speed": 1.0}}
+  ],
+  "density_audit": [
+    {{"block": 1, "playable_visual_seconds": 30, "required_min_chars": 162, "actual_non_whitespace_chars": 190, "passes": true}}
+  ],
+  "episode_plan": {{"should_split": true, "reason": "why this full commentary benefits from serialized episodes, or why not"}},
+  "episodes": [
+    {{"episode_number": 1, "title": "第1集：specific episode title", "summary": "what this episode covers", "start_block": 1, "end_block": 4}}
   ],
   "edit_segments": [
     {{"start": 0, "end": 30, "reason": "why this visual part should be kept and what redundant source time is skipped around it"}}
@@ -2090,18 +2254,20 @@ VALIDATION ERROR:
 
 {focused_repair_instruction}
 
-REGENERATE FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
-- This is regeneration attempt {attempt}. Discard the previous narration; do not expand it.
-- Use the timestamped visual timeline and source transcript again to write a fresh full commentary script.
-- Select chronological edit_segments that cover every major visible process stage across the source timeline while cutting repetitive, slow, duplicated, waiting, setup, walking, camera drift, and low-value filler ranges.
+REPAIR FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
+- This is repair attempt {attempt}. Preserve valid blocks from the previous JSON; do not rewrite the whole script unless the validation error makes the timeline globally impossible.
+- Fix the specific validation failure first, then re-check every non-pause block's character density before returning JSON.
+- Use the timestamped visual timeline and source transcript again only for the failed block or nearby blocks that need local boundary changes.
+- Keep chronological edit_segments that cover every major visible process stage across the source timeline while cutting repetitive, slow, duplicated, waiting, setup, walking, camera drift, and low-value filler ranges.
 - The final narration_blocks must include selected source ranges from the beginning, middle, and later ending portion of the source; at least one block must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
 - Do not return a continuous near-full-source timeline; select about {int(target_seconds)} seconds of useful visuals, not {int(duration)} seconds.
 {_banned_phrase_instruction()}
 - Narration must be at least {min_chars} non-whitespace characters.
 - Narration must be at most {max_chars} non-whitespace characters; do not create a voiceover longer than the selected visuals.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, and video_speed.
+- If episode_plan.should_split=true, keep episodes aligned to the repaired 1-based narration_blocks indexes using start_block and end_block.
 - Aim for about {target_block_seconds:.0f}s playable visuals per block; most non-pause blocks should be 25-55s after video_speed, not 70-100s long ranges.
-- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; pause=true blocks must leave narration empty.
+- Non-pause narration_blocks must each contain at least {min_chars_per_block} non-whitespace characters; this is a blocking requirement, not a style suggestion. pause=true blocks must leave narration empty.
 - {block_density_instruction}
 - Each non-pause narration block must be speakable inside that block's visual duration.
 - Use pause=true blocks sparingly for key reveals, process sounds, skilled visual moments, transitions, or scenes where the picture genuinely needs to play without commentary; keep pause blocks short, usually 2-8 seconds, under about 15% of selected visual time, and never back-to-back.
@@ -2202,10 +2368,19 @@ def generate_openai_commentary_script(
             validation_error = exc
             if target_duration != "full" or script_attempt >= GEMINI_SCRIPT_VALIDATION_ATTEMPTS:
                 raise
+            density_details = _density_validation_failure_details(exc, data)
+            if density_details:
+                if progress:
+                    progress(
+                        f"OpenAI-compatible script validation failed: {exc} "
+                        "The first full-script response did not satisfy the required per-block narration density; "
+                        "not sending extra OpenAI repair requests for under-length blocks."
+                    )
+                raise
             if progress:
                 progress(
                     f"OpenAI-compatible script validation failed on correction attempt {script_attempt}/{GEMINI_SCRIPT_VALIDATION_ATTEMPTS}: "
-                    f"{exc} Asking model to rewrite the full-mode script..."
+                    f"{exc} Asking model to repair the invalid full-mode script without rewriting valid blocks..."
                 )
             response_text = _call_openai_compatible_chat(
                 api_key=openai_key,
@@ -2230,7 +2405,7 @@ def generate_openai_commentary_script(
                 timeout_seconds=OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS,
             )
             if progress:
-                progress("OpenAI-compatible model returned a corrected commentary script; validating timeline sync...")
+                progress("OpenAI-compatible model returned a repaired commentary script; validating timeline sync...")
     raise validation_error or Exception("OpenAI-compatible model returned invalid commentary script")
 
 
@@ -3380,18 +3555,70 @@ def _split_narration_sentences(text: str) -> List[str]:
     return [text.strip()] if text and text.strip() else []
 
 
-def _ass_header_lines() -> List[str]:
+def _normalize_ass_dimensions(width: Optional[int] = None, height: Optional[int] = None) -> Tuple[int, int]:
+    safe_width = int(width or ASS_SUBTITLE_DEFAULT_WIDTH)
+    safe_height = int(height or ASS_SUBTITLE_DEFAULT_HEIGHT)
+    return max(1, safe_width), max(1, safe_height)
+
+
+def _probe_video_dimensions(video_path: str) -> Tuple[int, int]:
+    ffprobe_name = os.path.basename(str(FFPROBE_BINARY)).lower()
+    probe_path = _windows_path_from_wsl(video_path) if ffprobe_name == "ffprobe.exe" else video_path
+    result = subprocess.run(
+        [
+            FFPROBE_BINARY, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x",
+            probe_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return _normalize_ass_dimensions()
+    first_line = (result.stdout or "").strip().splitlines()[0:1]
+    if not first_line or "x" not in first_line[0]:
+        return _normalize_ass_dimensions()
+    width, height = first_line[0].split("x", 1)
+    try:
+        return _normalize_ass_dimensions(int(width), int(height))
+    except ValueError:
+        return _normalize_ass_dimensions()
+
+
+def _subtitle_style_values(width: Optional[int] = None, height: Optional[int] = None) -> Tuple[int, int, int, int, int]:
+    safe_width, safe_height = _normalize_ass_dimensions(width, height)
+    font_size = int(round(safe_height * ASS_SUBTITLE_FONT_HEIGHT_RATIO))
+    font_size = max(ASS_SUBTITLE_MIN_FONT_SIZE, min(ASS_SUBTITLE_MAX_FONT_SIZE, font_size))
+    margin_x = max(32, int(round(safe_width * ASS_SUBTITLE_MARGIN_X_RATIO)))
+    margin_v = max(48, int(round(safe_height * ASS_SUBTITLE_MARGIN_Y_RATIO)))
+    outline = max(3, int(round(font_size * 0.075)))
+    shadow = max(1, int(round(font_size * 0.025)))
+    return font_size, margin_x, margin_v, outline, shadow
+
+
+def _subtitle_max_line_units(width: Optional[int] = None, height: Optional[int] = None) -> int:
+    safe_width, safe_height = _normalize_ass_dimensions(width, height)
+    font_size, margin_x, _, _, _ = _subtitle_style_values(safe_width, safe_height)
+    available_width = max(font_size * 4, safe_width - (2 * margin_x))
+    return max(12, min(90, int(available_width / max(1.0, font_size / 2))))
+
+
+def _ass_header_lines(width: Optional[int] = None, height: Optional[int] = None) -> List[str]:
+    safe_width, safe_height = _normalize_ass_dimensions(width, height)
+    font_size, margin_x, margin_v, outline, shadow = _subtitle_style_values(safe_width, safe_height)
     return [
         "[Script Info]",
         "ScriptType: v4.00+",
         "WrapStyle: 0",
         "ScaledBorderAndShadow: yes",
-        "PlayResX: 1080",
-        "PlayResY: 1920",
+        f"PlayResX: {safe_width}",
+        f"PlayResY: {safe_height}",
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        "Style: Default,Microsoft YaHei,54,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,4,1,2,70,70,140,1",
+        f"Style: Default,Microsoft YaHei,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,{outline},{shadow},2,{margin_x},{margin_x},{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -3441,7 +3668,7 @@ def _wrap_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UN
     return r"\N".join(lines) if lines else clean.strip()
 
 
-def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], start_time: float, duration: float) -> None:
+def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], start_time: float, duration: float, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> None:
     if not sentences or duration <= 0:
         return
     weights = [max(len(sentence), 1) for sentence in sentences]
@@ -3453,34 +3680,37 @@ def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], star
         start = cursor
         end = block_end if index == len(sentences) - 1 else min(block_end, cursor + segment_duration)
         cursor = end
-        clean = _wrap_ass_subtitle_text(sentence)
+        clean = _wrap_ass_subtitle_text(sentence, max_units=max_units)
         lines.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{clean}")
 
 
-def _write_text_timed_ass(narration: str, audio_path: str, output_path: str) -> None:
+def _write_text_timed_ass(narration: str, audio_path: str, output_path: str, video_dimensions: Optional[Tuple[int, int]] = None) -> None:
     duration = _get_audio_duration(audio_path)
     sentences = _split_narration_sentences(narration)
     if not sentences:
         raise Exception("Cannot generate subtitles from empty narration")
 
-    lines = _ass_header_lines()
-    _append_weighted_subtitle_lines(lines, sentences, 0.0, duration)
+    width, height = _normalize_ass_dimensions(*(video_dimensions or (ASS_SUBTITLE_DEFAULT_WIDTH, ASS_SUBTITLE_DEFAULT_HEIGHT)))
+    lines = _ass_header_lines(width, height)
+    _append_weighted_subtitle_lines(lines, sentences, 0.0, duration, max_units=_subtitle_max_line_units(width, height))
     with open(output_path, "w", encoding="utf-8-sig") as f:
         f.write("\n".join(lines))
 
 
-def _write_block_timed_ass(narration_blocks: List[Dict], output_path: str, block_durations: Optional[List[float]] = None) -> None:
+def _write_block_timed_ass(narration_blocks: List[Dict], output_path: str, block_durations: Optional[List[float]] = None, video_dimensions: Optional[Tuple[int, int]] = None) -> None:
     blocks = _normalize_narration_blocks(narration_blocks, max((float(block.get("end") or 0) for block in narration_blocks or [] if isinstance(block, dict)), default=0.0))
     if not blocks:
         raise Exception("Cannot generate subtitles from empty narration blocks")
-    lines = _ass_header_lines()
+    width, height = _normalize_ass_dimensions(*(video_dimensions or (ASS_SUBTITLE_DEFAULT_WIDTH, ASS_SUBTITLE_DEFAULT_HEIGHT)))
+    lines = _ass_header_lines(width, height)
+    max_units = _subtitle_max_line_units(width, height)
     cursor = 0.0
     for index, block in enumerate(blocks):
         if block_durations and index < len(block_durations):
             block_duration = max(0.1, float(block_durations[index] or 0.0))
         else:
             block_duration = max(0.1, float(block["end"]) - float(block["start"]))
-        _append_weighted_subtitle_lines(lines, _split_narration_sentences(block["narration"]), cursor, block_duration)
+        _append_weighted_subtitle_lines(lines, _split_narration_sentences(block["narration"]), cursor, block_duration, max_units=max_units)
         cursor += block_duration
     with open(output_path, "w", encoding="utf-8-sig") as f:
         f.write("\n".join(lines))
@@ -3502,6 +3732,67 @@ def _burn_subtitles(video_path: str, subtitle_path: str, output_path: str) -> No
         output_name,
     ]
     _run_command(cmd, cwd=work_dir)
+
+
+def _commentary_block_output_ranges(narration_blocks: List[Dict], block_durations: Optional[List[float]]) -> List[Dict]:
+    ranges = []
+    cursor = 0.0
+    for index, block in enumerate(narration_blocks):
+        if block_durations and index < len(block_durations):
+            duration = max(0.1, float(block_durations[index] or 0.0))
+        else:
+            duration = max(0.1, _block_visual_duration(block))
+        ranges.append({"start": cursor, "end": cursor + duration, "duration": duration})
+        cursor += duration
+    return ranges
+
+
+def _render_commentary_episode_videos(
+    final_path: str,
+    episodes: List[Dict],
+    narration_blocks: List[Dict],
+    block_durations: Optional[List[float]],
+    output_dir: str,
+    slug: str,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict]:
+    if not episodes or not narration_blocks:
+        return []
+    block_ranges = _commentary_block_output_ranges(narration_blocks, block_durations)
+    rendered = []
+    job_id = os.path.basename(output_dir)
+    for episode in episodes:
+        start_block = _clamp_int(episode.get("start_block"), 1, 1, len(block_ranges))
+        end_block = _clamp_int(episode.get("end_block"), start_block, start_block, len(block_ranges))
+        output_start = block_ranges[start_block - 1]["start"]
+        output_end = block_ranges[end_block - 1]["end"]
+        output_duration = max(0.1, output_end - output_start)
+        episode_number = _clamp_int(episode.get("episode_number"), len(rendered) + 1, 1, 99)
+        episode_filename = f"{slug}_episode_{episode_number}.mp4"
+        episode_path = os.path.join(output_dir, episode_filename)
+        if progress:
+            progress(f"Rendering commentary episode {episode_number}: blocks {start_block}-{end_block}...")
+        _run_command([
+            "ffmpeg", "-y",
+            "-ss", f"{output_start:.3f}",
+            "-i", final_path,
+            "-t", f"{output_duration:.3f}",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            episode_path,
+        ])
+        rendered_episode = dict(episode)
+        rendered_episode.update({
+            "episode_number": len(rendered) + 1,
+            "video_path": episode_path,
+            "video_filename": episode_filename,
+            "video_url": f"/videos/{job_id}/{episode_filename}",
+            "output_start": round(output_start, 3),
+            "output_end": round(output_end, 3),
+            "duration": round(output_duration, 3),
+        })
+        rendered.append(rendered_episode)
+    return rendered
 
 
 def generate_commentary_video(
@@ -3819,13 +4110,29 @@ def generate_commentary_video(
         subtitle_path = os.path.join(output_dir, f"{slug}_commentary.ass")
         subtitled_path = os.path.join(output_dir, f"{slug}_final.mp4")
         log("Generating text-timed subtitles from the commentary narration...")
+        subtitle_dimensions = _probe_video_dimensions(mixed_path)
         if target_duration == "full" and narration_blocks:
-            _write_block_timed_ass(narration_blocks, subtitle_path, synced_block_durations)
+            _write_block_timed_ass(narration_blocks, subtitle_path, synced_block_durations, video_dimensions=subtitle_dimensions)
         else:
-            _write_text_timed_ass(script["narration"], voiceover_path, subtitle_path)
+            _write_text_timed_ass(script["narration"], voiceover_path, subtitle_path, video_dimensions=subtitle_dimensions)
         log("Burning subtitles into final video...")
         _burn_subtitles(mixed_path, subtitle_path, subtitled_path)
         final_path = subtitled_path
+
+    episode_plan = script.get("episode_plan") if isinstance(script.get("episode_plan"), dict) else {"should_split": False, "reason": ""}
+    commentary_episodes = script.get("episodes") if isinstance(script.get("episodes"), list) else []
+    rendered_episodes = []
+    if target_duration == "full" and narration_blocks and commentary_episodes and episode_plan.get("should_split"):
+        log(f"Rendering {len(commentary_episodes)} AI-planned commentary episodes while keeping the complete video...")
+        rendered_episodes = _render_commentary_episode_videos(
+            final_path=final_path,
+            episodes=commentary_episodes,
+            narration_blocks=narration_blocks,
+            block_durations=synced_block_durations,
+            output_dir=output_dir,
+            slug=slug,
+            progress=log,
+        )
 
     metadata = {
         "video_path": final_path,
@@ -3861,6 +4168,8 @@ def generate_commentary_video(
         "hook": script.get("hook"),
         "narration": script.get("narration"),
         "narration_blocks": narration_blocks,
+        "episode_plan": episode_plan,
+        "episodes": rendered_episodes,
         "chapters": script.get("chapters", []),
         "cut_strategy": script.get("cut_strategy", []),
         "hashtags": script.get("hashtags", []),

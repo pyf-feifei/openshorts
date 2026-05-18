@@ -51,6 +51,9 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             commentary._openai_chat_completions_url("https://provider.example.com/v1/chat/completions"),
         )
 
+    def test_openai_script_max_tokens_defaults_to_64000(self):
+        self.assertEqual(64000, commentary.OPENAI_SCRIPT_MAX_TOKENS)
+
     def test_prompt_mentions_mode_specific_visual_inputs(self):
         transcript = {
             "text": "A short transcript",
@@ -93,6 +96,57 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn('"edit_segments"', video_prompt)
         self.assertIn("OPENAI-COMPATIBLE MULTIMODAL VISUAL TIMELINE", openai_prompt)
         self.assertIn("worker sorts copper", openai_prompt)
+        self.assertIn("title must clearly say what the video is doing", video_prompt)
+        self.assertIn("specific title that says what the video does", video_prompt)
+        self.assertIn("camera/meta phrasing", video_prompt)
+        self.assertIn("镜头切到", video_prompt)
+
+    def test_openai_full_prompt_warns_density_must_pass_first_response(self):
+        transcript = {
+            "text": "A long transcript",
+            "language": "en",
+            "segments": [{"start": 0, "end": 30, "text": "A long transcript"}],
+        }
+
+        prompt = commentary._build_commentary_prompt(
+            transcript=transcript,
+            video_title="Demo",
+            duration=3935.0,
+            language="zh",
+            style="casual_roast",
+            target_duration="full",
+            analysis_mode="openai",
+            visual_analysis={"observations": [{"timestamp": 6, "visual": "worker sorts copper"}]},
+        )
+
+        self.assertIn("first complete JSON response must pass every per-block density check", prompt)
+        self.assertIn("will not send follow-up repair requests", prompt)
+        self.assertIn('"density_audit"', prompt)
+        self.assertIn("Hard requirement before style", prompt)
+        self.assertIn("planning average", prompt)
+        self.assertIn("do not pad it with meaningless words", prompt)
+        self.assertIn("better block design, not filler narration", prompt)
+        self.assertIn("write those numbers into density_audit", prompt)
+        self.assertIn("3-second retention rule", prompt)
+        self.assertIn("curiosity, contrast, stakes, surprise, or payoff expectation", prompt)
+        self.assertIn("matching the first visible action", prompt)
+
+    def test_narration_rejects_camera_meta_phrasing(self):
+        data = {
+            "narration": "镜头切到工人把铜线从电机里抽出来。",
+            "narration_blocks": [],
+        }
+
+        with self.assertRaisesRegex(Exception, "camera/meta phrasing"):
+            commentary._validate_commentary_script_for_target(data, 60.0, "short", "zh")
+
+    def test_visual_metadata_allows_camera_word_outside_narration(self):
+        data = {
+            "narration": "工人把铜线从电机里抽出来。",
+            "narration_blocks": [{"visual": "镜头切到工人操作", "narration": "铜线被慢慢抽离出来。"}],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 60.0, "short", "zh")
 
     def test_openai_regeneration_prompt_focuses_failed_density_block(self):
         invalid_script = {
@@ -123,6 +177,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("93 non-whitespace characters for 33.0s", prompt)
         self.assertIn("at least 179 scene-matched characters", prompt)
         self.assertIn("worker moves copper scrap", prompt)
+        self.assertIn("keep all unrelated narration_blocks unchanged", prompt)
         self.assertIn("len(non_whitespace(narration))", prompt)
         self.assertIn("* 5.4", prompt)
 
@@ -149,6 +204,54 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertGreater(block["video_speed"], 1.0)
         self.assertLess(block["video_speed"], 1.1)
         self.assertGreaterEqual(150, repaired_min_chars)
+
+    def test_near_miss_density_repair_handles_openai_short_block_without_request(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 35,
+                    "visual": "factory process step with slightly sparse narration",
+                    "narration": "讲" * 107,
+                    "video_speed": 1.0,
+                }
+            ]
+        }
+
+        commentary._repair_near_miss_narration_density_blocks(data, "zh")
+        block = data["narration_blocks"][0]
+        repaired_duration = commentary._block_visual_duration(block)
+        repaired_min_chars = commentary._accepted_minimum_narration_chars(
+            commentary._minimum_spoken_block_chars(repaired_duration, "zh")
+        )
+
+        self.assertGreater(block["video_speed"], 1.18)
+        self.assertLess(block["video_speed"], 1.35)
+        self.assertGreaterEqual(107, repaired_min_chars)
+
+    def test_near_miss_density_repair_handles_moderate_openai_short_block_without_request(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 39.6,
+                    "visual": "moderately sparse process shot that can play faster",
+                    "narration": "讲" * 101,
+                    "video_speed": 1.0,
+                }
+            ]
+        }
+
+        commentary._repair_near_miss_narration_density_blocks(data, "zh")
+        block = data["narration_blocks"][0]
+        repaired_duration = commentary._block_visual_duration(block)
+        repaired_min_chars = commentary._accepted_minimum_narration_chars(
+            commentary._minimum_spoken_block_chars(repaired_duration, "zh")
+        )
+
+        self.assertGreater(block["video_speed"], 1.4)
+        self.assertLess(block["video_speed"], 1.6)
+        self.assertGreaterEqual(101, repaired_min_chars)
 
     def test_openai_sampling_options_include_default_visual_concurrency(self):
         with patch.object(commentary, "OPENAI_VISUAL_CONCURRENCY", 3):
@@ -664,6 +767,21 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("WrapStyle: 0", header)
         self.assertNotIn("WrapStyle: 2", header)
 
+    def test_ass_subtitle_header_matches_video_dimensions(self):
+        header = commentary._ass_header_lines(1920, 1080)
+        style = next(line for line in header if line.startswith("Style: Default"))
+
+        self.assertIn("PlayResX: 1920", header)
+        self.assertIn("PlayResY: 1080", header)
+        self.assertIn(",49,", style)
+        self.assertIn(",115,115,79,", style)
+
+    def test_ass_subtitle_line_width_expands_for_wide_video(self):
+        self.assertGreater(
+            commentary._subtitle_max_line_units(1920, 1080),
+            commentary.ASS_SUBTITLE_MAX_LINE_UNITS,
+        )
+
     def test_long_ass_subtitle_text_is_wrapped_before_burning(self):
         lines = commentary._ass_header_lines()
         sentence = "这是一个非常长的二创解说字幕句子需要自动换行否则会超出竖屏视频的左右边界影响观看体验。"
@@ -860,6 +978,64 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         mix_video.assert_called_once()
         self.assertTrue(mix_video.call_args.kwargs["trim_to_voiceover"])
 
+    def test_full_duration_renders_ai_planned_commentary_episodes_from_final_video(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            blocks = scene_matched_blocks()
+            rendered_commands = []
+
+            def fake_mix(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"final")
+
+            def fake_run_command(cmd, cwd=None):
+                rendered_commands.append((cmd, cwd))
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"episode")
+
+            with patch.object(commentary, "_prepare_analysis_video_for_gemini", return_value=source_path), \
+                patch.object(commentary, "_get_video_info", return_value={"duration": 3935, "width": 854, "height": 480, "fps": 30}), \
+                patch.object(commentary, "generate_commentary_script", return_value={
+                    "title": "Remix",
+                    "summary": "summary",
+                    "hook": "hook",
+                    "narration": "\n\n".join(block["narration"] for block in blocks),
+                    "narration_blocks": blocks,
+                    "episode_plan": {"should_split": True, "reason": "工序分明，适合连续分集"},
+                    "episodes": [
+                        {"episode_number": 1, "title": "第1集", "summary": "开端", "start_block": 1, "end_block": 4},
+                        {"episode_number": 2, "title": "第2集", "summary": "推进", "start_block": 5, "end_block": 8},
+                        {"episode_number": 3, "title": "第3集", "summary": "结尾", "start_block": 9, "end_block": 12},
+                    ],
+                    "chapters": [],
+                    "hashtags": [],
+                }), \
+                patch.object(commentary, "_get_audio_duration", return_value=120), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [10.0] * len(blocks))), \
+                patch.object(commentary, "_mix_voiceover_with_video", side_effect=fake_mix), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="video",
+                    target_duration="full",
+                )
+
+        self.assertTrue(result["episode_plan"]["should_split"])
+        self.assertEqual(3, len(result["episodes"]))
+        self.assertEqual("/videos", result["episodes"][0]["video_url"][:7])
+        self.assertEqual(0.0, result["episodes"][0]["output_start"])
+        self.assertEqual(40.0, result["episodes"][0]["duration"])
+        self.assertEqual(3, len(rendered_commands))
+        self.assertEqual("-ss", rendered_commands[0][0][2])
+        self.assertEqual("0.000", rendered_commands[0][0][3])
+        self.assertTrue(os.path.exists(result["episodes"][2]["video_path"]))
+
     def test_full_duration_rejects_overlong_voiceover_before_visual_render(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = os.path.join(tmpdir, "source.mp4")
@@ -961,7 +1137,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(output_path, "wb") as f:
                     f.write(b"video")
 
-            def fake_subtitles(_narration, _voiceover_path, output_path):
+            def fake_subtitles(_narration, _voiceover_path, output_path, **_kwargs):
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write("[Script Info]")
 
@@ -982,6 +1158,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 patch.object(commentary, "_create_visual_edit", side_effect=fake_create_visual), \
                 patch.object(commentary, "_create_ambient_audio_bed", return_value=None), \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video, \
+                patch.object(commentary, "_probe_video_dimensions", return_value=(854, 480)), \
                 patch.object(commentary, "_write_text_timed_ass", side_effect=fake_subtitles) as write_subtitles, \
                 patch.object(commentary, "_burn_subtitles") as burn_subtitles:
 
@@ -997,6 +1174,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         mix_video.assert_called_once()
         write_subtitles.assert_called_once()
+        self.assertEqual((854, 480), write_subtitles.call_args.kwargs["video_dimensions"])
         burn_subtitles.assert_called_once()
         self.assertEqual("Remix_final.mp4", result["video_filename"])
         self.assertEqual("Remix_commentary.ass", result["subtitle"])
@@ -1039,12 +1217,37 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("final payoff", prompt)
         self.assertIn("effect showcase", prompt)
         self.assertIn("video_speed", prompt)
+        self.assertIn("episode_plan.should_split", prompt)
+        self.assertIn("start_block", prompt)
         self.assertIn('"narration_blocks"', prompt)
+        self.assertIn('"episode_plan"', prompt)
+        self.assertIn('"episodes"', prompt)
         self.assertIn('"pause"', prompt)
         self.assertIn('"rate"', prompt)
         self.assertIn('"pitch"', prompt)
         self.assertIn('"video_speed"', prompt)
         self.assertIn(f"at least {commentary._minimum_narration_chars(3935, 'full', 'zh')}", prompt)
+
+    def test_full_duration_normalizes_ai_episode_plan_by_narration_blocks(self):
+        data = {
+            "title": "Remix",
+            "narration": "讲" * 3000,
+            "narration_blocks": scene_matched_blocks(count=6, seconds=80),
+            "episode_plan": {"should_split": True, "reason": "工序分明"},
+            "episodes": [
+                {"episode_number": 1, "title": "第1集", "summary": "前半段", "start_block": 1, "end_block": 3},
+                {"episode_number": 2, "title": "第2集", "summary": "后半段", "start_block": 4, "end_block": 6},
+            ],
+        }
+
+        commentary._normalize_script_timeline(data, 600, "full", "zh")
+
+        self.assertTrue(data["episode_plan"]["should_split"])
+        self.assertEqual(2, len(data["episodes"]))
+        self.assertEqual((1, 3), (data["episodes"][0]["start_block"], data["episodes"][0]["end_block"]))
+        self.assertEqual((4, 6), (data["episodes"][1]["start_block"], data["episodes"][1]["end_block"]))
+        self.assertEqual(0.0, data["episodes"][0]["start"])
+        self.assertEqual(480.0, data["episodes"][1]["end"])
 
     def test_funny_style_prompt_requires_visual_grounded_china_international_comparison(self):
         prompt = commentary._build_commentary_prompt(

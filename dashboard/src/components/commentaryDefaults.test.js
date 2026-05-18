@@ -8,23 +8,23 @@ import {
   getDefaultEdgeVoiceForLanguage,
 } from './commentaryDefaults.js';
 
-test('commentary tab defaults match preferred Chinese remix setup', () => {
-  assert.equal(COMMENTARY_DEFAULTS.style, 'funny');
+test('commentary tab defaults match documentary Chinese remix setup', () => {
+  assert.equal(COMMENTARY_DEFAULTS.style, 'documentary');
   assert.equal(COMMENTARY_DEFAULTS.targetDuration, 'full');
   assert.equal(COMMENTARY_DEFAULTS.analysisMode, 'openai');
-  assert.equal(COMMENTARY_DEFAULTS.edgeVoice, 'zh-CN-YunjianNeural');
+  assert.equal(COMMENTARY_DEFAULTS.edgeVoice, 'zh-CN-YunyangNeural');
   assert.equal(COMMENTARY_DEFAULTS.originalAudioVolume, 0.3);
   assert.equal(COMMENTARY_DEFAULTS.pauseOriginalAudioVolume, 0.6);
   assert.equal(COMMENTARY_DEFAULTS.openAIFrameIntervalSeconds, 3);
   assert.equal(COMMENTARY_DEFAULTS.openAIMaxFrames, 1800);
   assert.equal(COMMENTARY_DEFAULTS.openAISceneMaxKeyframes, 60);
-  assert.equal(COMMENTARY_DEFAULTS.openAIBatchSize, 32);
-  assert.equal(COMMENTARY_DEFAULTS.openAIVisualConcurrency, 3);
-  assert.equal(COMMENTARY_DEFAULTS.commentaryBlockConcurrency, 3);
+  assert.equal(COMMENTARY_DEFAULTS.openAIBatchSize, 46);
+  assert.equal(COMMENTARY_DEFAULTS.openAIVisualConcurrency, 5);
+  assert.equal(COMMENTARY_DEFAULTS.commentaryBlockConcurrency, 5);
 });
 
-test('Chinese Edge voice default is Yunjian and other languages keep first option fallback', () => {
-  assert.equal(getDefaultEdgeVoiceForLanguage('zh'), 'zh-CN-YunjianNeural');
+test('Chinese Edge voice default is Yunyang and other languages keep first option fallback', () => {
+  assert.equal(getDefaultEdgeVoiceForLanguage('zh'), 'zh-CN-YunyangNeural');
   assert.equal(getDefaultEdgeVoiceForLanguage('en'), 'en-US-JennyNeural');
 });
 
@@ -69,7 +69,7 @@ test('commentary allows larger OpenAI-compatible visual batches', () => {
   const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
 
   assert.match(source, /max="128"/);
-  assert.match(source, /默认 32，最大 128/);
+  assert.match(source, /默认 46，最大 128/);
 });
 
 test('commentary status steps use the active job analysis mode', () => {

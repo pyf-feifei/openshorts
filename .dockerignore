@@ -8,6 +8,9 @@ __pycache__
 *$py.class
 *.so
 .Python
+.cache/
+.config/
+.local/
 .venv
 venv/
 ENV/
@@ -34,6 +37,10 @@ dashboard/node_modules/
 *.mkv
 *.gif
 videos/
+output/
+outputs/
+uploads/
+screenshots/
 
 # Model files (downloaded at build time)
 *.pt
@@ -46,7 +53,6 @@ docker-compose.yml
 # Docs
 README.md
 *.md
-
 
 
 

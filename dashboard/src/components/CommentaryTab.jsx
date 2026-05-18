@@ -721,6 +721,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const displayedCommentaryBlockConcurrency = attachedTaskRequest?.commentary_block_concurrency ?? commentaryBlockConcurrency
   const displayedAutoVideoSpeed = attachedTaskRequest?.auto_video_speed ?? autoVideoSpeed
   const speedSummary = result?.auto_video_speed_summary
+  const commentaryEpisodes = Array.isArray(result?.episodes) ? result.episodes : []
+  const episodePlan = result?.episode_plan
 
   const reset = () => {
     setStatus('idle')
@@ -900,17 +902,17 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">每批图片数</label>
                       <input type="number" min="1" max="128" step="1" value={displayedOpenAIBatchSize} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIBatchSize(e.target.value) }} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 32，最大 128。</p>
+                      <p className="text-xs text-zinc-500 mt-1">每次多模态请求携带的图片数量；如果模型或网关限制较低，可以调小。默认 46，最大 128。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">视觉分析并发数</label>
                       <input type="number" min="1" max="8" step="1" value={displayedOpenAIVisualConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIVisualConcurrency(e.target.value) }} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 3。</p>
+                      <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 5。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">解说分块生成并发数</label>
                       <input type="number" min="1" max="8" step="1" value={displayedCommentaryBlockConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setCommentaryBlockConcurrency(e.target.value) }} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 3。</p>
+                      <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 5。</p>
                     </div>
                   </div>
                 </div>
@@ -1085,16 +1087,49 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   )}
                 </div>
 
-                <video src={getApiUrl(result.video_url)} controls className="w-full rounded-xl border border-white/10 bg-black" />
-
-                <div className="grid grid-cols-2 gap-3">
-                  <a href={getApiUrl(result.video_url)} download className="btn-primary flex items-center justify-center gap-2 text-sm">
-                    <Download size={16} /> 下载视频
-                  </a>
-                  <a href={getApiUrl(`/videos/${jobId}/${result.script_path}`)} target="_blank" rel="noopener noreferrer" className="btn-secondary flex items-center justify-center gap-2 text-sm">
-                    <FileText size={16} /> 查看脚本
-                  </a>
+                <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                    <Film size={16} className="text-cyan-300" /> 完整二创解说总视频
+                  </div>
+                  <video src={getApiUrl(result.video_url)} controls className="w-full rounded-xl border border-white/10 bg-black" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <a href={getApiUrl(result.video_url)} download className="btn-primary flex items-center justify-center gap-2 text-sm">
+                      <Download size={16} /> 下载总视频
+                    </a>
+                    <a href={getApiUrl(`/videos/${jobId}/${result.script_path}`)} target="_blank" rel="noopener noreferrer" className="btn-secondary flex items-center justify-center gap-2 text-sm">
+                      <FileText size={16} /> 查看脚本
+                    </a>
+                  </div>
                 </div>
+
+                {episodePlan?.should_split && commentaryEpisodes.length > 0 && (
+                  <div className="space-y-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-cyan-100">
+                        <FileVideo size={16} className="text-cyan-300" /> AI 分集视频
+                      </div>
+                      <span className="text-xs text-cyan-300">{commentaryEpisodes.length} 集</span>
+                    </div>
+                    {episodePlan.reason && <p className="text-xs text-zinc-400">{episodePlan.reason}</p>}
+                    <div className="space-y-4">
+                      {commentaryEpisodes.map((episode) => (
+                        <div key={`${episode.episode_number}-${episode.video_url}`} className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-3">
+                          <div>
+                            <div className="text-sm font-medium text-zinc-200">{episode.title || `第 ${episode.episode_number} 集`}</div>
+                            {episode.summary && <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{episode.summary}</p>}
+                            <div className="mt-2 text-[11px] text-zinc-500">
+                              解说块 {episode.start_block}-{episode.end_block} · 约 {Math.round(episode.duration || 0)} 秒
+                            </div>
+                          </div>
+                          <video src={getApiUrl(episode.video_url)} controls className="w-full rounded-lg border border-white/10 bg-black" />
+                          <a href={getApiUrl(episode.video_url)} download className="btn-secondary flex items-center justify-center gap-2 text-sm">
+                            <Download size={16} /> 下载本集
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
