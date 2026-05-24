@@ -551,12 +551,18 @@ def _segments_total_duration(segments: List[Dict]) -> float:
     return total
 
 
+def _max_selected_source_seconds_for_real_cuts(duration: float, target_seconds: float) -> float:
+    static_retention_limit = duration * FULL_MODE_MAX_SOURCE_RETENTION_FRACTION
+    target_sized_limit = target_seconds * 1.10 if target_seconds > 0 else 0.0
+    return min(duration * 0.9, max(static_retention_limit, target_sized_limit))
+
+
 def _segments_have_real_cuts(segments: List[Dict], duration: float, target_seconds: float) -> bool:
     if duration <= 0 or target_seconds >= duration * 0.9:
         return True
     normalized = _normalize_edit_segments(segments, duration)
     total = _segments_total_duration(normalized)
-    if total >= duration * FULL_MODE_MAX_SOURCE_RETENTION_FRACTION:
+    if total > _max_selected_source_seconds_for_real_cuts(duration, target_seconds):
         return False
     if len(normalized) <= 1 and total >= duration * 0.8:
         return False

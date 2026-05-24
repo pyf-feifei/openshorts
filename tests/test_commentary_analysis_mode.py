@@ -1316,6 +1316,34 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             language="zh",
         )
 
+    def test_full_duration_accepts_target_sized_real_cut_above_static_source_retention_fraction(self):
+        blocks = [
+            {"start": 0, "end": 45, "visual": "opening setup", "narration": "讲" * 220, "pause": False},
+            {"start": 60, "end": 105, "visual": "material sorting", "narration": "讲" * 220, "pause": False},
+            {"start": 130, "end": 175, "visual": "first machine process", "narration": "讲" * 220, "pause": False},
+            {"start": 205, "end": 250, "visual": "inspection step", "narration": "讲" * 220, "pause": False},
+            {"start": 285, "end": 330, "visual": "middle assembly", "narration": "讲" * 220, "pause": False},
+            {"start": 365, "end": 410, "visual": "machine closeup", "narration": "讲" * 220, "pause": False},
+            {"start": 450, "end": 495, "visual": "quality check", "narration": "讲" * 220, "pause": False},
+            {"start": 540, "end": 585, "visual": "packaging begins", "narration": "讲" * 220, "pause": False},
+            {"start": 635, "end": 680, "visual": "late process", "narration": "讲" * 220, "pause": False},
+            {"start": 735, "end": 780, "visual": "final machine run", "narration": "讲" * 220, "pause": False},
+            {"start": 835, "end": 880, "visual": "finished parts", "narration": "讲" * 220, "pause": False},
+            {"start": 935, "end": 980, "visual": "ending packaging", "narration": "讲" * 220, "pause": False},
+        ]
+        narration = "讲" * 2700
+
+        self.assertGreater(
+            commentary._segments_total_duration(commentary._narration_blocks_to_edit_segments(blocks)),
+            1037.2 * commentary.FULL_MODE_MAX_SOURCE_RETENTION_FRACTION,
+        )
+        commentary._validate_commentary_script_for_target(
+            {"narration": narration, "narration_blocks": blocks},
+            duration=1037.2,
+            target_duration="full",
+            language="zh",
+        )
+
     def test_full_duration_can_build_narration_from_scene_matched_blocks(self):
         transcript = {
             "text": "factory process",
