@@ -1613,7 +1613,7 @@ def _build_commentary_prompt(
     if mode == "openai" and target_duration == "full":
         openai_one_shot_density_instruction = (
             "- For OpenAI-compatible mode, the first complete JSON response must pass every per-block density check; "
-            "the backend will not send follow-up repair requests just to fix under-length narration blocks."
+            "if any block is under-length, the backend will request a focused local repair for the failed block before rendering."
         )
     style_grounding = _style_grounding_instruction(style, language)
 
@@ -2488,15 +2488,6 @@ def generate_openai_commentary_script(
         except Exception as exc:
             validation_error = exc
             if target_duration != "full" or script_attempt >= GEMINI_SCRIPT_VALIDATION_ATTEMPTS:
-                raise
-            density_details = _density_validation_failure_details(exc, data)
-            if density_details:
-                if progress:
-                    progress(
-                        f"OpenAI-compatible script validation failed: {exc} "
-                        "The first full-script response did not satisfy the required per-block narration density; "
-                        "not sending extra OpenAI repair requests for under-length blocks."
-                    )
                 raise
             if progress:
                 progress(

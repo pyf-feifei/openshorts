@@ -120,7 +120,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         )
 
         self.assertIn("first complete JSON response must pass every per-block density check", prompt)
-        self.assertIn("will not send follow-up repair requests", prompt)
+        self.assertIn("request a focused local repair for the failed block", prompt)
         self.assertIn('"density_audit"', prompt)
         self.assertIn("Hard requirement before style", prompt)
         self.assertIn("planning average", prompt)
