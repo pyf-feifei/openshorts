@@ -96,6 +96,8 @@ FULL_MODE_MAX_PAUSE_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_PAU
 FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS = int(os.environ.get("OPENSHORTS_FULL_MODE_MAX_CONSECUTIVE_PAUSE_BLOCKS", "1"))
 FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS", "1.5"))
 FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED = float(os.environ.get("OPENSHORTS_FULL_MODE_RENDER_SYNC_MAX_VIDEO_SPEED", "4.0"))
+FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED = float(os.environ.get("OPENSHORTS_FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED", "2.0"))
+FULL_MODE_RENDER_SYNC_TTS_REWRITE_ATTEMPTS = int(os.environ.get("OPENSHORTS_FULL_MODE_RENDER_SYNC_TTS_REWRITE_ATTEMPTS", "3"))
 FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION = float(os.environ.get("OPENSHORTS_FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION", "0.85"))
 FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MAX_SPEEDUP", "1.75"))
 FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_NEAR_MISS_REPAIR_MIN_RATIO", "0.55"))
@@ -3308,8 +3310,9 @@ def _atempo_filter(speed: float) -> str:
     return ",".join(filters)
 
 
-def _fit_audio_part_to_duration(input_audio_path: str, output_audio_path: str, target_duration: float, max_speedup: float = 1.35) -> None:
+def _fit_audio_part_to_duration(input_audio_path: str, output_audio_path: str, target_duration: float, max_speedup: Optional[float] = None) -> None:
     target_duration = max(0.1, float(target_duration or 0.0))
+    max_speedup = max(1.0, float(max_speedup or FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED))
     audio_duration = _get_audio_duration(input_audio_path)
     filters = []
     if audio_duration > target_duration:
@@ -3331,6 +3334,20 @@ def _fit_audio_part_to_duration(input_audio_path: str, output_audio_path: str, t
         output_audio_path,
     ]
     _run_command(cmd)
+
+
+def _shorten_narration_for_render_sync(text: str, audio_duration: float, visual_duration: float, max_speedup: float) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    allowed_audio_duration = max(0.1, float(visual_duration or 0.0) * max(1.0, float(max_speedup or 1.0)))
+    audio_duration = max(0.1, float(audio_duration or 0.0))
+    keep_ratio = max(0.35, min(0.9, (allowed_audio_duration / audio_duration) * 0.88))
+    limit = max(12, int(len(text) * keep_ratio))
+    shortened = _limit_text_chars(text, limit)
+    if len(shortened) >= len(text):
+        shortened = text[:max(1, len(text) - 1)].rstrip("，。；：、,.!?！？ ")
+    return shortened
 
 
 def _trim_audio_part_to_duration(input_audio_path: str, output_audio_path: str, target_duration: float) -> None:
@@ -3473,38 +3490,85 @@ def _create_block_synced_visuals_and_audio(
         else:
             report(f"Generating synced commentary block {index}/{total_blocks}{speed_label}...")
 
-        block_voice_path = os.path.join(part_dir, f"block_voice_{index:03d}.mp3")
         if not is_pause:
-            generate_commentary_voiceover(
-                text=block["narration"],
-                output_path=block_voice_path,
-                tts_provider=tts_provider,
-                language=language,
-                elevenlabs_key=elevenlabs_key,
-                voice_id=voice_id,
-                edge_voice=edge_voice,
-                rate=block.get("rate") or "+0%",
-                pitch=block.get("pitch") or "+0Hz",
-            )
-
-        if not is_pause:
-            voice_duration = max(0.1, _get_audio_duration(block_voice_path))
-            max_synced_visual_duration = max(0.1, voice_duration + FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS)
-            if visual_duration > max_synced_visual_duration:
-                desired_speed = source_duration / max_synced_visual_duration
-                video_speed = _safe_render_video_speed(max(requested_video_speed, desired_speed))
-                visual_duration = min(visual_duration, max_synced_visual_duration)
-                render_source_duration = min(source_duration, max(0.1, visual_duration * video_speed))
-                visual_duration = max(0.1, render_source_duration / video_speed)
-                if render_source_duration < source_duration * 0.75:
-                    raise Exception(
-                        "Generated TTS is much shorter than its selected visual range. "
-                        f"Block {index} has {voice_duration:.1f}s of narration for {source_duration:.1f}s of source visuals. "
-                        "Regenerate the commentary with denser scene-matched narration or shorter visual ranges; refusing to over-trim footage because that would hurt commentary quality."
+            block_voice_path = os.path.join(part_dir, f"block_voice_{index:03d}.mp3")
+            narration_text = str(block.get("narration") or "").strip()
+            max_audio_speedup = max(1.0, FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED)
+            max_tts_attempts = max(1, FULL_MODE_RENDER_SYNC_TTS_REWRITE_ATTEMPTS)
+            last_voice_duration = 0.0
+            for voice_attempt in range(1, max_tts_attempts + 1):
+                attempt_voice_path = (
+                    block_voice_path
+                    if voice_attempt == 1
+                    else os.path.join(part_dir, f"block_voice_{index:03d}_retry{voice_attempt}.mp3")
+                )
+                generate_commentary_voiceover(
+                    text=narration_text,
+                    output_path=attempt_voice_path,
+                    tts_provider=tts_provider,
+                    language=language,
+                    elevenlabs_key=elevenlabs_key,
+                    voice_id=voice_id,
+                    edge_voice=edge_voice,
+                    rate=block.get("rate") or "+0%",
+                    pitch=block.get("pitch") or "+0Hz",
+                )
+                block_voice_path = attempt_voice_path
+                voice_duration = max(0.1, _get_audio_duration(block_voice_path))
+                last_voice_duration = voice_duration
+                max_synced_visual_duration = max(0.1, voice_duration + FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS)
+                if visual_duration > max_synced_visual_duration:
+                    desired_speed = source_duration / max_synced_visual_duration
+                    video_speed = _safe_render_video_speed(max(requested_video_speed, desired_speed))
+                    visual_duration = min(visual_duration, max_synced_visual_duration)
+                    render_source_duration = min(source_duration, max(0.1, visual_duration * video_speed))
+                    visual_duration = max(0.1, render_source_duration / video_speed)
+                    if render_source_duration < source_duration * 0.75:
+                        raise Exception(
+                            "Generated TTS is much shorter than its selected visual range. "
+                            f"Block {index} has {voice_duration:.1f}s of narration for {source_duration:.1f}s of source visuals. "
+                            "Regenerate the commentary with denser scene-matched narration or shorter visual ranges; refusing to over-trim footage because that would hurt commentary quality."
+                        )
+                    report(
+                        f"Tightening commentary block {index}/{total_blocks} to {visual_duration:.1f}s "
+                        "so narration stays synced with the visuals..."
                     )
+
+                required_visual_duration = voice_duration / max_audio_speedup
+                if required_visual_duration <= visual_duration + 0.05:
+                    break
+                if required_visual_duration <= source_duration:
+                    adjusted_speed = _safe_render_video_speed(source_duration / required_visual_duration)
+                    if adjusted_speed < video_speed:
+                        video_speed = adjusted_speed
+                        render_source_duration = source_duration
+                        visual_duration = max(0.1, render_source_duration / video_speed)
+                        report(
+                            f"Slowing commentary block {index}/{total_blocks} to {video_speed:g}x "
+                            "so the generated narration fits the visuals..."
+                        )
+                    break
+                if voice_attempt >= max_tts_attempts:
+                    break
+                shortened = _shorten_narration_for_render_sync(
+                    narration_text,
+                    voice_duration,
+                    min(source_duration, visual_duration),
+                    max_audio_speedup,
+                )
+                if not shortened or len(shortened) >= len(narration_text):
+                    break
+                narration_text = shortened
                 report(
-                    f"Tightening commentary block {index}/{total_blocks} to {visual_duration:.1f}s "
+                    f"Shortening commentary block {index}/{total_blocks} and regenerating TTS "
                     "so narration stays synced with the visuals..."
+                )
+
+            if last_voice_duration / max(0.1, visual_duration) > max_audio_speedup + 0.01:
+                raise Exception(
+                    "A timestamped commentary block is too long for its visual range after automatic sync repair. "
+                    f"Block {index} has {last_voice_duration:.1f}s audio for {visual_duration:.1f}s visuals after "
+                    f"{max_tts_attempts} TTS attempt(s); shorten that block's narration or expand its source range."
                 )
 
         speed_token = int(round(video_speed * 1000))

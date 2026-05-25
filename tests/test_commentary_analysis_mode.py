@@ -253,6 +253,107 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertLess(block["video_speed"], 1.6)
         self.assertGreaterEqual(101, repaired_min_chars)
 
+    def test_audio_fit_allows_render_sync_speedup_for_short_visual_block(self):
+        commands = []
+
+        with patch.object(commentary, "_get_audio_duration", return_value=21.3), \
+            patch.object(commentary, "_run_command", side_effect=lambda cmd: commands.append(cmd)):
+            commentary._fit_audio_part_to_duration("voice.mp3", "fit.m4a", 13.8)
+
+        self.assertEqual(1, len(commands))
+        audio_filter = commands[0][commands[0].index("-af") + 1]
+        self.assertIn("atempo=1.543478", audio_filter)
+        self.assertIn("atrim=0:13.800", audio_filter)
+
+    def test_synced_block_slows_accelerated_video_when_tts_is_long(self):
+        fit_calls = []
+        video_commands = []
+        progress = []
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+            patch.object(commentary, "_get_video_duration", return_value=30.0), \
+            patch.object(commentary, "generate_commentary_voiceover"), \
+            patch.object(commentary, "_get_audio_duration", return_value=25.0), \
+            patch.object(commentary, "_fit_audio_part_to_duration", side_effect=lambda src, dst, dur: fit_calls.append((src, dst, dur))), \
+            patch.object(commentary, "_run_command", side_effect=lambda cmd: video_commands.append(cmd)), \
+            patch.object(commentary, "_concat_media_parts"), \
+            patch.object(commentary, "_force_audio_clip_duration"), \
+            patch.object(commentary, "FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED", 2.0):
+            _, durations = commentary._create_block_synced_visuals_and_audio(
+                video_path="source.mp4",
+                narration_blocks=[{
+                    "start": 0,
+                    "end": 30,
+                    "visual": "slow repeated action",
+                    "narration": "A long but useful explanation for this accelerated visual block.",
+                    "video_speed": 3.0,
+                }],
+                timed_video_path=os.path.join(tmpdir, "timed.mp4"),
+                voiceover_path=os.path.join(tmpdir, "voice.m4a"),
+                ambient_audio_path=os.path.join(tmpdir, "ambient.m4a"),
+                aspect_mode="original",
+                work_dir=tmpdir,
+                tts_provider="edge",
+                language="en",
+                elevenlabs_key=None,
+                voice_id="voice",
+                edge_voice=None,
+                original_audio_volume=0.0,
+                block_concurrency=1,
+                progress=progress.append,
+            )
+
+        self.assertAlmostEqual(12.5, durations[0], places=1)
+        self.assertAlmostEqual(12.5, fit_calls[0][2], places=1)
+        video_filter = video_commands[0][video_commands[0].index("-vf") + 1]
+        self.assertIn("setpts=PTS/2.4", video_filter)
+        self.assertTrue(any("Slowing commentary block" in item for item in progress))
+
+    def test_synced_block_shortens_and_regenerates_tts_when_video_cannot_slow_enough(self):
+        spoken_texts = []
+        fit_calls = []
+
+        def fake_voiceover(text, output_path, **kwargs):
+            spoken_texts.append(text)
+            return output_path
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+            patch.object(commentary, "_get_video_duration", return_value=10.0), \
+            patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+            patch.object(commentary, "_get_audio_duration", side_effect=[25.0, 18.0]), \
+            patch.object(commentary, "_fit_audio_part_to_duration", side_effect=lambda src, dst, dur: fit_calls.append((src, dst, dur))), \
+            patch.object(commentary, "_run_command"), \
+            patch.object(commentary, "_concat_media_parts"), \
+            patch.object(commentary, "_force_audio_clip_duration"), \
+            patch.object(commentary, "FULL_MODE_RENDER_SYNC_MAX_AUDIO_SPEED", 2.0), \
+            patch.object(commentary, "FULL_MODE_RENDER_SYNC_TTS_REWRITE_ATTEMPTS", 2):
+            commentary._create_block_synced_visuals_and_audio(
+                video_path="source.mp4",
+                narration_blocks=[{
+                    "start": 0,
+                    "end": 10,
+                    "visual": "dense visual moment",
+                    "narration": "This narration is intentionally too long for the available footage and must be shortened automatically.",
+                    "video_speed": 1.0,
+                }],
+                timed_video_path=os.path.join(tmpdir, "timed.mp4"),
+                voiceover_path=os.path.join(tmpdir, "voice.m4a"),
+                ambient_audio_path=os.path.join(tmpdir, "ambient.m4a"),
+                aspect_mode="original",
+                work_dir=tmpdir,
+                tts_provider="edge",
+                language="en",
+                elevenlabs_key=None,
+                voice_id="voice",
+                edge_voice=None,
+                original_audio_volume=0.0,
+                block_concurrency=1,
+            )
+
+        self.assertEqual(2, len(spoken_texts))
+        self.assertLess(len(spoken_texts[1]), len(spoken_texts[0]))
+        self.assertAlmostEqual(10.0, fit_calls[0][2], places=1)
+
     def test_openai_sampling_options_include_default_visual_concurrency(self):
         with patch.object(commentary, "OPENAI_VISUAL_CONCURRENCY", 3):
             options = commentary.resolve_openai_sampling_options()
