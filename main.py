@@ -514,7 +514,7 @@ def _youtube_download_settings(video_title, output_dir=".", quality="high", file
     output_stem = f"{sanitized_title}{suffix}"
     mode = (quality or "high").strip().lower()
     format_selectors = {
-        "high": "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]",
+        "high": "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]",
         "low": "bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/worst[ext=mp4]/worst",
     }
     if mode not in format_selectors:
