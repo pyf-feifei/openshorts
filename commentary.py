@@ -103,6 +103,14 @@ GEMINI_SAFE_INPUT_TOKEN_BUDGET = int(os.environ.get("OPENSHORTS_GEMINI_SAFE_INPU
 GEMINI_LOW_RES_TOKENS_PER_SECOND = 100.0
 GEMINI_SCRIPT_VALIDATION_ATTEMPTS = max(2, int(os.environ.get("OPENSHORTS_GEMINI_SCRIPT_VALIDATION_ATTEMPTS", "6")))
 COMMENTARY_BANNED_PHRASES = ("画面汇总",)
+PUBLISH_BANNED_META_PHRASES = (
+    "这段素材记录了",
+    "本视频展示了",
+    "这段视频记录了",
+    "该视频展示了",
+    "视频中展示了",
+    "这期视频带你看",
+)
 COMMENTARY_NARRATION_BANNED_PATTERNS = (
     re.compile(r"镜头", re.I),
 )
@@ -202,6 +210,113 @@ def _run_command(cmd: List[str], cwd: Optional[str] = None) -> None:
         ) from exc
     if result.returncode != 0:
         raise Exception(result.stderr or result.stdout or f"Command failed: {' '.join(cmd)}")
+
+
+def _clean_publish_text(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    for phrase in PUBLISH_BANNED_META_PHRASES:
+        text = text.replace(phrase, "")
+    text = re.sub(r"^[，。；：、\s]+", "", text).strip()
+    return text
+
+
+def _limit_text_chars(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip("，。；：、,.!?！？ ")
+
+
+def _normalize_hashtag(tag: str) -> str:
+    clean = re.sub(r"\s+", "", str(tag or "").strip())
+    if not clean:
+        return ""
+    return clean if clean.startswith("#") else f"#{clean}"
+
+
+def _build_douyin_publish_fields(script: Dict) -> Dict[str, str]:
+    title = _clean_publish_text(script.get("title") or "")
+    summary = _clean_publish_text(script.get("summary") or "")
+    visual_parts = []
+    for block in script.get("narration_blocks") or []:
+        if isinstance(block, dict) and block.get("visual"):
+            visual_parts.append(_clean_publish_text(block.get("visual")))
+    visual_context = "，".join(part for part in visual_parts if part)
+
+    publish_title_source = title or summary or visual_context or "二创解说全过程"
+    publish_title = _limit_text_chars(publish_title_source, 30)
+
+    description_body = summary or visual_context or title or "完整二创解说，带你看清关键过程和最终结果。"
+    if title and not (summary or visual_context) and not description_body.startswith(title[:8]):
+        description_body = f"{title}：{description_body}"
+    description_body = _clean_publish_text(description_body)
+
+    hashtags = []
+    for raw in script.get("hashtags") or []:
+        tag = _normalize_hashtag(raw)
+        if tag and tag not in hashtags:
+            hashtags.append(tag)
+    if not hashtags:
+        hashtags = ["#二创解说", "#工厂实拍", "#涨知识"]
+    hashtag_text = " ".join(hashtags[:8])
+    publish_description = _limit_text_chars(f"{description_body}\n\n{hashtag_text}", 1000)
+    return {
+        "publish_title": publish_title,
+        "publish_description": publish_description,
+    }
+
+
+def _generate_commentary_covers(final_path: str, output_dir: str, slug: str, duration: float) -> Dict[str, object]:
+    timestamp = max(0.0, min(float(duration or 0) * 0.35, max(0.0, float(duration or 0) - 0.1)))
+    job_id = os.path.basename(os.path.abspath(output_dir))
+    safe_slug = _safe_slug(slug or "commentary")
+    cover_specs = [
+        {
+            "key": "landscape",
+            "filename": f"{safe_slug}_cover_4x3.jpg",
+            "ratio": "4/3",
+            "inverse_ratio": "3/4",
+            "scale": "1200:900",
+            "url_key": "cover_landscape_url",
+        },
+        {
+            "key": "portrait",
+            "filename": f"{safe_slug}_cover_3x4.jpg",
+            "ratio": "3/4",
+            "inverse_ratio": "4/3",
+            "scale": "900:1200",
+            "url_key": "cover_portrait_url",
+        },
+    ]
+    result = {"covers": []}
+    for spec in cover_specs:
+        output_path = os.path.join(output_dir, spec["filename"])
+        ratio = spec["ratio"]
+        inverse_ratio = spec["inverse_ratio"]
+        vf = (
+            f"crop='if(gte(iw/ih,{ratio}),ih*{ratio},iw)':"
+            f"'if(gte(iw/ih,{ratio}),ih,iw*{inverse_ratio})',scale={spec['scale']}"
+        )
+        _run_command([
+            FFMPEG_BINARY,
+            "-y",
+            "-ss",
+            f"{timestamp:.3f}",
+            "-i",
+            final_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            vf,
+            "-q:v",
+            "2",
+            output_path,
+        ])
+        url = f"/videos/{job_id}/{spec['filename']}"
+        item = {"type": spec["key"], "url": url, "filename": spec["filename"]}
+        result["covers"].append(item)
+        result[spec["url_key"]] = url
+    return result
 
 
 def _parse_ffmpeg_progress_seconds(key: str, value: str) -> Optional[float]:
@@ -4141,6 +4256,10 @@ def generate_commentary_video(
             progress=log,
         )
 
+    publish_fields = _build_douyin_publish_fields(script)
+    log("Generating commentary cover images...")
+    cover_fields = _generate_commentary_covers(final_path, output_dir, slug, _get_video_duration(final_path) or duration)
+
     metadata = {
         "video_path": final_path,
         "video_filename": os.path.basename(final_path),
@@ -4180,6 +4299,8 @@ def generate_commentary_video(
         "chapters": script.get("chapters", []),
         "cut_strategy": script.get("cut_strategy", []),
         "hashtags": script.get("hashtags", []),
+        **publish_fields,
+        **cover_fields,
     }
     metadata_path = os.path.join(output_dir, f"{slug}_commentary_metadata.json")
     with open(metadata_path, "w", encoding="utf-8") as f:

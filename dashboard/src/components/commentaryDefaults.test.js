@@ -80,3 +80,15 @@ test('commentary status steps use the active job analysis mode', () => {
   assert.match(source, /task\.request\?\.analysis_mode/);
   assert.match(source, /displayAnalysisMode === 'openai'/);
 });
+
+test('commentary result exposes Douyin publish copy and cover downloads', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /navigator\.clipboard\.writeText/);
+  assert.match(source, /publish_title/);
+  assert.match(source, /publish_description/);
+  assert.match(source, /cover_landscape_url/);
+  assert.match(source, /cover_portrait_url/);
+  assert.match(source, /横封面 4:3/);
+  assert.match(source, /竖封面 3:4/);
+});

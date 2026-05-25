@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, CheckCircle, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { Activity, CheckCircle, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
 import { getApiUrl } from '../config'
 import { buildGeminiHeaders, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
@@ -311,6 +311,24 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     } catch (e) {
       setVoicePreviewStatus('idle')
       setError(e.message)
+    }
+  }
+
+  const copyText = async (text) => {
+    const value = String(text || '').trim()
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+    } catch {
+      const textarea = document.createElement('textarea')
+      textarea.value = value
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
     }
   }
 
@@ -723,6 +741,15 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const speedSummary = result?.auto_video_speed_summary
   const commentaryEpisodes = Array.isArray(result?.episodes) ? result.episodes : []
   const episodePlan = result?.episode_plan
+  const publishTitle = result?.publish_title || result?.title || ''
+  const publishDescription = result?.publish_description || [
+    result?.summary,
+    Array.isArray(result?.hashtags) ? result.hashtags.join(' ') : '',
+  ].filter(Boolean).join('\n\n')
+  const commentaryCovers = [
+    result?.cover_landscape_url ? { label: '横封面 4:3', url: result.cover_landscape_url, className: 'aspect-[4/3]' } : null,
+    result?.cover_portrait_url ? { label: '竖封面 3:4', url: result.cover_portrait_url, className: 'aspect-[3/4]' } : null,
+  ].filter(Boolean)
 
   const reset = () => {
     setStatus('idle')
@@ -1074,8 +1101,32 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   <div className="flex items-center gap-2 text-green-300 font-semibold mb-2">
                     <CheckCircle size={18} /> 生成完成
                   </div>
-                  <div className="text-sm text-zinc-300 font-medium">{result.title}</div>
-                  <p className="text-xs text-zinc-500 mt-2 line-clamp-3">{result.summary}</p>
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="text-xs font-medium text-zinc-400">发布标题</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-zinc-500">{publishTitle.length}/30</span>
+                          <button type="button" onClick={() => copyText(publishTitle)} className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10" title="复制发布标题">
+                            <Copy size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="text-sm text-zinc-200 font-medium leading-relaxed">{publishTitle}</div>
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="text-xs font-medium text-zinc-400">发布描述</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-zinc-500">{publishDescription.length}/1000</span>
+                          <button type="button" onClick={() => copyText(publishDescription)} className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10" title="复制发布描述">
+                            <Copy size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <p className="whitespace-pre-wrap text-xs text-zinc-400 leading-relaxed">{publishDescription}</p>
+                    </div>
+                  </div>
                   {speedSummary && (
                     <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-zinc-300">
                       {speedSummary.enabled
@@ -1086,6 +1137,27 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     </div>
                   )}
                 </div>
+
+                {commentaryCovers.length > 0 && (
+                  <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                      <FileVideo size={16} className="text-cyan-300" /> 发布封面
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      {commentaryCovers.map((cover) => (
+                        <div key={cover.label} className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-medium text-zinc-200">{cover.label}</div>
+                            <a href={getApiUrl(cover.url)} download className="inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-200">
+                              <Download size={14} /> 下载
+                            </a>
+                          </div>
+                          <img src={getApiUrl(cover.url)} alt={cover.label} className={`w-full ${cover.className} rounded-md border border-white/10 bg-black object-cover`} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
