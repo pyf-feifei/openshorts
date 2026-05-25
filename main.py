@@ -514,7 +514,7 @@ def _youtube_download_settings(video_title, output_dir=".", quality="high", file
     output_stem = f"{sanitized_title}{suffix}"
     mode = (quality or "high").strip().lower()
     format_selectors = {
-        "high": "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]",
+        "high": "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]",
         "low": "bestvideo[height<=360][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/worst[ext=mp4]/worst",
     }
     if mode not in format_selectors:
@@ -575,12 +575,6 @@ def download_youtube_video(url, output_dir=".", quality="high", filename_suffix=
         if cookies_path:
             print(f"🍪 Using isolated runtime cookies copy for yt-dlp: {cookies_path}")
     
-    js_runtimes = {}
-    for runtime_name in ('node', 'bun', 'deno'):
-        if shutil.which(runtime_name):
-            js_runtimes[runtime_name] = {}
-            break
-
     _COMMON_YDL_OPTS = {
         'quiet': False,
         'verbose': True,
@@ -591,23 +585,16 @@ def download_youtube_video(url, output_dir=".", quality="high", filename_suffix=
         'fragment_retries': 10,
         'nocheckcertificate': True,
         'cachedir': False,
-        'js_runtimes': js_runtimes,
-        'remote_components': ['ejs:github'],
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web'],
-            }
-        },
-        'http_headers': {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            ),
-        },
     }
 
-    with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
+    initial_download_settings = _youtube_download_settings(
+        "youtube_video",
+        output_dir=output_dir,
+        quality=quality,
+        filename_suffix=filename_suffix,
+    )
+
+    with yt_dlp.YoutubeDL({**_COMMON_YDL_OPTS, 'format': initial_download_settings["format"]}) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
             video_title = info.get('title', 'youtube_video')

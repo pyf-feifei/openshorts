@@ -861,11 +861,6 @@ def verify_youtube_cookies_for_url(url: str, cookies_path: str) -> Dict:
     except Exception:
         runtime_cookies_path = cookies_path
 
-    js_runtimes = {}
-    for runtime_name in ("node", "bun", "deno"):
-        if shutil.which(runtime_name):
-            js_runtimes[runtime_name] = {}
-            break
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -875,9 +870,7 @@ def verify_youtube_cookies_for_url(url: str, cookies_path: str) -> Dict:
         "fragment_retries": 3,
         "nocheckcertificate": True,
         "cachedir": False,
-        "js_runtimes": js_runtimes,
-        "remote_components": ["ejs:github"],
-        "extractor_args": {"youtube": {"player_client": ["web"]}},
+        "format": "bestvideo[height<=1080][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]",
     }
 
     try:
