@@ -3599,8 +3599,8 @@ def _subtitle_style_values(width: Optional[int] = None, height: Optional[int] = 
     font_size = max(ASS_SUBTITLE_MIN_FONT_SIZE, min(ASS_SUBTITLE_MAX_FONT_SIZE, font_size))
     margin_x = max(32, int(round(safe_width * ASS_SUBTITLE_MARGIN_X_RATIO)))
     margin_v = max(48, int(round(safe_height * ASS_SUBTITLE_MARGIN_Y_RATIO)))
-    outline = max(3, int(round(font_size * 0.075)))
-    shadow = max(1, int(round(font_size * 0.025)))
+    outline = max(1, int(round(font_size * 0.04)))
+    shadow = 0
     return font_size, margin_x, margin_v, outline, shadow
 
 
@@ -4117,6 +4117,7 @@ def generate_commentary_video(
         subtitled_path = os.path.join(output_dir, f"{slug}_final.mp4")
         log("Generating text-timed subtitles from the commentary narration...")
         subtitle_dimensions = _probe_video_dimensions(mixed_path)
+        log(f"Subtitle canvas size: {subtitle_dimensions[0]}x{subtitle_dimensions[1]}")
         if target_duration == "full" and narration_blocks:
             _write_block_timed_ass(narration_blocks, subtitle_path, synced_block_durations, video_dimensions=subtitle_dimensions)
         else:

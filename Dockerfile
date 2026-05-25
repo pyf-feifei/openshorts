@@ -21,9 +21,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install FFmpeg, OpenCV dependencies, and Node.js (for yt-dlp JS challenges)
+# Install FFmpeg, OpenCV dependencies, subtitle fonts, and Node.js (for yt-dlp JS challenges)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fontconfig \
+    fonts-wqy-zenhei \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -39,6 +41,10 @@ ENV PYTHONUNBUFFERED=1
 
 # Always upgrade yt-dlp to latest (YouTube bot-detection changes frequently)
 RUN pip install --upgrade --no-cache-dir yt-dlp
+
+# Map Windows-oriented subtitle styles to a font available in Linux images.
+COPY config/fontconfig/local.conf /etc/fonts/local.conf
+RUN fc-cache -f
 
 # Copy application code
 COPY . .
