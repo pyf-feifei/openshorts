@@ -795,13 +795,13 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             units = sum(commentary._subtitle_char_units(char) for char in line)
             self.assertLessEqual(units, commentary.ASS_SUBTITLE_MAX_LINE_UNITS)
 
-    def test_downloader_quality_settings_cap_high_default_at_1080p_and_keep_low_suffix(self):
+    def test_downloader_quality_settings_cap_high_default_at_720p_and_keep_low_suffix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             high = main._youtube_download_settings("My Video", tmpdir)
             low = main._youtube_download_settings("My Video", tmpdir, quality="low", filename_suffix="_analysis_low")
 
-        self.assertIn("bestvideo[height<=1080][vcodec^=avc1][ext=mp4]", high["format"])
-        self.assertIn("best[height<=1080][ext=mp4]", high["format"])
+        self.assertIn("bestvideo[height<=720][vcodec^=avc1][ext=mp4]", high["format"])
+        self.assertIn("best[height<=720][ext=mp4]", high["format"])
         self.assertTrue(high["expected_file"].endswith("My_Video.mp4"))
         self.assertIn("height<=360", low["format"])
         self.assertTrue(low["expected_file"].endswith("My_Video_analysis_low.mp4"))
@@ -840,7 +840,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 patch.object(commentary, "_create_visual_edit") as create_visual, \
                 patch.object(commentary, "_fit_video_to_voiceover"), \
                 patch.object(commentary, "_create_ambient_audio_bed", return_value=None) as create_ambient, \
-                patch.object(commentary, "_mix_voiceover_with_video"):
+                patch.object(commentary, "_mix_voiceover_with_video"), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}):
 
                 result = commentary.generate_commentary_video(
                     source="https://youtube.test/watch?v=1",
