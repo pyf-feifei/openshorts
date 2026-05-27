@@ -10,10 +10,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import httpx
 from google.genai import types
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from gemini_client import create_gemini_client, normalize_gemini_base_url
 from gemini_pool import GeminiKeyPool
@@ -124,6 +126,7 @@ ASS_SUBTITLE_MARGIN_X_RATIO = 0.06
 ASS_SUBTITLE_MARGIN_Y_RATIO = 0.073
 ASS_SUBTITLE_MIN_FONT_SIZE = 28
 ASS_SUBTITLE_MAX_FONT_SIZE = 104
+COVER_TITLE_MAX_CHARS = 16
 
 
 EDGE_VOICES_BY_LANGUAGE = {
@@ -268,7 +271,181 @@ def _build_douyin_publish_fields(script: Dict) -> Dict[str, str]:
     }
 
 
-def _generate_commentary_covers(final_path: str, output_dir: str, slug: str, duration: float) -> Dict[str, object]:
+def _youtube_video_id(url: str) -> Optional[str]:
+    parsed = urlparse(str(url or "").strip())
+    host = parsed.netloc.lower()
+    if host.endswith("youtu.be"):
+        candidate = parsed.path.strip("/").split("/")[0]
+        return candidate or None
+    if "youtube.com" in host:
+        query_id = parse_qs(parsed.query).get("v", [""])[0]
+        if query_id:
+            return query_id
+        path_parts = [part for part in parsed.path.split("/") if part]
+        for marker in ("shorts", "embed", "live"):
+            if marker in path_parts:
+                index = path_parts.index(marker)
+                if index + 1 < len(path_parts):
+                    return path_parts[index + 1]
+    return None
+
+
+def _download_youtube_thumbnail_base(source_url: str, output_dir: str, slug: str) -> Optional[str]:
+    video_id = _youtube_video_id(source_url)
+    if not video_id:
+        return None
+    output_path = os.path.join(output_dir, f"{_safe_slug(slug)}_youtube_thumbnail.jpg")
+    candidates = [
+        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+    ]
+    for url in candidates:
+        try:
+            with httpx.Client(timeout=15, follow_redirects=True) as client:
+                response = client.get(url)
+            if response.status_code != 200 or not response.content:
+                continue
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            with Image.open(output_path) as image:
+                width, height = image.size
+            if width <= 160 or height <= 90:
+                continue
+            return output_path
+        except Exception:
+            continue
+    return None
+
+
+def _extract_cover_frame(video_path: str, output_dir: str, slug: str, duration: float) -> Optional[str]:
+    timestamp = max(0.0, min(float(duration or 0) * 0.35, max(0.0, float(duration or 0) - 0.1)))
+    output_path = os.path.join(output_dir, f"{_safe_slug(slug)}_cover_base.jpg")
+    try:
+        _run_command([
+            FFMPEG_BINARY,
+            "-y",
+            "-ss",
+            f"{timestamp:.3f}",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            output_path,
+        ])
+    except Exception:
+        return None
+    if not os.path.exists(output_path):
+        return None
+    try:
+        with Image.open(output_path) as image:
+            image.verify()
+    except Exception:
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
+        return None
+    return output_path
+
+
+def _short_cover_title(title: str) -> str:
+    clean = _clean_publish_text(title or "")
+    clean = re.sub(r"[#@]\S+", "", clean).strip()
+    return _limit_text_chars(clean, COVER_TITLE_MAX_CHARS) or "全程高能"
+
+
+def _load_cover_font(size: int) -> ImageFont.FreeTypeFont:
+    font_candidates = [
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansCJK-Bold.ttc"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSerif-Bold.ttf"),
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for font_path in font_candidates:
+        try:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_cover_title(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+    chars = list(text)
+    lines = []
+    current = ""
+    for char in chars:
+        candidate = f"{current}{char}"
+        bbox = draw.textbbox((0, 0), candidate, font=font, stroke_width=max(2, font.size // 18 if hasattr(font, "size") else 2))
+        if current and bbox[2] - bbox[0] > max_width:
+            lines.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines[:3]
+
+
+def _compose_cover_image(base_path: str, output_path: str, ratio: float, size: Tuple[int, int], title: str) -> None:
+    with Image.open(base_path) as image:
+        image = image.convert("RGB")
+        src_w, src_h = image.size
+        src_ratio = src_w / max(1, src_h)
+        if src_ratio >= ratio:
+            crop_h = src_h
+            crop_w = int(crop_h * ratio)
+        else:
+            crop_w = src_w
+            crop_h = int(crop_w / ratio)
+        left = max(0, (src_w - crop_w) // 2)
+        top = max(0, (src_h - crop_h) // 2)
+        image = image.crop((left, top, left + crop_w, top + crop_h)).resize(size, Image.Resampling.LANCZOS)
+
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    width, height = image.size
+    title_text = _short_cover_title(title)
+    font_size = max(54, int(height * 0.105))
+    font = _load_cover_font(font_size)
+    max_text_width = int(width * 0.84)
+    lines = _wrap_cover_title(title_text, draw, font, max_text_width)
+    line_boxes = [draw.textbbox((0, 0), line, font=font, stroke_width=max(3, font_size // 18)) for line in lines]
+    line_heights = [box[3] - box[1] for box in line_boxes] or [font_size]
+    total_height = sum(line_heights) + int(font_size * 0.16) * max(0, len(lines) - 1)
+    y = height - total_height - int(height * 0.10)
+    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rectangle((0, int(height * 0.52), width, height), fill=(0, 0, 0, 145))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=18))
+    overlay.alpha_composite(shadow)
+
+    stroke_width = max(3, font_size // 18)
+    for index, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        text_w = bbox[2] - bbox[0]
+        x = (width - text_w) // 2
+        fill = (255, 235, 59, 255) if index == 0 else (255, 255, 255, 255)
+        draw.text((x, y), line, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=(8, 8, 8, 255))
+        y += line_heights[index] + int(font_size * 0.16)
+
+    composed = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+    composed.save(output_path, quality=92)
+
+
+def _generate_commentary_covers(
+    cover_video_path: str,
+    output_dir: str,
+    slug: str,
+    duration: float,
+    cover_title: str = "",
+    source_type: str = "file",
+    source_url: Optional[str] = None,
+) -> Dict[str, object]:
     timestamp = max(0.0, min(float(duration or 0) * 0.35, max(0.0, float(duration or 0) - 0.1)))
     job_id = os.path.basename(os.path.abspath(output_dir))
     safe_slug = _safe_slug(slug or "commentary")
@@ -276,46 +453,66 @@ def _generate_commentary_covers(final_path: str, output_dir: str, slug: str, dur
         {
             "key": "landscape",
             "filename": f"{safe_slug}_cover_4x3.jpg",
-            "ratio": "4/3",
-            "inverse_ratio": "3/4",
-            "scale": "1200:900",
+            "ratio": 4 / 3,
+            "size": (1200, 900),
             "url_key": "cover_landscape_url",
         },
         {
             "key": "portrait",
             "filename": f"{safe_slug}_cover_3x4.jpg",
-            "ratio": "3/4",
-            "inverse_ratio": "4/3",
-            "scale": "900:1200",
+            "ratio": 3 / 4,
+            "size": (900, 1200),
             "url_key": "cover_portrait_url",
         },
     ]
+    base_image_path = None
+    if source_type == "url" and source_url:
+        base_image_path = _download_youtube_thumbnail_base(source_url, output_dir, safe_slug)
+    if not base_image_path:
+        base_image_path = _extract_cover_frame(cover_video_path, output_dir, safe_slug, duration)
+
     result = {"covers": []}
     for spec in cover_specs:
         output_path = os.path.join(output_dir, spec["filename"])
-        ratio = spec["ratio"]
-        inverse_ratio = spec["inverse_ratio"]
-        vf = (
-            f"crop='if(gte(iw/ih,{ratio}),ih*{ratio},iw)':"
-            f"'if(gte(iw/ih,{ratio}),ih,iw*{inverse_ratio})',scale={spec['scale']}"
-        )
-        _run_command([
-            FFMPEG_BINARY,
-            "-y",
-            "-ss",
-            f"{timestamp:.3f}",
-            "-i",
-            final_path,
-            "-frames:v",
-            "1",
-            "-vf",
-            vf,
-            "-q:v",
-            "2",
-            output_path,
-        ])
+        if base_image_path:
+            _compose_cover_image(base_image_path, output_path, spec["ratio"], spec["size"], cover_title or slug)
+        else:
+            ratio_text = "4/3" if spec["key"] == "landscape" else "3/4"
+            inverse_ratio = "3/4" if spec["key"] == "landscape" else "4/3"
+            scale = f"{spec['size'][0]}:{spec['size'][1]}"
+            vf = (
+                f"crop='if(gte(iw/ih,{ratio_text}),ih*{ratio_text},iw)':"
+                f"'if(gte(iw/ih,{ratio_text}),ih,iw*{inverse_ratio})',scale={scale}"
+            )
+            try:
+                _run_command([
+                    FFMPEG_BINARY,
+                    "-y",
+                    "-ss",
+                    f"{timestamp:.3f}",
+                    "-i",
+                    cover_video_path,
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    vf,
+                    "-q:v",
+                    "2",
+                    output_path,
+                ])
+            except Exception as exc:
+                print(f"⚠️ [Commentary] Failed to generate {spec['key']} cover: {exc}")
+                continue
+            if not os.path.exists(output_path):
+                continue
         url = f"/videos/{job_id}/{spec['filename']}"
-        item = {"type": spec["key"], "url": url, "filename": spec["filename"]}
+        item = {
+            "type": spec["key"],
+            "url": url,
+            "filename": spec["filename"],
+            "title": _short_cover_title(cover_title or slug),
+            "base": "youtube_thumbnail" if source_type == "url" and base_image_path else "clean_video_frame",
+        }
         result["covers"].append(item)
         result[spec["url_key"]] = url
     return result
@@ -4313,7 +4510,22 @@ def generate_commentary_video(
 
     publish_fields = _build_douyin_publish_fields(script)
     log("Generating commentary cover images...")
-    cover_fields = _generate_commentary_covers(final_path, output_dir, slug, _get_video_duration(final_path) or duration)
+    cover_source_path = next(
+        (
+            path for path in (mixed_path, timed_video_path, edited_video_path, video_path, final_path)
+            if path and os.path.exists(path)
+        ),
+        final_path,
+    )
+    cover_fields = _generate_commentary_covers(
+        cover_source_path,
+        output_dir,
+        slug,
+        _get_video_duration(cover_source_path) or duration,
+        cover_title=publish_fields.get("publish_title") or script.get("title") or slug,
+        source_type=source_type,
+        source_url=source if source_type == "url" else None,
+    )
 
     metadata = {
         "video_path": final_path,
