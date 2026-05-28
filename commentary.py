@@ -772,6 +772,19 @@ def _target_duration_hint(mode: str, source_duration: float) -> str:
 
 def _style_grounding_instruction(style: str, language: str) -> str:
     normalized = (style or "").strip().lower()
+    if normalized in {"first_person_hustle", "first-person-hustle", "整活第一视角", "第一视角整活"}:
+        if (language or "").lower().startswith("zh"):
+            return (
+                "整活第一视角风格要求：把解说写成正在亲自参与画面动作的第一人称口播，像边干活边碎碎念，"
+                "节奏紧、短句多、反应真实，允许使用“兄弟们”“没事的没事的”“直接盘它”“稳住”“撤了撤了”“爽了爽了”等口头禅，"
+                "但不要机械堆叠。每个 narration_blocks 段落必须先抓住当前画面里的具体动作、位置、风险、工具、材料或结果，"
+                "再用略怂但硬上的语气做即时反应；所有夸张、吐槽和心理活动都必须绑定当前画面，不要编造画面外剧情、身份、收益或危险。"
+            )
+        return (
+            "First-person hustle style: write the narration as if the speaker is personally doing the visible task in real time. "
+            "Use short, energetic first-person reactions, repeated catchphrases, nervous confidence, and immediate observations, "
+            "but ground every joke, exaggeration, risk, tool, material, and result in the current visible timestamp range."
+        )
     if normalized in {"funny", "roast", "吐槽", "轻松吐槽"}:
         if (language or "").lower().startswith("zh"):
             return (

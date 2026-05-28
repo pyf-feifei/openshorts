@@ -57,6 +57,13 @@ test('commentary supports OpenAI-compatible multimodal analysis mode', () => {
   assert.match(source, /解说分块生成并发数/);
 });
 
+test('commentary exposes first-person hustle commentary style', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /first_person_hustle/);
+  assert.match(source, /整活第一视角/);
+});
+
 test('commentary sends separate pause original audio volume', () => {
   const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
 

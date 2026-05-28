@@ -7,6 +7,7 @@ import { COMMENTARY_DEFAULTS, getDefaultEdgeVoiceForLanguage } from './commentar
 
 const STYLE_OPTIONS = [
   { id: 'documentary', label: '纪录片解说' },
+  { id: 'first_person_hustle', label: '整活第一视角' },
   { id: 'news', label: '新闻解读' },
   { id: 'storytelling', label: '故事化旁白' },
   { id: 'funny', label: '轻松吐槽' },
