@@ -62,6 +62,8 @@ test('commentary exposes first-person hustle commentary style', () => {
 
   assert.match(source, /first_person_hustle/);
   assert.match(source, /整活第一视角/);
+  assert.match(source, /id: 'hustle'/);
+  assert.match(source, /整活解说/);
 });
 
 test('commentary sends separate pause original audio volume', () => {

@@ -118,7 +118,16 @@ PUBLISH_BANNED_META_PHRASES = (
 COMMENTARY_NARRATION_BANNED_PATTERNS = (
     re.compile(r"镜头", re.I),
 )
+COMMENTARY_REPEAT_LIMIT_PHRASES = (
+    "没事的没事的",
+    "兄弟们",
+    "稳住",
+    "直接盘它",
+    "撤了撤了",
+    "爽了爽了",
+)
 ASS_SUBTITLE_MAX_LINE_UNITS = 34
+ASS_SUBTITLE_MAX_VISIBLE_LINES = 2
 ASS_SUBTITLE_DEFAULT_WIDTH = 1080
 ASS_SUBTITLE_DEFAULT_HEIGHT = 1920
 ASS_SUBTITLE_FONT_HEIGHT_RATIO = 0.045
@@ -362,6 +371,7 @@ def _load_cover_font(size: int) -> ImageFont.FreeTypeFont:
         "C:\\Windows\\Fonts\\simhei.ttf",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansCJK-Bold.ttc"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSerif-Bold.ttf"),
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
@@ -425,12 +435,25 @@ def _compose_cover_image(base_path: str, output_path: str, ratio: float, size: T
     overlay.alpha_composite(shadow)
 
     stroke_width = max(3, font_size // 18)
+    underline_colors = [(255, 214, 10, 230), (68, 255, 128, 210)]
     for index, line in enumerate(lines):
         bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
         text_w = bbox[2] - bbox[0]
-        x = (width - text_w) // 2
-        fill = (255, 235, 59, 255) if index == 0 else (255, 255, 255, 255)
-        draw.text((x, y), line, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=(8, 8, 8, 255))
+        if len(lines) == 1:
+            x = max(int(width * 0.05), (width - text_w) // 2)
+        elif index % 2 == 0:
+            x = int(width * 0.06)
+        else:
+            x = max(int(width * 0.10), width - text_w - int(width * 0.08))
+        y_offset = int(font_size * (0.035 if index % 2 == 0 else -0.025))
+        fill = (196, 255, 54, 255) if index == 0 else (255, 255, 255, 255)
+        draw.text((x, y + y_offset), line, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=(8, 8, 8, 255))
+        underline_y = y + y_offset + line_heights[index] - max(3, font_size // 18)
+        draw.line(
+            (x + int(text_w * 0.04), underline_y, x + int(text_w * 0.96), underline_y),
+            fill=underline_colors[index % len(underline_colors)],
+            width=max(4, font_size // 18),
+        )
         y += line_heights[index] + int(font_size * 0.16)
 
     composed = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
@@ -776,14 +799,24 @@ def _style_grounding_instruction(style: str, language: str) -> str:
         if (language or "").lower().startswith("zh"):
             return (
                 "整活第一视角风格要求：把解说写成正在亲自参与画面动作的第一人称口播，像边干活边碎碎念，"
-                "节奏紧、短句多、反应真实，允许使用“兄弟们”“没事的没事的”“直接盘它”“稳住”“撤了撤了”“爽了爽了”等口头禅，"
-                "但不要机械堆叠。每个 narration_blocks 段落必须先抓住当前画面里的具体动作、位置、风险、工具、材料或结果，"
+                "节奏紧、短句多、反应真实。口头禅只能点到为止，同一句口头禅全片最多出现两次，禁止反复写“没事的没事的”。"
+                "每个 narration_blocks 段落必须先抓住当前画面里的具体动作、位置、风险、工具、材料或结果，"
                 "再用略怂但硬上的语气做即时反应；所有夸张、吐槽和心理活动都必须绑定当前画面，不要编造画面外剧情、身份、收益或危险。"
             )
         return (
             "First-person hustle style: write the narration as if the speaker is personally doing the visible task in real time. "
-            "Use short, energetic first-person reactions, repeated catchphrases, nervous confidence, and immediate observations, "
+            "Use short, energetic first-person reactions, nervous confidence, and immediate observations. Avoid repeating the same catchphrase more than twice, "
             "but ground every joke, exaggeration, risk, tool, material, and result in the current visible timestamp range."
+        )
+    if normalized in {"hustle", "fun_hustle", "整活解说", "整活"}:
+        if (language or "").lower().startswith("zh"):
+            return (
+                "整活解说风格要求：保持第三人称或旁观者口播，不要装成画面里的人。"
+                "先说清楚当前画面正在发生什么，再用短促、有梗、带反差的方式吐槽或强化看点。"
+                "梗必须来自当前画面里的动作、表情、风险、工具、材料、环境或结果；口头禅全片最多点两次，禁止同一句反复刷屏。"
+            )
+        return (
+            "Hustle commentary style: use an energetic observer voice, not first person. First describe the visible action, then add a short joke or punchy reaction grounded in the same timestamp range. Avoid repeating the same catchphrase."
         )
     if normalized in {"funny", "roast", "吐槽", "轻松吐槽"}:
         if (language or "").lower().startswith("zh"):
@@ -1334,6 +1367,7 @@ def _normalize_script_timeline(data: Dict, duration: float, target_duration: str
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
     if target_duration == "full" and blocks:
         data["narration_blocks"] = blocks
+        _reduce_repeated_commentary_catchphrases(data)
         _repair_near_miss_narration_density_blocks(data, language)
         data["edit_segments"] = _narration_blocks_to_edit_segments(data.get("narration_blocks") or blocks)
         data.setdefault("cut_strategy", [])
@@ -1341,6 +1375,7 @@ def _normalize_script_timeline(data: Dict, duration: float, target_duration: str
         data["edit_segments"] = _resolve_edit_segments_for_target(data.get("edit_segments", []), duration, target_duration)
         if blocks:
             data["narration_blocks"] = blocks
+        _reduce_repeated_commentary_catchphrases(data)
     _normalize_commentary_episodes(data, duration, target_duration)
 
 
@@ -1350,6 +1385,28 @@ def _normalize_script_narration(data: Dict) -> str:
     if len(re.sub(r"\s+", "", block_narration)) > len(re.sub(r"\s+", "", narration)):
         narration = block_narration
     return narration
+
+
+def _reduce_repeated_commentary_catchphrases(data: Dict) -> None:
+    counts: Dict[str, int] = {phrase: 0 for phrase in COMMENTARY_REPEAT_LIMIT_PHRASES}
+
+    def clean_text(value: str) -> str:
+        text = str(value or "")
+        for phrase in COMMENTARY_REPEAT_LIMIT_PHRASES:
+            pattern = re.compile(rf"{re.escape(phrase)}[，,、。！!？?]*")
+
+            def replace(match: re.Match) -> str:
+                counts[phrase] += 1
+                return match.group(0) if counts[phrase] <= 2 else ""
+
+            text = pattern.sub(replace, text)
+        return re.sub(r"[，,、]{2,}", "，", text).strip("，,、 ")
+
+    for block in data.get("narration_blocks") or []:
+        if isinstance(block, dict) and block.get("narration"):
+            block["narration"] = clean_text(block.get("narration"))
+    if data.get("narration"):
+        data["narration"] = _narration_from_blocks(data) or clean_text(data.get("narration"))
 
 
 def _banned_phrase_instruction() -> str:
@@ -2025,6 +2082,7 @@ def _call_openai_compatible_chat(
     messages: List[Dict],
     max_tokens: int,
     timeout_seconds: Optional[int] = None,
+    response_format: Optional[Dict] = None,
 ) -> str:
     if not api_key:
         raise Exception("OpenAI-compatible API Key is required for OpenAI commentary analysis mode")
@@ -2037,6 +2095,8 @@ def _call_openai_compatible_chat(
         "temperature": OPENAI_TEMPERATURE,
         "max_tokens": max_tokens,
     }
+    if response_format:
+        payload["response_format"] = response_format
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -2044,6 +2104,7 @@ def _call_openai_compatible_chat(
     request_timeout = timeout_seconds or OPENAI_REQUEST_TIMEOUT_SECONDS
     response = None
     last_error = None
+    response_format_downgraded = False
     for attempt in range(1, OPENAI_REQUEST_RETRIES + 1):
         try:
             with httpx.Client(timeout=request_timeout, follow_redirects=True) as client:
@@ -2056,6 +2117,15 @@ def _call_openai_compatible_chat(
             continue
         if response.status_code < 400:
             break
+        if (
+            response_format
+            and not response_format_downgraded
+            and response.status_code in {400, 422}
+            and "response_format" in response.text
+        ):
+            payload.pop("response_format", None)
+            response_format_downgraded = True
+            continue
         if response.status_code < 500 and response.status_code != 429:
             raise Exception(
                 "OpenAI-compatible API returned an error: "
@@ -2499,6 +2569,7 @@ def _analyze_openai_visual_timeline(
             model=model,
             messages=_build_openai_visual_batch_messages(prompt, batch),
             max_tokens=OPENAI_VISUAL_MAX_TOKENS,
+            response_format={"type": "json_object"},
         )
         try:
             parsed = _parse_openai_json(text)
@@ -2610,6 +2681,30 @@ REPAIR FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 """
 
 
+def _build_openai_json_syntax_repair_prompt(
+    original_prompt: str,
+    invalid_text: str,
+    parse_error: Exception,
+    attempt: int,
+) -> str:
+    return f"""{original_prompt}
+
+PREVIOUS RESPONSE WAS NOT VALID JSON:
+{invalid_text[:12000]}
+
+JSON PARSE ERROR:
+{parse_error}
+
+REPAIR TASK:
+- This is JSON syntax repair attempt {attempt}.
+- Return valid JSON only, using exactly the same JSON FORMAT requested above.
+- Fix broken commas, quotes, escaping, brackets, and trailing prose.
+- Preserve the intended commentary content, timeline ranges, narration_blocks, edit_segments, episode_plan, chapters, and hashtags wherever possible.
+- Do not wrap the JSON in markdown fences.
+- Do not include explanations before or after the JSON.
+"""
+
+
 def generate_openai_commentary_script(
     transcript: Dict,
     video_title: str,
@@ -2672,10 +2767,45 @@ def generate_openai_commentary_script(
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
         max_tokens=OPENAI_SCRIPT_MAX_TOKENS,
         timeout_seconds=OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS,
+        response_format={"type": "json_object"},
     )
     validation_error = None
     for script_attempt in range(1, GEMINI_SCRIPT_VALIDATION_ATTEMPTS + 1):
-        data = _parse_openai_json(response_text)
+        try:
+            data = _parse_openai_json(response_text)
+        except Exception as exc:
+            validation_error = exc
+            if target_duration != "full" or script_attempt >= GEMINI_SCRIPT_VALIDATION_ATTEMPTS:
+                raise
+            if progress:
+                progress(
+                    f"OpenAI-compatible model returned invalid JSON on correction attempt "
+                    f"{script_attempt}/{GEMINI_SCRIPT_VALIDATION_ATTEMPTS}: {exc} "
+                    "Asking model to repair the JSON syntax without changing the script intent..."
+                )
+            response_text = _call_openai_compatible_chat(
+                api_key=openai_key,
+                base_url=openai_base_url,
+                model=openai_model,
+                messages=[{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": _build_openai_json_syntax_repair_prompt(
+                            prompt,
+                            response_text,
+                            exc,
+                            script_attempt,
+                        ),
+                    }],
+                }],
+                max_tokens=OPENAI_SCRIPT_MAX_TOKENS,
+                timeout_seconds=OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS,
+                response_format={"type": "json_object"},
+            )
+            if progress:
+                progress("OpenAI-compatible model returned JSON syntax repair; validating timeline sync...")
+            continue
         narration = _normalize_script_narration(data)
         if not narration:
             raise Exception("OpenAI-compatible model did not return narration text")
@@ -2727,6 +2857,7 @@ def generate_openai_commentary_script(
                 }],
                 max_tokens=OPENAI_SCRIPT_MAX_TOKENS,
                 timeout_seconds=OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS,
+                response_format={"type": "json_object"},
             )
             if progress:
                 progress("OpenAI-compatible model returned a repaired commentary script; validating timeline sync...")
@@ -4015,7 +4146,7 @@ def _subtitle_char_units(char: str) -> int:
     return 1 if char.isascii() else 2
 
 
-def _wrap_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> str:
+def _wrap_ass_subtitle_lines(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> List[str]:
     clean = (text or "").replace("\n", " ").replace("{", "").replace("}", "")
     words = re.split(r"(\s+)", clean)
     lines = []
@@ -4051,23 +4182,44 @@ def _wrap_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UN
         current += token
         current_units += token_units
     push_current()
-    return r"\N".join(lines) if lines else clean.strip()
+    return lines if lines else ([clean.strip()] if clean.strip() else [])
+
+
+def _wrap_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> str:
+    return r"\N".join(_wrap_ass_subtitle_lines(text, max_units=max_units))
+
+
+def _chunk_ass_subtitle_text(text: str, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS, max_lines: int = ASS_SUBTITLE_MAX_VISIBLE_LINES) -> List[str]:
+    wrapped_lines = _wrap_ass_subtitle_lines(text, max_units=max_units)
+    if not wrapped_lines:
+        return []
+    safe_max_lines = max(1, max_lines)
+    chunks = []
+    for index in range(0, len(wrapped_lines), safe_max_lines):
+        chunks.append(r"\N".join(wrapped_lines[index:index + safe_max_lines]))
+    return chunks
 
 
 def _append_weighted_subtitle_lines(lines: List[str], sentences: List[str], start_time: float, duration: float, max_units: int = ASS_SUBTITLE_MAX_LINE_UNITS) -> None:
     if not sentences or duration <= 0:
         return
-    weights = [max(len(sentence), 1) for sentence in sentences]
+    sentence_chunks = []
+    for sentence in sentences:
+        chunks = _chunk_ass_subtitle_text(sentence, max_units=max_units)
+        if chunks:
+            sentence_chunks.extend(chunks)
+    if not sentence_chunks:
+        return
+    weights = [max(len(chunk.replace(r"\N", "")), 1) for chunk in sentence_chunks]
     total_weight = sum(weights)
     cursor = start_time
     block_end = start_time + duration
-    for index, sentence in enumerate(sentences):
+    for index, chunk in enumerate(sentence_chunks):
         segment_duration = duration * weights[index] / total_weight
         start = cursor
-        end = block_end if index == len(sentences) - 1 else min(block_end, cursor + segment_duration)
+        end = block_end if index == len(sentence_chunks) - 1 else min(block_end, cursor + segment_duration)
         cursor = end
-        clean = _wrap_ass_subtitle_text(sentence, max_units=max_units)
-        lines.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{clean}")
+        lines.append(f"Dialogue: 0,{_format_ass_time(start)},{_format_ass_time(end)},Default,,0,0,0,,{chunk}")
 
 
 def _write_text_timed_ass(narration: str, audio_path: str, output_path: str, video_dimensions: Optional[Tuple[int, int]] = None) -> None:
@@ -4522,7 +4674,7 @@ def generate_commentary_video(
         )
 
     publish_fields = _build_douyin_publish_fields(script)
-    log("Generating commentary cover images...")
+    log("Generating local commentary cover images from the current task video frame/source thumbnail...")
     cover_source_path = next(
         (
             path for path in (mixed_path, timed_video_path, edited_video_path, video_path, final_path)
