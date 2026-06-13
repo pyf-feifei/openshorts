@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import types as pytypes
@@ -15,14 +16,61 @@ def scene_matched_block_text():
     return (
         "这一段解说紧贴当前画面，先说明这个时间段里材料、设备和工人动作的具体变化，"
         "再把这个工序放回废旧电机回收成新铜材的流程里解释，避免提前讲后面的画面。"
-    ) * 6
+    ) * 5
 
 
-def scene_matched_blocks(count=12, seconds=100.0, text=None):
+def repeated_scene_text(base: str, count: int) -> str:
+    return (base + "。") * count
+
+
+def beehive_visual_analysis():
+    segments = [
+        (2, 11), (11, 13), (19, 22), (46, 52), (64, 77), (84, 94),
+        (114, 122), (128, 132), (153, 156), (168, 177), (216, 231),
+        (247, 253), (272, 281), (307, 317), (316, 322), (336, 364),
+        (419, 430), (430, 452), (465, 482), (491, 500), (518, 537),
+        (563, 567), (573, 583), (592, 603), (609, 629), (654, 661),
+        (665, 670), (670, 676),
+    ]
+    observations = []
+    for index, (start, end) in enumerate(segments):
+        importance = 5 if index % 4 == 0 else 4
+        observations.append({
+            "timestamp": (start + end) / 2,
+            "visual": "beekeeper handles hive on tree with bees"
+            if start < 609
+            else "beekeeper has secured the hive bag and shows the final packed result near the tree",
+            "process_stage": "beehive work"
+            if start < 609
+            else "bag secured final result packed completion",
+            "importance": importance,
+            "keep_candidate": True,
+        })
+    return {
+        "observations": observations,
+        "candidate_segments": [
+            {"start": start, "end": end, "reason": "useful beehive process moment"}
+            for start, end in segments
+        ],
+    }
+
+
+WORKER_MATERIAL_NARRATION = (
+    "工人把材料送到设备旁继续处理，机器运转时材料不断移动，"
+    "这个工序最后会形成更清楚的处理结果"
+)
+
+
+TREE_HONEY_NARRATION = (
+    "手套贴着树干继续操作，烟熏着蜂群和蜂巢，袋子、绳子和刀具都围着这块蜂蜜收尾"
+)
+
+
+def scene_matched_blocks(count=12, seconds=50.0, text=None):
     block_text = text or scene_matched_block_text()
     starts = [i * seconds for i in range(count)]
-    if count == 12 and seconds == 100.0:
-        starts = [i * 300.0 for i in range(count - 1)] + [3600.0]
+    if count == 12:
+        starts = [i * 280.0 for i in range(count - 1)] + [3600.0]
     return [
         {
             "start": start,
@@ -101,7 +149,31 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("camera/meta phrasing", video_prompt)
         self.assertIn("镜头切到", video_prompt)
 
-    def test_openai_full_prompt_warns_density_must_pass_first_response(self):
+    def test_prompt_includes_custom_style_prompt_as_additional_style_instruction(self):
+        transcript = {
+            "text": "A short transcript",
+            "language": "en",
+            "segments": [{"start": 0, "end": 3, "text": "A short transcript"}],
+        }
+
+        prompt = commentary._build_commentary_prompt(
+            transcript=transcript,
+            video_title="Demo",
+            duration=12.0,
+            language="zh",
+            style="custom",
+            target_duration="short",
+            analysis_mode="current",
+            custom_style_prompt="用第一人称紧张整活口吻，短句优先，必须先说画面动作。",
+        )
+
+        self.assertIn("COMMENTARY STYLE: custom", prompt)
+        self.assertIn("CUSTOM STYLE PROMPT: 用第一人称紧张整活口吻", prompt)
+        self.assertIn("Custom user style instruction", prompt)
+        self.assertIn("as long as it does not conflict with visual grounding", prompt)
+        self.assertIn("必须先说画面动作", prompt)
+
+    def test_openai_full_prompt_uses_backend_sync_instead_of_density_audit(self):
         transcript = {
             "text": "A long transcript",
             "language": "en",
@@ -119,17 +191,576 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             visual_analysis={"observations": [{"timestamp": 6, "visual": "worker sorts copper"}]},
         )
 
-        self.assertIn("first complete JSON response must pass every per-block density check", prompt)
-        self.assertIn("request a focused local repair for the failed block", prompt)
-        self.assertIn('"density_audit"', prompt)
-        self.assertIn("Hard requirement before style", prompt)
-        self.assertIn("planning average", prompt)
+        self.assertIn("Backend rendering preserves each selected source range", prompt)
+        self.assertIn("will not rescue a sparse narration block by cutting or speeding the visuals", prompt)
+        self.assertIn("Do not add meaningless word padding", prompt)
+        self.assertIn("return the production script and timeline only", prompt)
+        self.assertNotIn("density_audit", prompt)
+        self.assertNotIn("per-block density check", prompt)
+        self.assertIn("There is no filler word-count target", prompt)
+        self.assertIn("There is no total minimum word count", prompt)
+        self.assertIn("not too dense, but also not empty", prompt)
+        self.assertIn("what is visible, what changes, and why that moment matters", prompt)
+        self.assertIn("do not make narration sparse by writing one vague sentence over a long visual block", prompt)
         self.assertIn("do not pad it with meaningless words", prompt)
-        self.assertIn("better block design, not filler narration", prompt)
-        self.assertIn("write those numbers into density_audit", prompt)
+        self.assertIn('Completion words such as "finished", "packed", "done", "收工"', prompt)
         self.assertIn("3-second retention rule", prompt)
         self.assertIn("curiosity, contrast, stakes, surprise, or payoff expectation", prompt)
         self.assertIn("matching the first visible action", prompt)
+
+    def test_full_mode_repairs_under_explained_block_without_shortening_visual_target(self):
+        data = {
+            "narration": "工人在处理材料。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人在处理材料",
+                    "narration": "工人在处理材料。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 24,
+                    "end": 360,
+                    "visual": "后续流程完成并展示结果",
+                    "visual_facts": ["工人继续处理材料并展示最终结果"],
+                    "narration": "随后工人继续把材料整理、分离和检查，最后把处理后的结果集中展示出来。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 24, "end": 360}],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
+
+        self.assertAlmostEqual(
+            400.0,
+            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
+            places=2,
+        )
+        self.assertIn("工人在处理材料", data["narration_blocks"][0]["narration"])
+        self.assertTrue(any(block.get("pause") for block in data["narration_blocks"]))
+
+    def test_full_mode_rejects_long_visual_range_with_sparse_narration(self):
+        data = {
+            "narration": "工人沿树干往上爬。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 25,
+                    "visual": "工人沿树干往上爬",
+                    "visual_facts": ["工人沿树干往上爬"],
+                    "narration": "工人沿树干往上爬。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 25,
+                    "end": 360,
+                    "visual": "工人处理蜂巢并展示后续结果",
+                    "visual_facts": ["工人处理蜂巢并展示后续结果"],
+                    "narration": repeated_scene_text("工人继续处理蜂巢，袋子和绳子配合着把蜂巢固定住", 16),
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
+            commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
+
+    def test_full_mode_allows_slight_density_shortfall_with_grounded_narration(self):
+        block = {
+            "start": 0,
+            "end": 40.0,
+            "visual": "工人贴着树干处理蜂巢，蜂群和袋子都在旁边",
+            "visual_facts": ["工人贴着树干处理蜂巢，蜂群和袋子都在旁边"],
+            "narration": "手套贴着树干处理蜂巢，蜂群围着树干飞动，工人一点点把蜂巢位置稳住，袋子和绳子还在旁边跟着继续调整变化",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+
+        self.assertEqual(50, len(re.sub(r"\s+", "", block["narration"])))
+        self.assertEqual(60, commentary._expected_narration_chars_for_visual_duration(40.0, "zh"))
+        commentary._validate_narration_density_matches_visual_duration(block, 3, "zh")
+
+    def test_full_mode_rejects_severe_sparse_narration_for_long_range(self):
+        block = {
+            "start": 0,
+            "end": 52.9,
+            "visual": "工人贴着树干继续处理蜂巢，蜂群还在旁边活动",
+            "visual_facts": ["工人贴着树干继续处理蜂巢，蜂群还在旁边活动"],
+            "narration": "蜂巢还在处理。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+
+        with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
+            commentary._validate_narration_density_matches_visual_duration(block, 3, "zh")
+
+    def test_full_mode_expands_sparse_zh_narration_from_english_visual_concepts(self):
+        block = {
+            "start": 0,
+            "end": 40.0,
+            "visual": "worker hands on tree trunk while bees swarm around hive and bag rope stay nearby",
+            "visual_facts": ["gloved worker handles beehive on tree trunk as bees move around honeycomb"],
+            "narration": "手套贴着树干处理蜂巢，蜂群围着树干飞动，工人一点点把蜂巢位置稳住，袋子和绳子还在旁边跟着继续调整变化",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+
+        repaired = commentary._repair_short_narration_visual_ranges([block], "zh")
+        repaired_text = repaired[0]["narration"]
+
+        self.assertEqual(1, len(repaired))
+        self.assertFalse(repaired[0]["pause"])
+        self.assertGreaterEqual(
+            len(re.sub(r"\s+", "", repaired_text)),
+            commentary._expected_narration_chars_for_visual_duration(40.0, "zh"),
+        )
+        self.assertIn("蜂群", repaired_text)
+
+    def test_full_mode_allows_only_brief_auto_silence_tail(self):
+        block = {
+            "start": 0,
+            "end": 13.0,
+            "visual": "",
+            "visual_facts": [],
+            "narration": "短句",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+
+        repaired = commentary._repair_short_narration_visual_ranges([block], "zh")
+
+        self.assertEqual(2, len(repaired))
+        self.assertFalse(repaired[0]["pause"])
+        self.assertTrue(repaired[1]["pause"])
+        self.assertLessEqual(
+            commentary._block_visual_duration(repaired[1]),
+            commentary.FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+
+    def test_full_mode_rejects_short_block_matched_visual_budget_without_backend_fill(self):
+        data = {
+            "narration": "工人在处理材料。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 60.0,
+                    "visual": "工人整理材料并准备进入下一步",
+                    "visual_facts": ["工人整理材料并准备进入下一步"],
+                    "narration": "工人先把材料整理好，准备进入下一步处理。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 120.0,
+                    "end": 180.0,
+                    "visual": "设备继续运转，材料被送到处理区域",
+                    "visual_facts": ["设备继续运转，材料被送到处理区域"],
+                    "narration": "设备继续运转，材料被送到处理区域。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 240.0,
+                    "end": 300.0,
+                    "visual": "工人检查处理后的材料状态",
+                    "visual_facts": ["工人检查处理后的材料状态"],
+                    "narration": "工人检查处理后的材料状态，确认流程继续推进。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 630.0,
+                    "end": 653.8,
+                    "visual": "后段流程展示最终处理结果",
+                    "visual_facts": ["后段流程展示最终处理结果"],
+                    "narration": "后段流程把最终处理结果交代出来。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "will not invent filler ranges|do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        self.assertFalse(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
+
+    def test_full_mode_rejects_cached_auto_fill_placeholder_as_ai_selection(self):
+        placeholder = "这一段把前后工序之间的衔接补上，材料处理、设备运转和人员操作继续往前推进，流程不是突然跳过去，而是顺着这里进入下一步"
+        data = {
+            "narration": f"前面正常解说。\n\n{placeholder}\n\n后面正常解说。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 120,
+                    "visual": "工人整理材料并准备进入下一步",
+                    "visual_facts": ["工人整理材料并准备进入下一步"],
+                    "narration": "工人先把材料整理好，准备进入下一步处理。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 120,
+                    "end": 240,
+                    "visual": "自动补齐的作业流程过渡",
+                    "visual_facts": ["这段补齐范围用于承接前后已经选中的作业流程"],
+                    "narration": placeholder,
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 600,
+                    "end": 720,
+                    "visual": "后段流程展示最终处理结果",
+                    "visual_facts": ["后段流程展示最终处理结果"],
+                    "narration": "后段流程把最终处理结果交代出来。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "will not invent filler ranges|do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(data, 720.0, "full", "zh")
+
+        self.assertTrue(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
+        self.assertLess(
+            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
+            commentary._full_mode_min_playable_visual_seconds(
+                720.0,
+                commentary._target_visual_duration_seconds(720.0, "full"),
+            ),
+        )
+
+    def test_auto_filled_blocks_do_not_expose_placeholder_visuals(self):
+        blocks = [
+            {
+                "start": 0,
+                "end": 12,
+                "visual": "自动补齐的作业流程过渡，承接前后选段里的材料处理、设备运转和人员操作",
+                "visual_facts": ["这段补齐范围用于承接前后已经选中的作业流程"],
+                "narration": "",
+                "pause": True,
+                "auto_filled_visual_budget": True,
+                "video_speed": 1.5,
+            },
+            {
+                "start": 12,
+                "end": 36,
+                "visual": "工人把材料送进机器",
+                "visual_facts": ["工人把材料送进机器"],
+                "narration": "工人把材料送进机器，处理流程继续推进。",
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+
+        cleaned = commentary._strip_auto_filled_user_visible_fields(blocks)
+        segments = commentary._narration_blocks_to_edit_segments(cleaned)
+        summary = commentary._summarize_auto_video_speed(cleaned, True)
+
+        self.assertEqual(cleaned[0]["visual"], commentary.COMMENTARY_AUTO_FILLED_BRIDGE_VISUAL)
+        self.assertEqual(cleaned[0]["visual_facts"], [])
+        self.assertEqual(segments[0]["reason"], commentary.COMMENTARY_AUTO_FILLED_BRIDGE_VISUAL)
+        self.assertEqual(summary["accelerated_blocks"][0]["visual"], "")
+        self.assertFalse(any("自动补齐" in str(item) for item in [cleaned, segments, summary]))
+
+    def test_full_mode_does_not_append_english_visual_facts_to_zh_narration(self):
+        data = {
+            "narration": "工人在处理材料。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人把材料送进机器，机器开始挤压",
+                    "visual_facts": ["worker feeds material into machine", "machine starts pressing"],
+                    "narration": "工人在处理材料。画面里worker feeds material into machine，machine starts pressing。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 26,
+                    "end": 32,
+                    "visual": "材料被压平后继续向前推出",
+                    "visual_facts": ["flattened material exits the machine"],
+                    "narration": "压平后的材料继续往前送，下一步处理就接上了。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 26, "end": 32}],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 34.0, "full", "zh")
+
+        narration = data["narration_blocks"][0]["narration"]
+        self.assertIn("工人在处理材料。工人把材料送进机器，机器开始挤压", narration)
+        self.assertNotIn("画面里", narration)
+        self.assertNotIn("worker feeds material", narration)
+        self.assertNotIn("machine starts pressing", narration)
+
+    def test_full_mode_inserts_separator_before_cached_zh_visual_fact_tail(self):
+        data = {
+            "narration": "这一步很关键画面里工人把材料送进机器，机器开始挤压。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人把材料送进机器，机器开始挤压",
+                    "narration": "这一步很关键画面里工人把材料送进机器，机器开始挤压。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 26,
+                    "end": 32,
+                    "visual": "材料被压平后继续向前推出",
+                    "narration": "压平后的材料继续往前送，下一步处理就接上了。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 26, "end": 32}],
+        }
+
+        commentary._finalize_full_mode_narration_blocks_for_render(data, 34.0, "full", "zh")
+
+        narration = data["narration_blocks"][0]["narration"]
+        self.assertIn("这一步很关键。工人把材料送进机器，机器开始挤压", narration)
+        self.assertNotIn("画面里", narration)
+
+    def test_full_mode_sanitizes_cached_detached_visual_phrasing(self):
+        data = {
+            "narration": "画面里工人把材料送进机器，机器开始挤压。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人把材料送进机器，机器开始挤压",
+                    "narration": "画面里工人把材料送进机器，机器开始挤压。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 26,
+                    "end": 32,
+                    "visual": "材料被压平后继续向前推出",
+                    "narration": "视频中材料继续往前送，下一步处理就接上了。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 26, "end": 32}],
+        }
+
+        commentary._finalize_full_mode_narration_blocks_for_render(data, 34.0, "full", "zh")
+
+        narration = "\n".join(block["narration"] for block in data["narration_blocks"])
+        self.assertNotIn("画面里", narration)
+        self.assertNotIn("视频中", narration)
+        self.assertIn("工人把材料送进机器，机器开始挤压", narration)
+
+    def test_full_mode_sanitizes_visual_analysis_tone_from_zh_narration(self):
+        data = {
+            "narration": "当前画面可以看到工人把材料送进机器，画面显示机器开始挤压，最后展示结果。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人把材料送进机器，机器开始挤压",
+                    "visual_facts": ["画面显示工人把材料送进机器", "展示最终结果"],
+                    "narration": "当前画面可以看到工人把材料送进机器，画面显示机器开始挤压，最后展示结果。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 26,
+                    "end": 34,
+                    "visual": "材料被压平后继续向前推出",
+                    "narration": "压平后的材料继续往前送，下一步处理就接上了。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 26, "end": 34}],
+        }
+
+        commentary._finalize_full_mode_narration_blocks_for_render(data, 36.0, "full", "zh")
+
+        narration = "\n".join(block["narration"] for block in data["narration_blocks"])
+        self.assertNotRegex(narration, r"当前画面|画面显示|画面展示|可以看到|能看到")
+        self.assertIn("工人把材料送进机器", narration)
+        self.assertIn("最后呈现结果", narration)
+
+    def test_scene_fact_sentence_uses_natural_zh_visual_fact(self):
+        block = {
+            "visual": "当前画面显示工人把材料送进机器",
+            "visual_facts": ["画面显示工人把材料送进机器", "展示最终结果"],
+        }
+
+        sentence = commentary._scene_fact_sentence(block, "zh")
+
+        self.assertEqual("工人把材料送进机器，呈现最终结果。", sentence)
+
+    def test_full_mode_drops_trailing_pause_for_complete_commentary(self):
+        data = {
+            "narration": "工人把材料处理完成。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 18,
+                    "visual": "工人把材料处理完成",
+                    "narration": "工人把材料处理完成。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 18,
+                    "end": 30,
+                    "visual": "普通空镜等待",
+                    "narration": "",
+                    "pause": True,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 18}, {"start": 18, "end": 30}],
+        }
+
+        commentary._finalize_full_mode_narration_blocks_for_render(data, 32.0, "full", "zh")
+
+        self.assertEqual(1, len(data["narration_blocks"]))
+        self.assertFalse(data["narration_blocks"][-1]["pause"])
+        self.assertEqual([{"start": 0.0, "end": 18.0, "reason": "工人把材料处理完成"}], data["edit_segments"])
+
+    def test_full_mode_does_not_append_editorial_closing_to_narration(self):
+        data = {
+            "narration": "这场高空赌局终于收场。身穿灰色防护服的人站在树下。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 18,
+                    "visual": "身穿灰色防护服的人站在树下",
+                    "narration": "这场高空赌局终于收场。身穿灰色防护服的人站在树下。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 18}],
+        }
+
+        commentary._finalize_full_mode_narration_blocks_for_render(data, 18.0, "full", "zh")
+
+        narration = data["narration_blocks"][-1]["narration"]
+        self.assertEqual("这场高空赌局终于收场。身穿灰色防护服的人站在树下", narration)
+        self.assertNotIn("这段解说", narration)
+        self.assertNotIn("自然收住", narration)
+
+    def test_full_mode_rejects_editorial_meta_narration_before_tts(self):
+        with self.assertRaisesRegex(Exception, "editorial phrasing|banned phrase"):
+            commentary._validate_commentary_script_for_target(
+                {
+                    "narration": "工人把袋子绑紧。到这里，前面的动作和结果已经交代完整，这段解说也自然收住。",
+                    "narration_blocks": [
+                        {
+                            "start": 0,
+                            "end": 18,
+                            "visual": "工人把袋子绑紧",
+                            "narration": "工人把袋子绑紧。到这里，前面的动作和结果已经交代完整，这段解说也自然收住。",
+                            "pause": False,
+                            "video_speed": 1.0,
+                        },
+                    ],
+                },
+                18.0,
+                "full",
+                "zh",
+            )
+
+    def test_narration_rejects_editorial_meta_variants_before_tts(self):
+        variants = [
+            "工人把袋子绑紧，到此整个过程也算告一段落。",
+            "工人把袋子绑紧，该交代的都交代完了，后面就不再展开。",
+            "工人把袋子绑紧，这段旁白到这里完成收尾。",
+            "工人把袋子绑紧，作为收尾一句，结果已经很清楚。",
+            "The worker tightens the bag, and this narration wraps up the segment.",
+        ]
+        for text in variants:
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(Exception, "editorial phrasing|banned phrase"):
+                    commentary._validate_commentary_script_for_target(
+                        {
+                            "narration": text,
+                            "narration_blocks": [
+                                {
+                                    "start": 0,
+                                    "end": 18,
+                                    "visual": "工人把袋子绑紧",
+                                    "narration": text,
+                                    "pause": False,
+                                    "video_speed": 1.0,
+                                },
+                            ],
+                        },
+                        18.0,
+                        "full",
+                        "zh",
+                    )
+
+    def test_narration_allows_real_visible_tightening_action(self):
+        commentary._validate_commentary_script_for_target(
+            {
+                "narration": "工人把袋口收紧，再用绳子绕一圈固定住，袋子里的蜂巢不会继续晃。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 18,
+                        "visual": "工人把袋口收紧并用绳子固定袋子",
+                        "visual_facts": ["工人把袋口收紧", "绳子固定袋子"],
+                        "narration": "工人把袋口收紧，再用绳子绕一圈固定住，袋子里的蜂巢不会继续晃。",
+                        "pause": False,
+                        "video_speed": 1.0,
+                    },
+                ],
+            },
+            18.0,
+            "short",
+            "zh",
+        )
+
+    def test_full_mode_accepts_concise_scene_matched_long_narrated_block(self):
+        data = {
+            "narration": "工人先把材料摊开检查，能看到不同碎料被分到两侧，方便后面继续挑出有价值的部分。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 24,
+                    "visual": "工人把材料摊开检查，并把不同碎料分到两侧",
+                    "visual_facts": ["材料被摊开", "不同碎料被分到两侧"],
+                    "evidence_timestamps": [4.0, 16.0],
+                    "narration": "工人先把材料摊开检查，能看到不同碎料被分到两侧，方便后面继续挑出有价值的部分。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 24,
+                    "end": 360,
+                    "visual": "后续流程完成并展示结果",
+                    "visual_facts": ["工人继续处理材料并展示最终结果"],
+                    "narration": "随后工人继续把材料整理、分离和检查，最后把处理后的结果集中展示出来。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 24}, {"start": 24, "end": 360}],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
 
     def test_narration_rejects_camera_meta_phrasing(self):
         data = {
@@ -148,7 +779,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         commentary._validate_commentary_script_for_target(data, 60.0, "short", "zh")
 
-    def test_openai_regeneration_prompt_focuses_failed_density_block(self):
+    def test_openai_regeneration_prompt_handles_historical_density_error_without_padding(self):
         invalid_script = {
             "narration_blocks": [
                 {"start": 0, "end": 30, "visual": "opening", "narration": "足够长的开场解说" * 20, "video_speed": 1.0},
@@ -175,83 +806,38 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("narration_blocks[1]", prompt)
         self.assertIn("Block 2", prompt)
         self.assertIn("93 non-whitespace characters for 33.0s", prompt)
-        self.assertIn("at least 179 scene-matched characters", prompt)
+        self.assertIn("Do not pad any block with repeated generic filler", prompt)
+        self.assertIn("Fix timing and scene match", prompt)
         self.assertIn("worker moves copper scrap", prompt)
-        self.assertIn("keep all unrelated narration_blocks unchanged", prompt)
-        self.assertIn("len(non_whitespace(narration))", prompt)
-        self.assertIn("* 5.4", prompt)
+        self.assertIn("Keep unrelated valid narration_blocks unchanged", prompt)
+        self.assertNotIn("len(non_whitespace(narration))", prompt)
+        self.assertNotIn("density_audit", prompt)
 
-    def test_near_miss_density_repair_slightly_speeds_block(self):
-        data = {
-            "narration_blocks": [
-                {
-                    "start": 0,
-                    "end": 42,
-                    "visual": "worker keeps handling the same process",
-                    "narration": "讲" * 150,
-                    "video_speed": 1.0,
-                }
-            ]
-        }
-
-        commentary._repair_near_miss_narration_density_blocks(data, "zh")
-        block = data["narration_blocks"][0]
-        repaired_duration = commentary._block_visual_duration(block)
-        repaired_min_chars = commentary._accepted_minimum_narration_chars(
-            commentary._minimum_spoken_block_chars(repaired_duration, "zh")
+    def test_previous_error_note_sanitizes_historical_density_failure(self):
+        note = commentary._retry_correction_note(
+            "AI narration block is too short for its selected visual range. "
+            "Block 14 has 54 chars for 37.5s of playable visuals; expected at least 98."
         )
 
-        self.assertGreater(block["video_speed"], 1.0)
-        self.assertLess(block["video_speed"], 1.1)
-        self.assertGreaterEqual(150, repaired_min_chars)
+        self.assertIn("too sparse for its selected visual range", note)
+        self.assertIn("Do not add filler just to satisfy a word-count target", note)
+        self.assertIn("Long selected source ranges still need matching spoken detail", note)
+        self.assertNotIn("54 chars", note)
+        self.assertNotIn("expected at least 98", note)
 
-    def test_near_miss_density_repair_handles_openai_short_block_without_request(self):
-        data = {
-            "narration_blocks": [
-                {
-                    "start": 0,
-                    "end": 35,
-                    "visual": "factory process step with slightly sparse narration",
-                    "narration": "讲" * 107,
-                    "video_speed": 1.0,
-                }
-            ]
-        }
-
-        commentary._repair_near_miss_narration_density_blocks(data, "zh")
-        block = data["narration_blocks"][0]
-        repaired_duration = commentary._block_visual_duration(block)
-        repaired_min_chars = commentary._accepted_minimum_narration_chars(
-            commentary._minimum_spoken_block_chars(repaired_duration, "zh")
-        )
-
-        self.assertGreater(block["video_speed"], 1.18)
-        self.assertLess(block["video_speed"], 1.35)
-        self.assertGreaterEqual(107, repaired_min_chars)
-
-    def test_near_miss_density_repair_handles_moderate_openai_short_block_without_request(self):
-        data = {
-            "narration_blocks": [
-                {
-                    "start": 0,
-                    "end": 39.6,
-                    "visual": "moderately sparse process shot that can play faster",
-                    "narration": "讲" * 101,
-                    "video_speed": 1.0,
-                }
-            ]
-        }
-
-        commentary._repair_near_miss_narration_density_blocks(data, "zh")
-        block = data["narration_blocks"][0]
-        repaired_duration = commentary._block_visual_duration(block)
-        repaired_min_chars = commentary._accepted_minimum_narration_chars(
-            commentary._minimum_spoken_block_chars(repaired_duration, "zh")
-        )
-
-        self.assertGreater(block["video_speed"], 1.4)
-        self.assertLess(block["video_speed"], 1.6)
-        self.assertGreaterEqual(101, repaired_min_chars)
+    def test_previous_error_invalidates_cached_script_only_for_script_failures(self):
+        self.assertFalse(commentary._previous_error_invalidates_cached_script(
+            "ffmpeg failed while burning subtitles: Error writing trailer: No space left on device"
+        ))
+        self.assertFalse(commentary._previous_error_invalidates_cached_script(
+            "Error muxing a packet. Conversion failed!"
+        ))
+        self.assertTrue(commentary._previous_error_invalidates_cached_script(
+            "AI narration_blocks do not match the selected full-mode edit target."
+        ))
+        self.assertTrue(commentary._previous_error_invalidates_cached_script(
+            "Gemini returned invalid JSON for the commentary script."
+        ))
 
     def test_audio_fit_allows_render_sync_speedup_for_short_visual_block(self):
         commands = []
@@ -264,6 +850,32 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         audio_filter = commands[0][commands[0].index("-af") + 1]
         self.assertIn("atempo=1.543478", audio_filter)
         self.assertIn("atrim=0:13.800", audio_filter)
+
+    def test_audio_concat_resets_part_timestamps_before_aac_encode(self):
+        commands = []
+
+        with patch.object(commentary, "_run_command", side_effect=lambda cmd: commands.append(cmd)):
+            commentary._concat_media_parts(
+                ["one.m4a", "two.m4a"],
+                "joined.m4a",
+                "/tmp",
+                codec="aac",
+                media_type="audio",
+            )
+
+        self.assertEqual(1, len(commands))
+        command = commands[0]
+        self.assertNotIn("-f", command)
+        self.assertNotIn("concat_commentary", " ".join(command))
+        self.assertIn("-filter_complex", command)
+        filter_complex = command[command.index("-filter_complex") + 1]
+        self.assertIn("asetpts=N/SR/TB[a0]", filter_complex)
+        self.assertIn("asetpts=N/SR/TB[a1]", filter_complex)
+        self.assertIn("[a0][a1]concat=n=2:v=0:a=1[aout]", filter_complex)
+        self.assertIn("-map", command)
+        self.assertEqual("[aout]", command[command.index("-map") + 1])
+        self.assertIn("-c:a", command)
+        self.assertEqual("aac", command[command.index("-c:a") + 1])
 
     def test_synced_block_slows_accelerated_video_when_tts_is_long(self):
         fit_calls = []
@@ -832,6 +1444,23 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("copy", first_cmd[first_cmd.index("-c:v") + 1])
         self.assertIn("-an", first_cmd)
 
+    def test_visual_edit_requires_ai_selected_segments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            output_path = os.path.join(tmpdir, "out.mp4")
+            work_dir = os.path.join(tmpdir, "work")
+            os.makedirs(work_dir)
+            open(source_path, "wb").close()
+
+            with self.assertRaisesRegex(Exception, "AI-selected edit_segments"):
+                commentary._create_visual_edit(
+                    source_path,
+                    [],
+                    output_path,
+                    "16:9",
+                    work_dir,
+                )
+
     def test_commentary_ffmpeg_commands_are_thread_limited(self):
         limited = commentary._limit_ffmpeg_threads(["ffmpeg", "-y", "-i", "in.mp4", "out.mp4"])
 
@@ -1032,6 +1661,10 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(output_path, "wb") as f:
                     f.write(b"video")
 
+            ai_blocks = scene_matched_blocks()
+            ai_blocks[1]["video_speed"] = 1.35
+            ai_blocks[1]["speed_reason"] = "AI chose light acceleration for a repeated process range"
+
             with patch.object(commentary, "_prepare_analysis_video_for_gemini", return_value=source_path), \
                 patch.object(commentary, "_get_video_info", return_value={"duration": 3935, "width": 854, "height": 480, "fps": 30}), \
                 patch.object(commentary, "transcribe_video") as transcribe, \
@@ -1039,8 +1672,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     "title": "Remix",
                     "summary": "summary",
                     "hook": "hook",
-                    "narration": "\n\n".join(block["narration"] for block in scene_matched_blocks()),
-                    "narration_blocks": scene_matched_blocks(),
+                    "narration": "\n\n".join(block["narration"] for block in ai_blocks),
+                    "narration_blocks": ai_blocks,
                     "edit_segments": sparse_segments,
                     "chapters": [],
                     "hashtags": [],
@@ -1070,7 +1703,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertLess(selected_seconds, 3935 * 0.5)
         create_visual.assert_not_called()
         create_synced.assert_called_once()
-        expected_segments = commentary._narration_blocks_to_edit_segments(scene_matched_blocks())
+        expected_segments = commentary._narration_blocks_to_edit_segments(ai_blocks)
         self.assertEqual(result["edit_segments"], expected_segments)
         fit_video.assert_not_called()
         self.assertEqual(result["edited_visual"], result["timed_visual"])
@@ -1133,10 +1766,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("/videos", result["episodes"][0]["video_url"][:7])
         self.assertEqual(0.0, result["episodes"][0]["output_start"])
         self.assertEqual(40.0, result["episodes"][0]["duration"])
-        self.assertEqual(3, len(rendered_commands))
-        self.assertEqual("-ss", rendered_commands[0][0][2])
-        self.assertEqual("0.000", rendered_commands[0][0][3])
-        self.assertTrue(os.path.exists(result["episodes"][2]["video_path"]))
+        episode_commands = [
+            item for item in rendered_commands
+            if item[0][-1].endswith(".mp4") and "_episode_" in os.path.basename(item[0][-1])
+        ]
+        self.assertEqual(3, len(episode_commands))
+        self.assertEqual("-ss", episode_commands[0][0][2])
+        self.assertEqual("0.000", episode_commands[0][0][3])
+        self.assertEqual(episode_commands[2][0][-1], result["episodes"][2]["video_path"])
 
     def test_full_duration_rejects_overlong_voiceover_before_visual_render(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1192,6 +1829,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(output_path, "wb") as f:
                     f.write(b"video")
 
+            blocks = scene_matched_blocks()
             with patch.object(commentary, "_prepare_analysis_video_for_gemini", return_value=source_path), \
                 patch.object(commentary, "_get_video_info", return_value={"duration": 3935, "width": 854, "height": 480, "fps": 30}), \
                 patch.object(commentary, "transcribe_video") as transcribe, \
@@ -1199,16 +1837,26 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     "title": "Remix",
                     "summary": "summary",
                     "hook": "hook",
-                    "narration": "Narration",
-                    "edit_segments": commentary._fallback_edit_segments(3935, "full"),
+                    "narration": "\n\n".join(block["narration"] for block in blocks),
+                    "narration_blocks": blocks,
+                    "edit_segments": commentary._narration_blocks_to_edit_segments(blocks),
                     "chapters": [],
                     "hashtags": [],
                 }), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
                 patch.object(commentary, "_get_audio_duration", return_value=1100), \
                 patch.object(commentary, "_create_visual_edit", side_effect=fake_create_visual), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [100.0] * len(blocks))), \
                 patch.object(commentary, "_fit_video_to_voiceover") as fit_video, \
                 patch.object(commentary, "_create_ambient_audio_bed", return_value=None), \
+                patch.object(commentary, "_resolve_background_music_track", return_value={
+                    "id": "aodebiao_caravan",
+                    "label": "默认 奥德彪专属音乐",
+                    "title": "Caravan",
+                    "artist": "a_hisa",
+                    "path": "caravan.mp3",
+                }) as resolve_music, \
+                patch.object(commentary, "_create_background_music_bed", return_value=os.path.join(tmpdir, "Remix_background_music.m4a")) as create_music, \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video:
 
                 result = commentary.generate_commentary_video(
@@ -1219,12 +1867,23 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     subtitles=False,
                     analysis_mode="video",
                     target_duration="full",
+                    background_music_enabled=True,
+                    background_music_track="aodebiao_caravan",
+                    background_music_volume=0.22,
                 )
 
         transcribe.assert_not_called()
         fit_video.assert_not_called()
         self.assertEqual(result["edited_visual"], result["timed_visual"])
+        self.assertEqual(commentary._narration_blocks_to_edit_segments(blocks), result["edit_segments"])
         self.assertTrue(mix_video.call_args.kwargs["trim_to_voiceover"])
+        resolve_music.assert_called_once_with("aodebiao_caravan")
+        create_music.assert_called_once()
+        self.assertEqual("Remix_background_music.m4a", result["background_music_audio"])
+        self.assertEqual("默认 奥德彪专属音乐", result["background_music_label"])
+        self.assertEqual(0.22, result["background_music_volume"])
+        self.assertEqual(0.22, create_music.call_args.args[3])
+        self.assertEqual(os.path.join(tmpdir, "Remix_background_music.m4a"), mix_video.call_args.kwargs["background_music_path"])
 
     def test_full_duration_burns_subtitles_into_final_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1239,10 +1898,11 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(output_path, "wb") as f:
                     f.write(b"video")
 
-            def fake_subtitles(_narration, _voiceover_path, output_path, **_kwargs):
+            def fake_subtitles(_blocks, output_path, _block_durations=None, **_kwargs):
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write("[Script Info]")
 
+            blocks = scene_matched_blocks()
             with patch.object(commentary, "_prepare_analysis_video_for_gemini", return_value=source_path), \
                 patch.object(commentary, "_get_video_info", return_value={"duration": 3935, "width": 854, "height": 480, "fps": 30}), \
                 patch.object(commentary, "transcribe_video"), \
@@ -1250,18 +1910,20 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     "title": "Remix",
                     "summary": "summary",
                     "hook": "hook",
-                    "narration": "Narration.",
-                    "edit_segments": commentary._fallback_edit_segments(3935, "full"),
+                    "narration": "\n\n".join(block["narration"] for block in blocks),
+                    "narration_blocks": blocks,
+                    "edit_segments": commentary._narration_blocks_to_edit_segments(blocks),
                     "chapters": [],
                     "hashtags": [],
                 }), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
                 patch.object(commentary, "_get_audio_duration", return_value=1100), \
                 patch.object(commentary, "_create_visual_edit", side_effect=fake_create_visual), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [100.0] * len(blocks))), \
                 patch.object(commentary, "_create_ambient_audio_bed", return_value=None), \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video, \
                 patch.object(commentary, "_probe_video_dimensions", return_value=(854, 480)), \
-                patch.object(commentary, "_write_text_timed_ass", side_effect=fake_subtitles) as write_subtitles, \
+                patch.object(commentary, "_write_block_timed_ass", side_effect=fake_subtitles) as write_subtitles, \
                 patch.object(commentary, "_burn_subtitles") as burn_subtitles:
 
                 result = commentary.generate_commentary_video(
@@ -1283,20 +1945,531 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
     def test_full_duration_targets_comprehensive_edit_not_raw_full_source(self):
         self.assertEqual(
-            1180,
+            629,
             int(commentary._target_visual_duration_seconds(3935, "full")),
         )
-        segments = commentary._fallback_edit_segments(3935, "full")
-        total = sum(segment["end"] - segment["start"] for segment in segments)
-        self.assertGreater(len(segments), 1)
-        self.assertGreaterEqual(total, 1100)
-        self.assertLess(total, 3935 * 0.5)
-        self.assertGreaterEqual(
-            commentary._minimum_narration_chars(3935, "full", "zh"),
-            2000,
+        self.assertEqual(2644, commentary._maximum_narration_chars(3935, "full", "zh"))
+        self.assertLess(commentary._target_visual_duration_seconds(3600, "full"), 900)
+        self.assertEqual([], commentary._resolve_edit_segments_for_target([], 3935, "full"))
+        with self.assertRaisesRegex(Exception, "will not invent fallback edit_segments"):
+            commentary._require_ai_selected_edit_segments({"edit_segments": []}, 3935, "full")
+
+    def test_full_duration_compacts_medium_complete_process_sources(self):
+        self.assertEqual(
+            284,
+            int(commentary._target_visual_duration_seconds(678.4, "full")),
+        )
+        self.assertEqual(
+            378,
+            int(commentary._target_visual_duration_seconds(900, "full")),
+        )
+        self.assertEqual(
+            504,
+            int(commentary._target_visual_duration_seconds(1200, "full")),
+        )
+        self.assertEqual([], commentary._resolve_edit_segments_for_target([], 678.4, "full"))
+
+    def test_full_duration_uses_visual_analysis_to_choose_content_fit_runtime(self):
+        visual_analysis = beehive_visual_analysis()
+
+        target = commentary._target_visual_duration_seconds_for_analysis(678.4, "full", visual_analysis)
+
+        self.assertEqual(284, int(commentary._target_visual_duration_seconds(678.4, "full")))
+        self.assertEqual(284, int(target))
+        self.assertLess(target, 360)
+        self.assertGreater(target, commentary._visual_candidate_duration_seconds(visual_analysis, 678.4))
+        self.assertLess(target, 678.4 * 0.5)
+
+    def test_full_duration_rejects_ten_minute_result_when_visual_analysis_prefers_shorter_cut(self):
+        narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 20)
+        blocks = []
+        start = 0.0
+        for _index in range(16):
+            end = start + 39.25
+            blocks.append({
+                "start": start,
+                "end": end,
+                "visual": "工人在树干上处理蜂巢，蜂群持续围绕",
+                "visual_facts": ["工人在树干上处理蜂巢，蜂群持续围绕"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+            start = end
+
+        with self.assertRaisesRegex(Exception, "selected too much source footage|do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": narration, "narration_blocks": blocks},
+                678.4,
+                "full",
+                "zh",
+                visual_analysis=beehive_visual_analysis(),
+            )
+
+    def test_full_duration_rejects_underfilled_openai_content_cut_instead_of_padding(self):
+        visual_analysis = beehive_visual_analysis()
+        narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 8)
+        blocks = [
+            {
+                "start": 0,
+                "end": 115,
+                "visual": "工人开始沿树干处理蜂巢，蜂群围着树干飞动",
+                "visual_facts": ["工人开始沿树干处理蜂巢，蜂群围着树干飞动"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 180,
+                "end": 325,
+                "visual": "工人切开蜂巢，把蜂巢往袋子方向处理",
+                "visual_facts": ["工人切开蜂巢，把蜂巢往袋子方向处理"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 420,
+                "end": 520,
+                "visual": "袋子和绳子固定蜂巢，蜂群还在周围飞动",
+                "visual_facts": ["袋子和绳子固定蜂巢，蜂群还在周围飞动"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 600,
+                "end": 620,
+                "visual": "工人下到树干下方准备收尾",
+                "visual_facts": ["工人下到树干下方准备收尾"],
+                "narration": "人已经从树干上下来，蜂巢切开一大块，装好收工。",
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+        data = {"narration": narration, "narration_blocks": blocks}
+
+        with self.assertRaisesRegex(Exception, "do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                data,
+                678.4,
+                "full",
+                "zh",
+                visual_analysis=visual_analysis,
+            )
+
+    def test_full_duration_rejects_six_nineteen_result_when_visual_analysis_prefers_shorter_cut(self):
+        visual_analysis = beehive_visual_analysis()
+        narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 3)
+        blocks = []
+        start = 0.0
+        for _index in range(16):
+            end = start + (379.7 / 16)
+            blocks.append({
+                "start": start,
+                "end": end,
+                "visual": "工人在树干上处理蜂巢，蜂群持续围绕",
+                "visual_facts": ["工人在树干上处理蜂巢，蜂群持续围绕"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+            start = end
+
+        with self.assertRaisesRegex(Exception, "do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": narration, "narration_blocks": blocks},
+                678.4,
+                "full",
+                "zh",
+                visual_analysis=visual_analysis,
+            )
+
+    def test_visual_budget_repair_prompt_tells_ai_to_recover_useful_time_not_backend_fill(self):
+        narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 3)
+        blocks = [
+            {
+                "start": index * 30.0,
+                "end": index * 30.0 + 28.0,
+                "visual": "工人在树干上处理蜂巢，蜂群持续围绕",
+                "visual_facts": ["工人在树干上处理蜂巢，蜂群持续围绕"],
+                "evidence_timestamps": [index * 30.0 + 10.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.2 if index % 2 == 0 else 1.0,
+                "speed_reason": "AI chose mild acceleration for repeated visible movement" if index % 2 == 0 else "",
+            }
+            for index in range(16)
+        ]
+        script = {"narration": narration, "narration_blocks": blocks}
+        validation_error = Exception(
+            "AI narration_blocks do not match the selected full-mode edit target. "
+            "Got 351.2s of block-matched visuals for a 391.8s target; expected between 360.5s and 431.0s. "
+            "AI must select enough useful scene-matched source ranges from the visual evidence; OpenShorts will not invent filler ranges or evenly sample the timeline."
         )
 
-    def test_full_duration_prompt_demands_long_scene_matched_narration(self):
+        repair = commentary._focused_validation_repair_instruction(
+            validation_error,
+            script,
+            "zh",
+            16,
+            duration=678.4,
+            target_duration="full",
+        )
+        openai_prompt = commentary._build_openai_regeneration_prompt(
+            "ORIGINAL",
+            script,
+            validation_error,
+            678.4,
+            "full",
+            "zh",
+            5,
+            visual_analysis=beehive_visual_analysis(),
+        )
+        gemini_prompt = commentary._build_regeneration_prompt(
+            "ORIGINAL",
+            script,
+            678.4,
+            "full",
+            "zh",
+            attempt=5,
+            validation_error=validation_error,
+        )
+        finalization_prompt = commentary._build_visual_plan_finalization_prompt(
+            script,
+            678.4,
+            "full",
+            "zh",
+            attempt=5,
+            validation_error=validation_error,
+        )
+        retry_note = commentary._retry_correction_note(str(validation_error))
+
+        self.assertIn("under-selected", repair)
+        self.assertIn("Add or recover at least 9.3s", repair)
+        self.assertIn("AI-selected, useful, scene-matched source ranges", repair)
+        self.assertIn("lowering over-aggressive video_speed", repair)
+        self.assertIn("Do not invent filler ranges", repair)
+        self.assertIn("Return exactly 16 narration_blocks", openai_prompt)
+        self.assertIn("Narration must be at most 1645", openai_prompt)
+        self.assertIn("Narration must be at most 1645", gemini_prompt)
+        self.assertIn("The final narration must be at most 1645", finalization_prompt)
+        self.assertIn("selected playable visual time should be near 391 seconds", openai_prompt)
+        self.assertIn("selected playable visual time should be near 391 seconds", gemini_prompt)
+        self.assertIn("391.8s target", retry_note)
+        self.assertIn("The AI must decide keep/cut/splice/speed", retry_note)
+        self.assertIn("Do not use backend filler", retry_note)
+        self.assertNotIn("fallback", repair.lower())
+
+    def test_density_repair_prompt_preserves_full_edit_visual_budget(self):
+        narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 2)
+        blocks = [
+            {
+                "start": index * 27.0,
+                "end": index * 27.0 + 25.0,
+                "visual": "工人在树干上处理蜂巢，蜂群持续围绕",
+                "visual_facts": ["工人在树干上处理蜂巢，蜂群持续围绕"],
+                "evidence_timestamps": [index * 27.0 + 8.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            }
+            for index in range(16)
+        ]
+        blocks[10]["start"] = 270.0
+        blocks[10]["end"] = 329.3
+        blocks[10]["narration"] = "蜂巢继续处理，袋子还在旁边。"
+        validation_error = Exception(
+            "AI narration block is too short for its selected visual range. "
+            "Block 11 has 60 chars for 59.3s of playable visuals; expected at least 89. "
+            "Shorten this block's source range, split it, add concrete scene-matched narration, or mark a brief pause=true moment. "
+            "Do not rely on render-time speedup or trimming because that makes the commentary and visuals drift out of sync."
+        )
+
+        repair = commentary._focused_validation_repair_instruction(
+            validation_error,
+            {"narration": narration, "narration_blocks": blocks},
+            "zh",
+            16,
+            duration=678.4,
+            target_duration="full",
+            target_seconds=391.8,
+        )
+
+        self.assertIn("Full-edit timing must remain inside the target window", repair)
+        self.assertIn("391.8s target", repair)
+        self.assertIn("360.5-431.0s", repair)
+        self.assertIn("Do not let a local density fix break the full-edit visual target", repair)
+        self.assertIn("recover the removed playable time", repair)
+        self.assertIn("Preserve exactly 16 total narration_blocks", repair)
+
+    def test_density_repair_prompt_lists_all_current_sparse_blocks(self):
+        healthy_narration = repeated_scene_text("工人贴着树干继续处理蜂巢，蜂群围着手套飞动，袋子和刀具跟着动作调整", 3)
+        blocks = [
+            {
+                "start": index * 31.0,
+                "end": index * 31.0 + 30.0,
+                "visual": "工人在树干旁处理蜂巢，蜂群持续围绕",
+                "visual_facts": ["工人在树干旁处理蜂巢，蜂群持续围绕"],
+                "evidence_timestamps": [index * 31.0 + 12.0],
+                "narration": healthy_narration,
+                "pause": False,
+                "video_speed": 1.0,
+            }
+            for index in range(16)
+        ]
+        blocks[6]["start"] = 190.0
+        blocks[6]["end"] = 246.2
+        blocks[6]["visual"] = "蜂巢、树干、手套和袋子都在画面里继续移动"
+        blocks[6]["narration"] = "蜂巢还在处理，袋子在旁边。"
+        blocks[11]["start"] = 330.0
+        blocks[11]["end"] = 377.5
+        blocks[11]["visual"] = "工人用刀处理蜂巢并把蜂蜜往袋子里放"
+        blocks[11]["narration"] = "刀贴着蜂巢往下切，蜂蜜被放进袋子，蜂群还在周围飞。"
+        validation_error = Exception(
+            "AI narration block is too short for its selected visual range. "
+            "Block 12 has 52 chars for 47.5s of playable visuals; expected at least 72. "
+            "Shorten this block's source range, split it, add concrete scene-matched narration, or mark a brief pause=true moment."
+        )
+
+        repair = commentary._focused_validation_repair_instruction(
+            validation_error,
+            {"narration": healthy_narration, "narration_blocks": blocks},
+            "zh",
+            16,
+            duration=678.4,
+            target_duration="full",
+            target_seconds=479.8,
+        )
+        prompt = commentary._build_openai_regeneration_prompt(
+            "ORIGINAL PROMPT",
+            {"narration": healthy_narration, "narration_blocks": blocks},
+            validation_error,
+            duration=678.4,
+            target_duration="full",
+            language="zh",
+            attempt=7,
+        )
+
+        self.assertIn("Current density-risk blocks", repair)
+        self.assertIn("Block 12 / narration_blocks[11]", repair)
+        self.assertIn("Block 7 / narration_blocks[6]", repair)
+        self.assertIn("Fix all listed density-risk blocks in one pass", repair)
+        self.assertIn("audit every non-pause block", repair)
+        self.assertIn("backend rendering preserves the selected visual ranges", prompt)
+        self.assertNotIn("backend rendering handles trailing visual sync", prompt)
+
+    def test_full_mode_validation_attempt_default_allows_budget_followup_after_density_repairs(self):
+        self.assertGreaterEqual(commentary.GEMINI_SCRIPT_VALIDATION_ATTEMPTS, 8)
+
+    def test_full_duration_rejects_near_full_source_for_medium_complete_process_source(self):
+        narration = repeated_scene_text("工人继续处理蜂巢，袋子和绳子配合着把流程往后推进", 20)
+        blocks = [
+            {
+                "start": 0,
+                "end": 220,
+                "visual": "工人开始沿树干处理蜂巢",
+                "visual_facts": ["工人开始沿树干处理蜂巢"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 220,
+                "end": 460,
+                "visual": "工人切蜂巢并把蜂巢装进袋子",
+                "visual_facts": ["工人切蜂巢并把蜂巢装进袋子"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 460,
+                "end": 678.4,
+                "visual": "工人继续处理蜂巢并在地面收尾",
+                "visual_facts": ["工人继续处理蜂巢并在地面收尾"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+
+        with self.assertRaisesRegex(Exception, "selected too much source footage|do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": narration, "narration_blocks": blocks},
+                678.4,
+                "full",
+                "zh",
+            )
+
+    def test_full_duration_allows_compact_complete_process_cut_for_medium_source(self):
+        narration = repeated_scene_text("工人沿着树干处理蜂巢，蜂群和袋子的位置变化继续推进", 8)
+        blocks = [
+            {
+                "start": 0,
+                "end": 90,
+                "visual": "工人开始沿树干处理蜂巢",
+                "visual_facts": ["工人开始沿树干处理蜂巢"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 180,
+                "end": 300,
+                "visual": "工人切蜂巢并把蜂巢装进袋子",
+                "visual_facts": ["工人切蜂巢并把蜂巢装进袋子"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 575,
+                "end": 665,
+                "visual": "工人继续在树干和地面附近处理蜂巢收尾",
+                "visual_facts": ["工人继续在树干和地面附近处理蜂巢收尾"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.25,
+                "speed_reason": "AI chose light acceleration for a slow continuation range while preserving the ending context",
+            },
+        ]
+        data = {"narration": narration, "narration_blocks": blocks}
+
+        commentary._validate_commentary_script_for_target(data, 678.4, "full", "zh")
+
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        target = commentary._target_visual_duration_seconds(678.4, "full")
+        self.assertGreaterEqual(playable, target * commentary.FULL_MODE_MIN_PLAYABLE_TARGET_RATIO)
+        self.assertLessEqual(playable, target * commentary.FULL_MODE_MAX_PLAYABLE_TARGET_RATIO)
+
+    def test_full_duration_rejects_ai_speed_without_reason(self):
+        narration = repeated_scene_text("工人沿着树干处理蜂巢，蜂群和袋子的位置变化继续推进", 8)
+        blocks = [
+            {
+                "start": 0,
+                "end": 130,
+                "visual": "工人开始沿树干处理蜂巢",
+                "visual_facts": ["工人开始沿树干处理蜂巢"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.35,
+            },
+            {
+                "start": 180,
+                "end": 340,
+                "visual": "工人切蜂巢并把蜂巢装进袋子",
+                "visual_facts": ["工人切蜂巢并把蜂巢装进袋子"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 420,
+                "end": 640,
+                "visual": "工人继续在树干和地面附近处理蜂巢收尾",
+                "visual_facts": ["工人继续在树干和地面附近处理蜂巢收尾"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+
+        with self.assertRaisesRegex(Exception, "missing a visual reason"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": narration, "narration_blocks": blocks},
+                678.4,
+                "full",
+                "zh",
+            )
+
+    def test_full_duration_rejects_ai_speed_that_makes_voiceover_too_tight(self):
+        long_narration = repeated_scene_text("工人沿着树干持续处理蜂巢，蜂群和工具的变化都要跟当前画面对上", 18)
+        blocks = [
+            {
+                "start": 0,
+                "end": 40,
+                "visual": "工人开始沿树干处理蜂巢",
+                "visual_facts": ["工人开始沿树干处理蜂巢"],
+                "narration": long_narration,
+                "pause": False,
+                "video_speed": 2.5,
+                "speed_reason": "AI says this long range is repeated setup and can be very fast",
+            },
+            {
+                "start": 80,
+                "end": 260,
+                "visual": "工人切蜂巢并把蜂巢装进袋子",
+                "visual_facts": ["工人切蜂巢并把蜂巢装进袋子"],
+                "narration": repeated_scene_text("工人切蜂巢并把蜂巢装进袋子", 8),
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 320,
+                "end": 660,
+                "visual": "工人继续在树干和地面附近处理蜂巢收尾",
+                "visual_facts": ["工人继续在树干和地面附近处理蜂巢收尾"],
+                "narration": repeated_scene_text("工人继续在树干和地面附近处理蜂巢收尾", 8),
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+
+        with self.assertRaisesRegex(Exception, "makes narration too tight"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": long_narration, "narration_blocks": blocks},
+                678.4,
+                "full",
+                "zh",
+            )
+
+    def test_full_duration_allows_ai_compressed_medium_complete_process_after_speed(self):
+        narration = repeated_scene_text("工人沿着树干处理蜂巢，画面里的动作和蜂群变化继续推进", 3)
+        starts = [0, 90, 180, 270, 360, 450, 540, 625]
+        blocks = [
+            {
+                "start": start,
+                "end": start + 50,
+                "visual": "工人在树干上处理蜂巢 slow repetitive process",
+                "visual_facts": ["工人在树干上处理蜂巢，蜂群围着树干飞动"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.45,
+                "speed_reason": "AI chose moderate acceleration because the selected range is repeated slow beehive handling",
+            }
+            for start in starts
+        ]
+        visual_seconds = sum(commentary._block_visual_duration(block) for block in blocks)
+        self.assertAlmostEqual(275.862, visual_seconds, places=2)
+
+        data = {"narration": narration, "narration_blocks": blocks}
+        commentary._validate_commentary_script_for_target(data, 678.4, "full", "zh")
+
+        self.assertGreaterEqual(
+            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
+            commentary._target_visual_duration_seconds(678.4, "full") * commentary.FULL_MODE_MIN_PLAYABLE_TARGET_RATIO,
+        )
+
+    def test_full_duration_long_sources_keep_at_least_ten_minutes(self):
+        self.assertEqual(
+            480,
+            int(commentary._target_visual_duration_seconds(1233.7, "full")),
+        )
+        self.assertEqual(
+            480,
+            int(commentary._target_visual_duration_seconds(1800, "full")),
+        )
+        self.assertEqual(
+            576,
+            int(commentary._target_visual_duration_seconds(3600, "full")),
+        )
+        self.assertLess(
+            commentary._target_visual_duration_seconds(3600, "full"),
+            600,
+        )
+
+    def test_full_duration_prompt_demands_breathable_scene_matched_narration(self):
         prompt = commentary._build_commentary_prompt(
             transcript={"text": "source transcript", "segments": [], "language": "en"},
             video_title="Demo",
@@ -1313,6 +2486,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("Treat narration_blocks as the production timeline", prompt)
         self.assertIn("do not put 2 minutes of words into a 20-second visual range", prompt)
         self.assertIn("do not narrate every second like a robot", prompt)
+        self.assertIn("do not talk over every second", prompt)
+        self.assertIn("25% of selected visual time", prompt)
         self.assertIn("pause=true blocks", prompt)
         self.assertIn("original source audio", prompt)
         self.assertIn("vary rate and pitch", prompt)
@@ -1328,7 +2503,31 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn('"rate"', prompt)
         self.assertIn('"pitch"', prompt)
         self.assertIn('"video_speed"', prompt)
-        self.assertIn(f"at least {commentary._minimum_narration_chars(3935, 'full', 'zh')}", prompt)
+        self.assertIn("There is no filler word-count target", prompt)
+        self.assertIn("There is no total minimum word count", prompt)
+        self.assertNotIn("Narration must be at least", prompt)
+        self.assertNotIn("total narration must be at least", prompt)
+
+    def test_full_duration_prompt_compacts_medium_complete_process_source(self):
+        prompt = commentary._build_commentary_prompt(
+            transcript={"text": "source transcript", "segments": [], "language": "en"},
+            video_title="Demo",
+            duration=678.4,
+            language="zh",
+            style="documentary",
+            target_duration="full",
+            analysis_mode="openai",
+            visual_analysis=beehive_visual_analysis(),
+        )
+
+        self.assertIn("select about 284 seconds", prompt)
+        self.assertIn("preserve the complete process arc", prompt)
+        self.assertIn("should total about 284 playable seconds after video_speed", prompt)
+        self.assertIn("compress repeated hammering", prompt)
+        self.assertIn("video_speed", prompt)
+        self.assertIn("suggested_speed", prompt)
+        self.assertNotIn("select only about 360 seconds", prompt)
+        self.assertNotIn("preserve roughly 90-100% of the source workflow", prompt)
 
     def test_full_duration_normalizes_ai_episode_plan_by_narration_blocks(self):
         data = {
@@ -1368,83 +2567,113 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("不要写脱离画面的国际形势", prompt)
 
     def test_full_duration_rejects_blocks_that_stop_before_late_timeline(self):
+        block_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         blocks = [
-            {"start": i * 160, "end": i * 160 + 100, "visual": "early process", "narration": "讲" * 420, "pause": False}
+            {
+                "start": i * 160,
+                "end": i * 160 + 100,
+                "visual": "workers handle material during early process",
+                "narration": block_text,
+                "pause": False,
+            }
             for i in range(12)
         ]
 
         with self.assertRaisesRegex(Exception, "stopped before the end"):
             commentary._validate_commentary_script_for_target(
-                {"narration": "讲" * 3000, "narration_blocks": blocks},
+                {"narration": block_text, "narration_blocks": blocks},
                 duration=3935,
                 target_duration="full",
                 language="zh",
             )
 
     def test_full_duration_accepts_blocks_with_late_timeline_coverage(self):
+        block_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         blocks = [
-            {"start": i * 280, "end": i * 280 + 90, "visual": "full process", "narration": "讲" * 380, "pause": False}
+            {
+                "start": i * 280,
+                "end": i * 280 + 50,
+                "visual": "workers handle material during full process",
+                "narration": block_text,
+                "pause": False,
+            }
             for i in range(11)
         ]
-        blocks.append({"start": 3600, "end": 3690, "visual": "ending process", "narration": "讲" * 380, "pause": False})
+        blocks.append({
+            "start": 3600,
+            "end": 3650,
+            "visual": "ending process with final material result",
+            "narration": block_text,
+            "pause": False,
+        })
 
         commentary._validate_commentary_script_for_target(
-            {"narration": "讲" * 5000, "narration_blocks": blocks},
+            {"narration": block_text, "narration_blocks": blocks},
             duration=3935,
             target_duration="full",
             language="zh",
         )
 
-    def test_full_duration_accepts_near_threshold_narration_with_late_timeline_coverage(self):
+    def test_full_duration_accepts_concise_narration_with_late_timeline_coverage(self):
+        block_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         blocks = [
-            {"start": i * 280, "end": i * 280 + 90, "visual": "full process", "narration": "讲" * 380, "pause": False}
+            {
+                "start": i * 280,
+                "end": i * 280 + 50,
+                "visual": "workers handle material during full process",
+                "narration": block_text,
+                "pause": False,
+            }
             for i in range(11)
         ]
-        blocks.append({"start": 3600, "end": 3690, "visual": "ending process", "narration": "讲" * 380, "pause": False})
-        min_chars = commentary._minimum_narration_chars_for_blocks(
-            commentary._normalize_narration_blocks(blocks, 3935),
-            3935,
-            "full",
-            "zh",
-        )
-        old_default_required = int(commentary.math.floor(min_chars * 0.92))
-        narration = "讲" * (old_default_required - 5)
+        blocks.append({
+            "start": 3600,
+            "end": 3650,
+            "visual": "ending process with final material result",
+            "narration": block_text,
+            "pause": False,
+        })
+        narration = "工人处理废旧材料，设备运转后最终会形成更清楚的回收结果。"
+        data = {"narration": narration, "narration_blocks": blocks}
+        data["narration_blocks"] = commentary._normalize_narration_blocks(data["narration_blocks"], 3935)
+        data["narration"] = narration
 
-        self.assertGreaterEqual(len(narration), commentary._accepted_minimum_narration_chars(min_chars))
         commentary._validate_commentary_script_for_target(
-            {"narration": narration, "narration_blocks": blocks},
+            data,
             duration=3935,
             target_duration="full",
             language="zh",
         )
 
-    def test_full_duration_accepts_target_sized_real_cut_above_static_source_retention_fraction(self):
+    def test_full_duration_rejects_over_retained_source_for_medium_source(self):
+        worker_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         blocks = [
-            {"start": 0, "end": 45, "visual": "opening setup", "narration": "讲" * 220, "pause": False},
-            {"start": 60, "end": 105, "visual": "material sorting", "narration": "讲" * 220, "pause": False},
-            {"start": 130, "end": 175, "visual": "first machine process", "narration": "讲" * 220, "pause": False},
-            {"start": 205, "end": 250, "visual": "inspection step", "narration": "讲" * 220, "pause": False},
-            {"start": 285, "end": 330, "visual": "middle assembly", "narration": "讲" * 220, "pause": False},
-            {"start": 365, "end": 410, "visual": "machine closeup", "narration": "讲" * 220, "pause": False},
-            {"start": 450, "end": 495, "visual": "quality check", "narration": "讲" * 220, "pause": False},
-            {"start": 540, "end": 585, "visual": "packaging begins", "narration": "讲" * 220, "pause": False},
-            {"start": 635, "end": 680, "visual": "late process", "narration": "讲" * 220, "pause": False},
-            {"start": 735, "end": 780, "visual": "final machine run", "narration": "讲" * 220, "pause": False},
-            {"start": 835, "end": 880, "visual": "finished parts", "narration": "讲" * 220, "pause": False},
-            {"start": 935, "end": 980, "visual": "ending packaging", "narration": "讲" * 220, "pause": False},
+            {"start": 0, "end": 45, "visual": "worker opening setup with material", "narration": worker_text, "pause": False},
+            {"start": 60, "end": 105, "visual": "material sorting", "narration": worker_text, "pause": False},
+            {"start": 130, "end": 175, "visual": "first machine process", "narration": worker_text, "pause": False},
+            {"start": 205, "end": 250, "visual": "worker inspection step", "narration": worker_text, "pause": False},
+            {"start": 285, "end": 330, "visual": "middle material assembly", "narration": worker_text, "pause": False},
+            {"start": 365, "end": 410, "visual": "machine closeup", "narration": worker_text, "pause": False},
+            {"start": 450, "end": 495, "visual": "worker quality check on material", "narration": worker_text, "pause": False},
+            {"start": 540, "end": 585, "visual": "packaging begins with material", "narration": worker_text, "pause": False},
+            {"start": 635, "end": 680, "visual": "late process with workers and material", "narration": worker_text, "pause": False},
+            {"start": 735, "end": 780, "visual": "final machine run", "narration": worker_text, "pause": False},
+            {"start": 835, "end": 880, "visual": "finished material result", "narration": worker_text, "pause": False},
+            {"start": 935, "end": 980, "visual": "ending packaging of material", "narration": worker_text, "pause": False},
         ]
-        narration = "讲" * 2700
+        narration = worker_text
 
         self.assertGreater(
             commentary._segments_total_duration(commentary._narration_blocks_to_edit_segments(blocks)),
             1037.2 * commentary.FULL_MODE_MAX_SOURCE_RETENTION_FRACTION,
         )
-        commentary._validate_commentary_script_for_target(
-            {"narration": narration, "narration_blocks": blocks},
-            duration=1037.2,
-            target_duration="full",
-            language="zh",
-        )
+        with self.assertRaisesRegex(Exception, "selected too much source footage|do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": narration, "narration_blocks": blocks},
+                duration=1037.2,
+                target_duration="full",
+                language="zh",
+            )
 
     def test_full_duration_can_build_narration_from_scene_matched_blocks(self):
         transcript = {
@@ -1452,24 +2681,20 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "language": "en",
             "segments": [{"start": 0, "end": 10, "text": "factory process"}],
         }
-        block_text = (
-            "这一段解说紧贴画面，说明工人正在处理废旧电机、分离铜线、转运材料，并交代这个环节在整个回收流程里的作用。"
-            "同时补充机器动作、人工配合、材料状态变化和下一道工序之间的联系。"
-            "让观众知道此刻保留这段画面的原因，以及它如何推动废铜重新变成新材料。"
-        ) * 4
+        block_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         payload = {
             "title": "Block Based",
             "summary": "summary",
             "hook": "hook",
             "narration": "太短。",
             "narration_blocks": [
-                {"start": i * 320, "end": i * 320 + 100, "narration": block_text}
+                {"start": i * 280, "end": i * 280 + 50, "narration": block_text}
                 for i in range(11)
-            ] + [{"start": 3600, "end": 3700, "narration": block_text}],
+            ] + [{"start": 3600, "end": 3650, "narration": block_text}],
             "edit_segments": [
-                {"start": i * 320, "end": i * 320 + 100, "reason": "process"}
+                {"start": i * 280, "end": i * 280 + 50, "reason": "process"}
                 for i in range(11)
-            ] + [{"start": 3600, "end": 3700, "reason": "ending process"}],
+            ] + [{"start": 3600, "end": 3650, "reason": "ending process"}],
             "chapters": [],
             "hashtags": [],
         }
@@ -1498,26 +2723,23 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual("Block Based", result["title"])
         self.assertEqual(1, len(fake_models.calls))
-        self.assertGreaterEqual(
+        self.assertLessEqual(
             len(commentary.re.sub(r"\s+", "", result["narration"])),
-            commentary._minimum_narration_chars(3935, "full", "zh"),
+            commentary._maximum_narration_chars(3935, "full", "zh"),
         )
-        self.assertIn(block_text, result["narration"])
+        self.assertIn(block_text.rstrip("。"), result["narration"])
 
     def test_full_duration_validation_counts_pause_blocks_as_non_spoken_time(self):
+        long_worker_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 18)
         blocks = [
-            {"start": 0, "end": 390, "visual": "opening process", "narration": "讲" * 1700, "pause": False},
-            {"start": 390, "end": 402, "visual": "machine sound reveal", "narration": "", "pause": True},
-            {"start": 402, "end": 792, "visual": "main process", "narration": "讲" * 1700, "pause": False},
-            {"start": 792, "end": 804, "visual": "original audio beat", "narration": "", "pause": True},
-            {"start": 3400, "end": 3796, "visual": "ending process", "narration": "讲" * 1700, "pause": False},
+            {"start": 0, "end": 220, "visual": "opening process", "visual_facts": ["opening process shows workers handling material"], "narration": long_worker_text, "pause": False},
+            {"start": 220, "end": 232, "visual": "machine sound reveal", "narration": "", "pause": True},
+            {"start": 520, "end": 740, "visual": "main process", "visual_facts": ["main process shows the machine and workers continuing"], "narration": long_worker_text, "pause": False},
+            {"start": 740, "end": 752, "visual": "original audio beat", "narration": "", "pause": True},
+            {"start": 3400, "end": 3600, "visual": "ending process", "visual_facts": ["ending process shows the final material result"], "narration": long_worker_text, "pause": False},
         ]
         spoken_text = "".join(block["narration"] for block in blocks)
-        normalized = commentary._normalize_narration_blocks(blocks, 3935)
-        min_chars = commentary._minimum_narration_chars_for_blocks(normalized, 3935, "full", "zh")
 
-        self.assertLess(min_chars, commentary._minimum_narration_chars(3935, "full", "zh"))
-        self.assertGreaterEqual(len(spoken_text), commentary._accepted_minimum_narration_chars(min_chars))
         commentary._validate_commentary_script_for_target(
             {"narration": spoken_text, "narration_blocks": blocks},
             duration=3935,
@@ -1525,11 +2747,170 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             language="zh",
         )
 
+    def test_openai_visual_timeline_rejects_post_harvest_climbing_regression(self):
+        blocks = [
+            {
+                "start": 741.104,
+                "end": 785.0,
+                "visual": "smoking leafy torch held while tying green bag straps to limb",
+                "visual_facts": ["green bag is secured to a tree limb while smoke drifts"],
+                "narration": repeated_scene_text("火把继续冒烟，我把袋子和绳子绑在树枝上固定住蜂巢", 8),
+                "pause": False,
+            },
+            {
+                "start": 809.0,
+                "end": 855.0,
+                "visual": "climber feet and hands gripping trunk with beehive and swarm visible lower right",
+                "visual_facts": ["climber uses trunk and pegs while bees swarm near the hive"],
+                "narration": repeated_scene_text("袋子已经绑好，我继续拉紧绳子把蜂蜜固定在树枝上", 8),
+                "pause": False,
+            },
+        ]
+        visual_analysis = {
+            "observations": [
+                {"timestamp": 751.143, "process_stage": "securing equipment", "visual": "Both pink-gloved hands tie and secure straps of green bag to tree limb"},
+                {"timestamp": 809.928, "process_stage": "climbing ascent", "visual": "POV looking up tall trunk, boots on bark, metal pegs visible, distant beehive with bees"},
+                {"timestamp": 811.783, "process_stage": "climbing toward hive", "visual": "Climber's feet and hands gripping trunk, beehive and bee swarm visible lower right"},
+            ]
+        }
+
+        with self.assertRaisesRegex(Exception, "regress to an earlier source action"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": "\n".join(block["narration"] for block in blocks), "narration_blocks": blocks},
+                duration=1026.0,
+                target_duration="full",
+                language="zh",
+                visual_analysis=visual_analysis,
+            )
+
+    def test_openai_visual_timeline_rejects_unsupported_completion_claim(self):
+        block = {
+            "start": 609.2,
+            "end": 635.0,
+            "visual": "gloved hands prying bark, removing hive material while bees approach",
+            "visual_facts": ["gloved hands prying at trunk edge", "bees flying near boots"],
+            "narration": "蜂巢切开一大块，装好收工",
+            "pause": False,
+            "video_speed": 1.5,
+        }
+        visual_analysis = {
+            "observations": [
+                {
+                    "timestamp": 609.227,
+                    "visual": "Bee flies directly past gloved hand on trunk; motion blur on insect",
+                    "process_stage": "bee activity",
+                },
+                {
+                    "timestamp": 623.04,
+                    "visual": "Gloved hand pulls small dark object from trunk base while second hand holds tool",
+                    "process_stage": "hive material removal",
+                },
+                {
+                    "timestamp": 634.88,
+                    "visual": "Multiple bees flying near boots and lower trunk; active swarm close to worker",
+                    "process_stage": "bee defense",
+                },
+            ]
+        }
+
+        with self.assertRaisesRegex(Exception, "completed packing/ending action"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                duration=678.4,
+                target_duration="full",
+                language="zh",
+                visual_analysis=visual_analysis,
+            )
+
+    def test_openai_visual_timeline_allows_visible_completion_claim(self):
+        block = {
+            "start": 418.5,
+            "end": 445.0,
+            "visual": "knife cutting more comb then placing pieces into bag on leg",
+            "visual_facts": ["yellow comb in bag", "bees swarming"],
+            "narration": "蜂巢切下来塞进袋子，袋口扎紧这才算装好",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "observations": [
+                {
+                    "timestamp": 430.383,
+                    "visual": "Large yellow honeycomb pieces are placed into a plastic bag on worker's leg",
+                    "process_stage": "bagging honeycomb",
+                },
+                {
+                    "timestamp": 442.437,
+                    "visual": "Bag is held close while bees swarm around the packed honeycomb",
+                    "process_stage": "packing",
+                },
+            ]
+        }
+
+        commentary._validate_scene_matched_narration_blocks(
+            {"narration": block["narration"], "narration_blocks": [block]},
+            visual_analysis=visual_analysis,
+        )
+
+    def test_openai_visual_timeline_allows_noisy_concept_labels_when_scene_is_grounded(self):
+        block = {
+            "start": 92.0,
+            "end": 118.0,
+            "visual": "worker climbing on tree trunk while bees swarm near hive",
+            "visual_facts": ["worker hands stay on the trunk while bees move around the hive"],
+            "narration": "工人抱住树干继续往上爬，手套贴着树皮一点点靠近蜂巢。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "observations": [
+                {
+                    "timestamp": 96.2,
+                    "visual": "Worker hands grip tree trunk while bees swarm around hive; bright metal-looking artifact is visible from lighting",
+                    "process_stage": "climbing near hive with possible copper/metal highlight",
+                },
+                {
+                    "timestamp": 112.4,
+                    "visual": "Person in gloves stays on branch and trunk as honeycomb and bees remain close",
+                    "process_stage": "approaching hive",
+                },
+            ]
+        }
+
+        commentary._validate_scene_matched_narration_blocks(
+            {"narration": block["narration"], "narration_blocks": [block]},
+            visual_analysis=visual_analysis,
+        )
+
+    def test_full_mode_output_alignment_rejects_final_longer_than_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            final_path = os.path.join(tmpdir, "final.mp4")
+            voice_path = os.path.join(tmpdir, "voice.m4a")
+            open(final_path, "wb").close()
+            open(voice_path, "wb").close()
+
+            def fake_duration(path):
+                if path == final_path:
+                    return 712.0
+                if path == voice_path:
+                    return 712.0
+                return None
+
+            with patch.object(commentary, "_probe_media_format_duration", side_effect=fake_duration):
+                with self.assertRaisesRegex(Exception, "longer than the source video"):
+                    commentary._assert_full_mode_output_alignment(
+                        final_path,
+                        voice_path,
+                        None,
+                        [712.0],
+                        source_duration=678.4,
+                    )
+
     def test_normalize_narration_blocks_preserves_pause_rate_pitch_and_video_speed(self):
         blocks = commentary._normalize_narration_blocks(
             [
                 {"start": 0, "end": 8, "visual": "machine sound", "narration": "", "pause": True},
-                {"start": 8, "end": 20, "visual": "worker action", "narration": "画面里工人正在处理铜料。", "rate": "-15%", "pitch": "+4Hz", "video_speed": 1.75},
+                {"start": 8, "end": 20, "visual": "worker action", "narration": "工人正在处理铜料。", "rate": "-15%", "pitch": "+4Hz", "video_speed": 1.75},
                 {"start": 20, "end": 30, "visual": "empty bad block", "narration": ""},
                 {"start": 30, "end": 40, "visual": "invalid prosody", "narration": "继续讲这个画面。", "rate": "fast", "pitch": "high", "speed_up": True},
             ],
@@ -1561,24 +2942,24 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual([1.0, 1.0], [block["video_speed"] for block in blocks])
 
-    def test_auto_video_speed_adds_conservative_fallback_for_repetitive_blocks(self):
+    def test_auto_video_speed_preserves_ai_speed_without_backend_guessing(self):
         blocks = commentary._apply_auto_video_speed_to_blocks(
             [
-                {"start": 0, "end": 22, "visual": "worker repeats slow transport and loading steps", "narration": "这段是重复搬运和上料。", "video_speed": 1.0},
+                {"start": 0, "end": 22, "visual": "worker repeats slow transport and loading steps", "narration": "这段是重复搬运和上料。", "video_speed": 1.35, "speed_reason": "AI chose moderate speed for repeated loading"},
                 {"start": 22, "end": 42, "visual": "final result showcase", "narration": "最终成品亮相。", "video_speed": 1.0},
                 {"start": 42, "end": 48, "visual": "short moving shot", "narration": "短镜头。", "video_speed": 1.0},
             ],
             enabled=True,
         )
 
-        self.assertEqual(1.5, blocks[0]["video_speed"])
+        self.assertEqual(1.35, blocks[0]["video_speed"])
         self.assertEqual(1.0, blocks[1]["video_speed"])
         self.assertEqual(1.0, blocks[2]["video_speed"])
 
-    def test_auto_video_speed_preserves_ai_selected_speed(self):
+    def test_auto_video_speed_does_not_supplement_ai_selected_speed(self):
         blocks = commentary._apply_auto_video_speed_to_blocks(
             [
-                {"start": 0, "end": 22, "visual": "slow transport", "narration": "运输。", "video_speed": 1.75},
+                {"start": 0, "end": 22, "visual": "slow transport", "narration": "运输。", "video_speed": 1.75, "speed_reason": "AI chose speed for slow transport"},
                 {"start": 22, "end": 48, "visual": "repetitive loading", "narration": "重复上料。", "video_speed": 1.0},
             ],
             enabled=True,
@@ -1586,6 +2967,135 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual(1.75, blocks[0]["video_speed"])
         self.assertEqual(1.0, blocks[1]["video_speed"])
+
+    def test_auto_video_speed_keeps_ai_speed_and_protected_blocks(self):
+        blocks = commentary._apply_auto_video_speed_to_blocks(
+            [
+                {"start": 0, "end": 24, "visual": "slow transport", "narration": "运输。", "video_speed": 1.25, "speed_reason": "AI chose light acceleration"},
+                {"start": 24, "end": 48, "visual": "repetitive loading and waiting", "narration": "重复上料等待。", "video_speed": 1.0},
+                {"start": 48, "end": 72, "visual": "final result showcase", "narration": "最终成果展示。", "video_speed": 1.0},
+            ],
+            enabled=True,
+        )
+
+        self.assertEqual(1.25, blocks[0]["video_speed"])
+        self.assertEqual(1.0, blocks[1]["video_speed"])
+        self.assertEqual(1.0, blocks[2]["video_speed"])
+
+    def test_auto_video_speed_does_not_use_backend_visual_keyword_guessing(self):
+        blocks = commentary._apply_auto_video_speed_to_blocks(
+            [
+                {
+                    "start": 48.1,
+                    "end": 74.0,
+                    "visual": "粉色手套继续处理树干，蜜蜂围着手臂",
+                    "narration": "钉子敲进树干形成梯子，往下看腿都软。",
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 418.5,
+                    "end": 452.0,
+                    "visual": "蜂巢块块装袋，蜜蜂还跟着进去",
+                    "narration": "蜂巢放入袋中，袋口被拧紧。",
+                    "video_speed": 1.0,
+                },
+            ],
+            enabled=True,
+            visual_analysis={
+                "candidate_segments": [
+                    {"start": 48.1, "end": 54.7, "reason": "Hands inserting pegs with downward height perspective and bee movement"},
+                    {"start": 66.4, "end": 72.9, "reason": "Repeated hammering action showing peg ladder construction progress"},
+                    {"start": 418.5, "end": 452.0, "reason": "Honeycomb pieces placed into bag and secured"},
+                ],
+            },
+        )
+
+        self.assertEqual(1.0, blocks[0]["video_speed"])
+        self.assertEqual(1.0, blocks[1]["video_speed"])
+
+    def test_full_duration_rejects_ignored_ai_speed_evidence(self):
+        narration = repeated_scene_text("工人沿着树干重复调整位置，蜂群和蜂巢状态继续变化", 5)
+        block = {
+            "start": 48.0,
+            "end": 80.0,
+            "visual": "粉色手套反复敲钉，脚窝沿着树干一点点往上铺",
+            "visual_facts": ["手套反复敲钉", "树干上形成脚窝"],
+            "narration": narration,
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "candidate_segments": [
+                {
+                    "start": 48.0,
+                    "end": 80.0,
+                    "reason": "repeated peg hammering stays understandable when accelerated",
+                    "suggested_speed": 1.5,
+                    "speed_reason": "repeated hammering is slow but useful setup",
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "ignores visual speed evidence"):
+            commentary._validate_ai_video_speed_decisions([block], "zh", visual_analysis=visual_analysis, duration=120.0)
+
+        block["video_speed"] = 1.35
+        block["speed_reason"] = "AI chose mild acceleration because the exact range repeats peg hammering on the trunk"
+        commentary._validate_ai_video_speed_decisions([block], "zh", visual_analysis=visual_analysis, duration=120.0)
+
+    def test_full_mode_speed_budget_reverts_acceleration_that_makes_visuals_too_short(self):
+        narration = "这一段解说紧贴实际动作，把工人处理材料、设备运转和流程推进讲清楚。"
+        blocks = [
+            {
+                "start": i * 70,
+                "end": i * 70 + 70,
+                "visual": "slow repetitive process transport",
+                "visual_facts": ["workers keep the process moving"],
+                "narration": narration,
+                "video_speed": 2.5,
+                "pause": False,
+            }
+            for i in range(9)
+        ]
+        sped_seconds = sum(commentary._block_visual_duration(block) for block in blocks)
+        self.assertLess(sped_seconds, 360.0 * 0.9)
+
+        protected = commentary._protect_full_mode_visual_budget_after_speed(blocks, 700.0, "full")
+
+        self.assertGreaterEqual(
+            sum(commentary._block_visual_duration(block) for block in protected),
+            commentary._target_visual_duration_seconds(700.0, "full") * 0.9,
+        )
+        self.assertGreater(
+            len([block for block in protected if commentary._safe_video_speed(block.get("video_speed")) == 1.0]),
+            0,
+        )
+
+    def test_full_mode_speed_budget_preserves_short_complete_process_runtime(self):
+        narration = "这一段解说紧贴实际动作，把工人处理蜂巢、树干位置和蜂群变化讲清楚。"
+        blocks = [
+            {
+                "start": i * 67.84,
+                "end": (i + 1) * 67.84,
+                "visual": "slow repetitive beehive work on tree trunk",
+                "visual_facts": ["worker keeps handling the beehive on the tree trunk"],
+                "narration": narration,
+                "video_speed": 1.45,
+                "pause": False,
+            }
+            for i in range(10)
+        ]
+        self.assertLess(
+            sum(commentary._block_visual_duration(block) for block in blocks),
+            678.4 * 0.75,
+        )
+
+        protected = commentary._protect_full_mode_visual_budget_after_speed(blocks, 678.4, "full")
+
+        self.assertGreaterEqual(
+            sum(commentary._block_visual_duration(block) for block in protected),
+            commentary._target_visual_duration_seconds(678.4, "full") * 0.9,
+        )
 
     def test_edge_voiceover_passes_rate_and_pitch_to_edge_tts(self):
         calls = []
@@ -1631,6 +3141,49 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             commentary._extract_original_audio_clip("source.mp4", 1.0, 2.0, "out.m4a", volume=0.6)
 
         self.assertEqual("volume=0.6", commands[0][commands[0].index("-af") + 1])
+
+    def test_background_music_bed_loops_and_fades_to_target_duration(self):
+        commands = []
+
+        def fake_run_command(cmd, cwd=None):
+            commands.append(cmd)
+
+        with patch.object(commentary, "_run_command", side_effect=fake_run_command):
+            result = commentary._create_background_music_bed("music.mp3", "bgm.m4a", 12.0, volume=0.16)
+
+        self.assertEqual("bgm.m4a", result)
+        command = commands[0]
+        self.assertIn("-stream_loop", command)
+        self.assertEqual("-1", command[command.index("-stream_loop") + 1])
+        self.assertEqual("12.000", command[command.index("-t") + 1])
+        audio_filter = command[command.index("-af") + 1]
+        self.assertIn("volume=0.16", audio_filter)
+        self.assertIn("afade=t=out:st=10.500:d=1.500", audio_filter)
+
+    def test_mix_voiceover_with_video_can_include_background_music(self):
+        commands = []
+
+        def fake_run_command(cmd, cwd=None):
+            commands.append(cmd)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(commentary, "_run_command", side_effect=fake_run_command):
+            voice_path = os.path.join(tmpdir, "voice.m4a")
+            ambient_path = os.path.join(tmpdir, "ambient.m4a")
+            background_path = os.path.join(tmpdir, "background.m4a")
+            for path in (voice_path, ambient_path, background_path):
+                open(path, "wb").close()
+            commentary._mix_voiceover_with_video(
+                video_path="video.mp4",
+                voiceover_path=voice_path,
+                output_path="out.mp4",
+                ambient_audio_path=ambient_path,
+                background_music_path=background_path,
+            )
+
+        command = commands[0]
+        filter_complex = command[command.index("-filter_complex") + 1]
+        self.assertIn("amix=inputs=3", filter_complex)
+        self.assertIn(background_path, command)
 
     def test_extract_original_audio_clip_applies_speed_and_output_duration(self):
         commands = []
@@ -1690,7 +3243,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     f.write(b"media")
 
             blocks = [
-                {"start": 0, "end": 12, "visual": "worker action", "narration": "画面里工人正在处理铜料。", "rate": "+12%", "pitch": "+3Hz"},
+                {"start": 0, "end": 12, "visual": "worker action", "narration": "工人正在处理铜料。", "rate": "+12%", "pitch": "+3Hz"},
                 {"start": 12, "end": 20, "visual": "machine sound reveal", "narration": "", "pause": True},
             ]
             with patch.object(commentary, "_get_video_duration", return_value=20.0), \
@@ -1756,7 +3309,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 with open(cmd[-1], "wb") as f:
                     f.write(b"media")
 
-            blocks = scene_matched_blocks(count=2, seconds=12.0, text="画面里工人正在处理铜料。")
+            blocks = scene_matched_blocks(count=2, seconds=12.0, text="工人正在处理铜料。")
             with patch.object(commentary, "_get_video_duration", return_value=24.0), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover) as voiceover, \
                 patch.object(commentary, "_get_audio_duration", return_value=11.0), \
@@ -1861,7 +3414,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual(ambient_audio_path, ambient)
         self.assertEqual([6.0], block_durations)
 
-    def test_block_synced_render_tightens_visuals_when_tts_is_short(self):
+    def test_block_synced_render_preserves_visuals_when_tts_is_short(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = os.path.join(tmpdir, "source.mp4")
             open(video_path, "wb").close()
@@ -1894,12 +3447,12 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
             blocks = [{
                 "start": 0,
-                "end": 12,
+                "end": 37.5,
                 "visual": "long repetitive conveyor footage",
                 "narration": "这句解说很短，不能让后面十几秒都没声音。",
                 "video_speed": 1.0,
             }]
-            with patch.object(commentary, "_get_video_duration", return_value=12.0), \
+            with patch.object(commentary, "_get_video_duration", return_value=37.5), \
                 patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
                 patch.object(commentary, "_get_audio_duration", return_value=3.0), \
                 patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
@@ -1924,16 +3477,16 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 )
 
         self.assertEqual(1, len(fit_calls))
-        self.assertAlmostEqual(4.5, fit_calls[0][2], places=2)
+        self.assertAlmostEqual(37.5, fit_calls[0][2], places=2)
         video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
         self.assertEqual(1, len(video_cmds))
-        self.assertEqual("12.000", video_cmds[0][video_cmds[0].index("-t") + 1])
-        self.assertIn("setpts=PTS/2.667000", video_cmds[0][video_cmds[0].index("-vf") + 1])
-        self.assertAlmostEqual(2.667, original_audio_calls[0][4], places=3)
-        self.assertAlmostEqual(4.5, original_audio_calls[0][5], places=2)
-        self.assertTrue(any("Tightening commentary block" in message for message in progress_messages))
+        self.assertEqual("37.500", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertNotIn("setpts=PTS/", video_cmds[0][video_cmds[0].index("-vf") + 1])
+        self.assertAlmostEqual(1.0, original_audio_calls[0][4], places=3)
+        self.assertAlmostEqual(37.5, original_audio_calls[0][5], places=2)
+        self.assertFalse(any("Tightening commentary block" in message for message in progress_messages))
         self.assertEqual(ambient_audio_path, ambient)
-        self.assertAlmostEqual(4.5, block_durations[0], places=2)
+        self.assertAlmostEqual(37.5, block_durations[0], places=2)
 
     def test_full_duration_rejects_missing_narration_blocks(self):
         with self.assertRaisesRegex(Exception, "narration_blocks are required"):
@@ -1947,25 +3500,24 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 language="zh",
             )
 
-    def test_full_duration_rejects_short_narration_with_timestamp_blocks(self):
-        short_text = "这些废旧电机最终会被回收成铜材。"
+    def test_full_duration_accepts_short_narration_with_timestamp_blocks(self):
+        short_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
         blocks = [
-            {"start": i * 280, "end": i * 280 + 90, "visual": "full process", "narration": short_text}
+            {"start": i * 280, "end": i * 280 + 50, "visual": "full process", "narration": short_text}
             for i in range(11)
         ]
-        blocks.append({"start": 3600, "end": 3690, "visual": "ending process", "narration": short_text})
+        blocks.append({"start": 3600, "end": 3650, "visual": "ending process", "narration": short_text})
 
-        with self.assertRaisesRegex(Exception, "too short"):
-            commentary._validate_commentary_script_for_target(
-                {
-                    "narration": short_text,
-                    "narration_blocks": blocks,
-                    "edit_segments": [{"start": 0, "end": 700, "reason": "process"}],
-                },
-                duration=3935,
-                target_duration="full",
-                language="zh",
-            )
+        commentary._validate_commentary_script_for_target(
+            {
+                "narration": short_text,
+                "narration_blocks": blocks,
+                "edit_segments": [{"start": 0, "end": 700, "reason": "process"}],
+            },
+            duration=3935,
+            target_duration="full",
+            language="zh",
+        )
 
     def test_full_duration_rejects_overlong_narration_before_tts(self):
         target_seconds = commentary._target_visual_duration_seconds(3935, "full")
@@ -1987,54 +3539,115 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 language="zh",
             )
 
-    def test_full_duration_rejects_excessive_pause_ratio(self):
-        narration = "讲" * 4000
+    def test_full_duration_repairs_excessive_pause_ratio(self):
+        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 20)
+        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 22)
+        late_text = repeated_scene_text("后段时间线呈现最终结果和收尾状态", 24)
+        narration = opening_text + ending_text + late_text
         blocks = [
-            {"start": 0, "end": 400, "visual": "opening process", "narration": "讲" * 1800, "pause": False},
-            {"start": 400, "end": 700, "visual": "too much source audio", "narration": "", "pause": True},
-            {"start": 700, "end": 1200, "visual": "ending process", "narration": "讲" * 2200, "pause": False},
+            {"start": 0, "end": 190, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},
+            {"start": 190, "end": 250, "visual": "too much source audio", "narration": "", "pause": True},
+            {"start": 700, "end": 920, "visual": "ending process with visible finished material and result", "visual_facts": ["finished material is shown after the process"], "narration": ending_text, "pause": False},
+            {"start": 3400, "end": 3600, "visual": "late source result reveal with visible final output", "visual_facts": ["the later timeline shows the final output"], "narration": late_text, "pause": False},
+        ]
+        data = {"narration": narration, "narration_blocks": blocks}
+
+        commentary._validate_commentary_script_for_target(
+            data,
+            duration=3935,
+            target_duration="full",
+            language="zh",
+        )
+        repaired_pauses = [block for block in data["narration_blocks"] if block.get("pause")]
+        self.assertEqual(1, len(repaired_pauses))
+        self.assertLessEqual(commentary._block_visual_duration(repaired_pauses[0]), commentary.FULL_MODE_MAX_PAUSE_SECONDS)
+
+    def test_full_duration_repairs_overlong_pause_block(self):
+        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 22)
+        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 22)
+        late_text = repeated_scene_text("后段时间线呈现最终结果和收尾状态", 24)
+        narration = opening_text + ending_text + late_text
+        blocks = [
+            {"start": 0, "end": 220, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},
+            {"start": 220, "end": 257, "visual": "long source audio beat", "narration": "", "pause": True},
+            {"start": 605, "end": 825, "visual": "ending process with visible finished material and result", "visual_facts": ["finished material is shown after the process"], "narration": ending_text, "pause": False},
+            {"start": 3400, "end": 3600, "visual": "late source result reveal with visible final output", "visual_facts": ["the later timeline shows the final output"], "narration": late_text, "pause": False},
+        ]
+        data = {"narration": narration, "narration_blocks": blocks}
+
+        commentary._validate_commentary_script_for_target(
+            data,
+            duration=3935,
+            target_duration="full",
+            language="zh",
+        )
+        repaired_pause = [block for block in data["narration_blocks"] if block.get("pause")][0]
+        self.assertEqual(220.0, repaired_pause["start"])
+        self.assertLessEqual(
+            commentary._block_visual_duration(repaired_pause),
+            commentary.FULL_MODE_MAX_PAUSE_SECONDS,
+        )
+
+    def test_normalize_narration_blocks_merges_adjacent_pause_blocks(self):
+        blocks = commentary._normalize_narration_blocks(
+            [
+                {"start": 0, "end": 8, "visual": "first source audio beat", "narration": "", "pause": True},
+                {"start": 8, "end": 16, "visual": "second source audio beat", "narration": "", "pause": True},
+                {"start": 16, "end": 30, "visual": "worker resumes", "narration": "工人继续往前推进。", "pause": False},
+            ],
+            60,
+        )
+
+        self.assertEqual(2, len(blocks))
+        self.assertTrue(blocks[0]["pause"])
+        self.assertEqual(0.0, blocks[0]["start"])
+        self.assertEqual(16.0, blocks[0]["end"])
+        self.assertIn("first source audio beat", blocks[0]["visual"])
+        self.assertIn("second source audio beat", blocks[0]["visual"])
+
+    def test_full_duration_allows_adjacent_short_pause_blocks_after_normalization(self):
+        opening_text = repeated_scene_text("工人处理材料并把材料送到下一步", 45)
+        ending_text = repeated_scene_text("后段流程呈现最终材料结果", 45)
+        narration = opening_text + ending_text
+        blocks = [
+            {"start": 0, "end": 280, "visual": "opening process", "visual_facts": ["opening process shows workers handling material"], "narration": opening_text, "pause": False},
+            {"start": 280, "end": 288, "visual": "first source audio beat", "narration": "", "pause": True},
+            {"start": 288, "end": 296, "visual": "second source audio beat", "narration": "", "pause": True},
+            {"start": 3400, "end": 3700, "visual": "ending process", "visual_facts": ["ending process shows the final material result"], "narration": ending_text, "pause": False},
         ]
 
-        with self.assertRaisesRegex(Exception, "too much no-commentary footage"):
-            commentary._validate_commentary_script_for_target(
-                {"narration": narration, "narration_blocks": blocks},
-                duration=3935,
-                target_duration="full",
-                language="zh",
-            )
+        commentary._validate_commentary_script_for_target(
+            {"narration": narration, "narration_blocks": blocks},
+            duration=3935,
+            target_duration="full",
+            language="zh",
+        )
 
-    def test_full_duration_rejects_overlong_pause_block(self):
-        narration = "讲" * 4800
+    def test_full_duration_repairs_adjacent_pause_blocks_when_merged_pause_is_too_long(self):
+        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 45)
+        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 45)
+        narration = opening_text + ending_text
         blocks = [
-            {"start": 0, "end": 590, "visual": "opening process", "narration": "讲" * 2400, "pause": False},
-            {"start": 590, "end": 605, "visual": "long source audio beat", "narration": "", "pause": True},
-            {"start": 605, "end": 1200, "visual": "ending process", "narration": "讲" * 2400, "pause": False},
+            {"start": 0, "end": 280, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},
+            {"start": 280, "end": 288, "visual": "first source audio beat", "narration": "", "pause": True},
+            {"start": 288, "end": 296, "visual": "second source audio beat", "narration": "", "pause": True},
+            {"start": 296, "end": 304, "visual": "third source audio beat", "narration": "", "pause": True},
+            {"start": 3400, "end": 3700, "visual": "ending process with visible finished material and result", "visual_facts": ["finished material is shown after the process"], "narration": ending_text, "pause": False},
         ]
+        data = {"narration": narration, "narration_blocks": blocks}
 
-        with self.assertRaisesRegex(Exception, "overlong no-commentary pause block"):
-            commentary._validate_commentary_script_for_target(
-                {"narration": narration, "narration_blocks": blocks},
-                duration=3935,
-                target_duration="full",
-                language="zh",
-            )
-
-    def test_full_duration_rejects_consecutive_pause_blocks(self):
-        narration = "讲" * 4800
-        blocks = [
-            {"start": 0, "end": 580, "visual": "opening process", "narration": "讲" * 2400, "pause": False},
-            {"start": 580, "end": 588, "visual": "first source audio beat", "narration": "", "pause": True},
-            {"start": 588, "end": 596, "visual": "second source audio beat", "narration": "", "pause": True},
-            {"start": 596, "end": 1200, "visual": "ending process", "narration": "讲" * 2400, "pause": False},
-        ]
-
-        with self.assertRaisesRegex(Exception, "consecutive no-commentary pause blocks"):
-            commentary._validate_commentary_script_for_target(
-                {"narration": narration, "narration_blocks": blocks},
-                duration=3935,
-                target_duration="full",
-                language="zh",
-            )
+        commentary._validate_commentary_script_for_target(
+            data,
+            duration=3935,
+            target_duration="full",
+            language="zh",
+        )
+        repaired_pause = [block for block in data["narration_blocks"] if block.get("pause")][0]
+        self.assertEqual(280.0, repaired_pause["start"])
+        self.assertLessEqual(
+            commentary._block_visual_duration(repaired_pause),
+            commentary.FULL_MODE_MAX_PAUSE_SECONDS,
+        )
 
     def test_gemini_zero_region_quota_error_is_actionable_without_retrying(self):
         transcript = {
@@ -2073,7 +3686,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual(1, fake_models.calls)
 
-    def test_full_duration_short_narration_is_retried_with_video_grounded_regeneration_prompt(self):
+    def test_full_duration_missing_narration_blocks_is_retried_with_video_grounded_regeneration_prompt(self):
         transcript = {
             "text": "factory process",
             "language": "en",
@@ -2083,7 +3696,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "title": "Short",
             "summary": "summary",
             "hook": "hook",
-            "narration": "太短了。" * 30,
+            "narration": "这些废旧电机最终会被回收成铜材。",
             "edit_segments": [{"start": 0, "end": 700, "reason": "process"}],
             "chapters": [],
             "hashtags": [],

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, CheckCircle, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { Activity, CheckCircle, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
 import { getApiUrl } from '../config'
 import { buildGeminiHeaders, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
@@ -13,12 +13,49 @@ const STYLE_OPTIONS = [
   { id: 'storytelling', label: '故事化旁白' },
   { id: 'funny', label: '轻松吐槽' },
   { id: 'educational', label: '知识科普' },
+  { id: 'custom', label: '自定义提示词' },
 ]
+
+const CUSTOM_STYLE_STORAGE_KEY = 'openshorts.commentary.customStyleOptions'
+const CUSTOM_STYLE_PREFIX = 'custom:'
+
+const createCustomStyleId = () => `${CUSTOM_STYLE_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+
+const normalizeCustomStyleOptions = (items) => {
+  if (!Array.isArray(items)) return []
+  return items
+    .map((item) => ({
+      id: String(item?.id || '').trim(),
+      label: String(item?.label || '').trim(),
+      prompt: String(item?.prompt || '').trim(),
+      custom: true,
+    }))
+    .filter((item) => item.id.startsWith(CUSTOM_STYLE_PREFIX) && item.label && item.prompt)
+    .slice(0, 50)
+}
+
+const loadCustomStyleOptions = () => {
+  if (typeof window === 'undefined') return []
+  try {
+    return normalizeCustomStyleOptions(JSON.parse(window.localStorage.getItem(CUSTOM_STYLE_STORAGE_KEY) || '[]'))
+  } catch {
+    return []
+  }
+}
+
+const saveCustomStyleOptions = (items) => {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(CUSTOM_STYLE_STORAGE_KEY, JSON.stringify(normalizeCustomStyleOptions(items)))
+}
 
 const DURATION_OPTIONS = [
   { id: 'medium', label: '3-5 分钟' },
   { id: 'short', label: '60-90 秒' },
   { id: 'full', label: '尽量完整（自动精简）' },
+]
+
+const FALLBACK_BACKGROUND_MUSIC_TRACKS = [
+  { id: 'aodebiao_caravan', label: '默认 奥德彪专属音乐', available: true },
 ]
 
 const VOICE_PREVIEW_TEXT = {
@@ -147,12 +184,26 @@ const EDGE_VOICE_OPTIONS = {
   ],
 }
 
+async function readErrorMessage(res, fallback) {
+  const rawText = await res.text().catch(() => '')
+  if (!rawText) return fallback
+  try {
+    const data = JSON.parse(rawText)
+    return data.detail || data.message || rawText
+  } catch {
+    return rawText
+  }
+}
+
 export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfig, openAICompatibleConfig, elevenLabsKey, setGeminiKeyPoolStats }) {
   const [sourceMode, setSourceMode] = useState('url')
   const [url, setUrl] = useState('')
   const [videoFile, setVideoFile] = useState(null)
   const [language, setLanguage] = useState(COMMENTARY_DEFAULTS.language)
   const [style, setStyle] = useState(COMMENTARY_DEFAULTS.style)
+  const [customStylePrompt, setCustomStylePrompt] = useState(COMMENTARY_DEFAULTS.customStylePrompt)
+  const [customStyleName, setCustomStyleName] = useState('')
+  const [customStyleOptions, setCustomStyleOptions] = useState(loadCustomStyleOptions)
   const [targetDuration, setTargetDuration] = useState(COMMENTARY_DEFAULTS.targetDuration)
   const [analysisMode, setAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
   const [activeAnalysisMode, setActiveAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
@@ -168,6 +219,10 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [openAIVisualConcurrency, setOpenAIVisualConcurrency] = useState(COMMENTARY_DEFAULTS.openAIVisualConcurrency)
   const [commentaryBlockConcurrency, setCommentaryBlockConcurrency] = useState(COMMENTARY_DEFAULTS.commentaryBlockConcurrency)
   const [autoVideoSpeed, setAutoVideoSpeed] = useState(COMMENTARY_DEFAULTS.autoVideoSpeed)
+  const [backgroundMusicEnabled, setBackgroundMusicEnabled] = useState(COMMENTARY_DEFAULTS.backgroundMusicEnabled)
+  const [backgroundMusicTrack, setBackgroundMusicTrack] = useState(COMMENTARY_DEFAULTS.backgroundMusicTrack)
+  const [backgroundMusicVolume, setBackgroundMusicVolume] = useState(COMMENTARY_DEFAULTS.backgroundMusicVolume)
+  const [backgroundMusicTracks, setBackgroundMusicTracks] = useState(FALLBACK_BACKGROUND_MUSIC_TRACKS)
   const [subtitles, setSubtitles] = useState(true)
   const [aspectMode, setAspectMode] = useState('auto')
   const [jobId, setJobId] = useState(null)
@@ -198,10 +253,19 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       ? buildOpenAICompatibleHeaders(openAICompatibleConfig, extraHeaders)
       : buildGeminiHeaders(geminiConfig || geminiApiKey, geminiBaseUrl, extraHeaders)
   )
+  const styleOptions = [...STYLE_OPTIONS, ...customStyleOptions]
+  const selectedCustomStyle = customStyleOptions.find((item) => item.id === style)
+  const isCustomStyleEditorVisible = style === 'custom' || Boolean(selectedCustomStyle)
+  const effectiveStyle = selectedCustomStyle ? selectedCustomStyle.label : style
+  const effectiveCustomStylePrompt = isCustomStyleEditorVisible ? customStylePrompt : ''
 
   useEffect(() => {
     setEdgeVoice(getDefaultEdgeVoiceForLanguage(language))
   }, [language])
+
+  useEffect(() => {
+    saveCustomStyleOptions(customStyleOptions)
+  }, [customStyleOptions])
 
   useEffect(() => {
     return () => {
@@ -226,6 +290,27 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   useEffect(() => {
     refreshCommentaryTasks()
   }, [refreshCommentaryTasks])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadBackgroundMusicTracks = async () => {
+      try {
+        const res = await fetch(getApiUrl('/api/commentary/background-music'))
+        if (!res.ok) throw new Error('Failed to load background music tracks')
+        const data = await res.json()
+        if (!cancelled && Array.isArray(data.tracks) && data.tracks.length > 0) {
+          setBackgroundMusicTracks(data.tracks)
+          if (!data.tracks.some((track) => track.id === backgroundMusicTrack)) {
+            setBackgroundMusicTrack(data.tracks[0].id)
+          }
+        }
+      } catch {
+        if (!cancelled) setBackgroundMusicTracks(FALLBACK_BACKGROUND_MUSIC_TRACKS)
+      }
+    }
+    loadBackgroundMusicTracks()
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     if (!jobId || status !== 'processing') return undefined
@@ -339,7 +424,26 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     if (sourceType) setSourceMode(sourceType === 'file' ? 'file' : 'url')
     if (request.url !== undefined) setUrl(request.url || '')
     if (request.language) setLanguage(request.language)
-    if (request.style) setStyle(request.style)
+    if (request.style) {
+      const savedCustomStyle = customStyleOptions.find((item) => item.id === request.style)
+      if (savedCustomStyle) {
+        setStyle(savedCustomStyle.id)
+        setCustomStyleName(savedCustomStyle.label)
+      } else if (request.custom_style_prompt) {
+        const recoveredOption = {
+          id: createCustomStyleId(),
+          label: request.style,
+          prompt: request.custom_style_prompt,
+          custom: true,
+        }
+        setCustomStyleOptions((items) => [...items, recoveredOption])
+        setStyle(recoveredOption.id)
+        setCustomStyleName(recoveredOption.label)
+      } else {
+        setStyle(request.style)
+      }
+    }
+    if (request.custom_style_prompt !== undefined) setCustomStylePrompt(request.custom_style_prompt || '')
     if (request.target_duration) setTargetDuration(request.target_duration)
     if (request.analysis_mode) setAnalysisMode(request.analysis_mode)
     if (request.tts_provider) setTtsProvider(request.tts_provider)
@@ -354,8 +458,45 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     if (request.openai_visual_concurrency !== undefined) setOpenAIVisualConcurrency(request.openai_visual_concurrency)
     if (request.commentary_block_concurrency !== undefined) setCommentaryBlockConcurrency(request.commentary_block_concurrency)
     if (request.auto_video_speed !== undefined) setAutoVideoSpeed(Boolean(request.auto_video_speed))
+    if (request.background_music_enabled !== undefined) setBackgroundMusicEnabled(Boolean(request.background_music_enabled))
+    if (request.background_music_track) setBackgroundMusicTrack(request.background_music_track)
+    if (request.background_music_volume !== undefined) setBackgroundMusicVolume(request.background_music_volume)
     if (request.subtitles !== undefined) setSubtitles(Boolean(request.subtitles))
     if (request.aspect_mode) setAspectMode(request.aspect_mode)
+  }
+
+  const handleStyleChange = (nextStyle) => {
+    setAttachedTaskRequest(null)
+    setStyle(nextStyle)
+    const customOption = customStyleOptions.find((item) => item.id === nextStyle)
+    if (customOption) {
+      setCustomStyleName(customOption.label)
+      setCustomStylePrompt(customOption.prompt)
+    } else if (nextStyle === 'custom') {
+      setCustomStyleName('')
+      setCustomStylePrompt('')
+    }
+  }
+
+  const handleSaveCustomStyleOption = () => {
+    const label = customStyleName.trim()
+    const prompt = customStylePrompt.trim()
+    if (!label || !prompt) {
+      setError('请填写自定义风格名称和提示词')
+      return
+    }
+    const nextOption = {
+      id: selectedCustomStyle?.id || createCustomStyleId(),
+      label,
+      prompt,
+      custom: true,
+    }
+    setCustomStyleOptions((items) => {
+      const withoutCurrent = items.filter((item) => item.id !== nextOption.id)
+      return [...withoutCurrent, nextOption]
+    })
+    setStyle(nextOption.id)
+    setError('')
   }
 
   const createCommentaryJobWithUploadProgress = (headers, requestBody) => new Promise((resolve, reject) => {
@@ -438,14 +579,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         body: JSON.stringify({}),
       })
       if (!res.ok) {
-        let message = 'Retry failed'
-        try {
-          const responseData = await res.json()
-          message = responseData.detail || message
-        } catch {
-          message = await res.text()
-        }
-        throw new Error(message)
+        throw new Error(await readErrorMessage(res, 'Retry failed'))
       }
       const data = await res.json()
       setAttachedTaskRequest(task.request || null)
@@ -519,7 +653,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         const formData = new FormData()
         formData.append('file', videoFile)
         formData.append('language', language)
-        formData.append('style', style)
+        formData.append('style', effectiveStyle)
+        formData.append('custom_style_prompt', effectiveCustomStylePrompt)
         formData.append('target_duration', targetDuration)
         formData.append('analysis_mode', analysisMode)
         if (analysisMode === 'openai') {
@@ -535,6 +670,9 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         formData.append('original_audio_volume', String(Number(originalAudioVolume)))
         formData.append('pause_original_audio_volume', String(Number(pauseOriginalAudioVolume)))
         formData.append('auto_video_speed', String(autoVideoSpeed))
+        formData.append('background_music_enabled', String(backgroundMusicEnabled))
+        formData.append('background_music_track', backgroundMusicTrack)
+        formData.append('background_music_volume', String(Number(backgroundMusicVolume)))
         formData.append('subtitles', String(subtitles))
         formData.append('aspect_mode', aspectMode)
         formData.append('vertical', String(aspectMode === '9:16'))
@@ -544,7 +682,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         requestBody = JSON.stringify({
           url: url.trim(),
           language,
-          style,
+          style: effectiveStyle,
+          custom_style_prompt: effectiveCustomStylePrompt,
           target_duration: targetDuration,
           analysis_mode: analysisMode,
           openai_model: analysisMode === 'openai' ? openAICompatibleConfig?.model : undefined,
@@ -555,6 +694,9 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
           original_audio_volume: Number(originalAudioVolume),
           pause_original_audio_volume: Number(pauseOriginalAudioVolume),
           auto_video_speed: autoVideoSpeed,
+          background_music_enabled: backgroundMusicEnabled,
+          background_music_track: backgroundMusicTrack,
+          background_music_volume: Number(backgroundMusicVolume),
           subtitles,
           aspect_mode: aspectMode,
           vertical: aspectMode === '9:16',
@@ -572,14 +714,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         })
 
         if (!res.ok) {
-          let message = 'Generation failed'
-          try {
-            const responseData = await res.json()
-            message = responseData.detail || message
-          } catch {
-            message = await res.text()
-          }
-          throw new Error(message)
+          throw new Error(await readErrorMessage(res, 'Generation failed'))
         }
 
         data = await res.json()
@@ -740,6 +875,10 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const displayedOpenAIVisualConcurrency = attachedTaskRequest?.openai_visual_concurrency ?? openAIVisualConcurrency
   const displayedCommentaryBlockConcurrency = attachedTaskRequest?.commentary_block_concurrency ?? commentaryBlockConcurrency
   const displayedAutoVideoSpeed = attachedTaskRequest?.auto_video_speed ?? autoVideoSpeed
+  const displayedBackgroundMusicEnabled = attachedTaskRequest?.background_music_enabled ?? backgroundMusicEnabled
+  const displayedBackgroundMusicTrack = attachedTaskRequest?.background_music_track ?? backgroundMusicTrack
+  const displayedBackgroundMusicVolume = attachedTaskRequest?.background_music_volume ?? backgroundMusicVolume
+  const selectedBackgroundMusicTrack = backgroundMusicTracks.find((track) => track.id === displayedBackgroundMusicTrack) || backgroundMusicTracks[0]
   const speedSummary = result?.auto_video_speed_summary
   const commentaryEpisodes = Array.isArray(result?.episodes) ? result.episodes : []
   const episodePlan = result?.episode_plan
@@ -887,10 +1026,42 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               </div>
               <div>
                 <label className="block text-sm text-zinc-300 mb-2">解说风格</label>
-                <select value={style} onChange={(e) => setStyle(e.target.value)} className="input-field">
-                  {STYLE_OPTIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                <select value={style} onChange={(e) => handleStyleChange(e.target.value)} className="input-field">
+                  {styleOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                 </select>
               </div>
+              {isCustomStyleEditorVisible && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm text-zinc-300 mb-2">自定义风格名称</label>
+                  <input
+                    value={customStyleName}
+                    onChange={(e) => {
+                      setAttachedTaskRequest(null)
+                      setCustomStyleName(e.target.value)
+                    }}
+                    className="input-field mb-3"
+                    maxLength={40}
+                    placeholder="例如：第一人称紧张整活"
+                  />
+                  <label className="block text-sm text-zinc-300 mb-2">自定义风格提示词</label>
+                  <textarea
+                    value={customStylePrompt}
+                    onChange={(e) => {
+                      setAttachedTaskRequest(null)
+                      setCustomStylePrompt(e.target.value)
+                    }}
+                    className="input-field min-h-[120px] resize-y"
+                    maxLength={2000}
+                    placeholder="例如：用第一人称紧张整活口吻，句子短一点，先说画面动作，再加反差吐槽；不要脱离画面编剧情。"
+                  />
+                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-3">
+                    <button type="button" onClick={handleSaveCustomStyleOption} className="btn-secondary text-sm px-4 py-2">
+                      {selectedCustomStyle ? '更新下拉框选项' : '添加到下拉框'}
+                    </button>
+                    <p className="text-xs text-zinc-500">保存后会出现在“解说风格”下拉框里，并自动使用这段提示词。</p>
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="block text-sm text-zinc-300 mb-2">目标长度</label>
                 <select value={targetDuration} onChange={(e) => setTargetDuration(e.target.value)} className="input-field">
@@ -936,12 +1107,12 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">视觉分析并发数</label>
                       <input type="number" min="1" max="8" step="1" value={displayedOpenAIVisualConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setOpenAIVisualConcurrency(e.target.value) }} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 5。</p>
+                      <p className="text-xs text-zinc-500 mt-1">同时请求多少个视觉 batch；提高可加速全片分析，但可能触发限流。默认 2。</p>
                     </div>
                     <div>
                       <label className="block text-sm text-zinc-300 mb-2">解说分块生成并发数</label>
                       <input type="number" min="1" max="8" step="1" value={displayedCommentaryBlockConcurrency} onChange={(e) => { setAttachedTaskRequest(null); setCommentaryBlockConcurrency(e.target.value) }} className="input-field" />
-                      <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 5。</p>
+                      <p className="text-xs text-zinc-500 mt-1">整视频二创解说时，同时生成多少个配音/画面同步 block；提高可加速语音阶段，但可能触发 TTS 限流或增加本机负载。默认 2。</p>
                     </div>
                   </div>
                 </div>
@@ -1020,6 +1191,63 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               <p className="text-xs text-zinc-500 mt-1">未选择强制比例时，原视频是 9:16 就保持竖屏，是 16:9 就保持横屏。</p>
             </div>
 
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={backgroundMusicEnabled}
+                  onChange={(e) => {
+                    setAttachedTaskRequest(null)
+                    setBackgroundMusicEnabled(e.target.checked)
+                  }}
+                />
+                <span>
+                  <span className="flex items-center gap-2 text-sm text-zinc-300">
+                    <Music2 size={16} className="text-cyan-300" /> 添加背景音乐
+                  </span>
+                  <span className="block text-xs text-zinc-500 mt-1">默认关闭；开启后会把所选音乐低音量循环铺底。</span>
+                </span>
+              </label>
+              {backgroundMusicEnabled && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-zinc-300 mb-2">背景音乐曲目</label>
+                    <select
+                      value={backgroundMusicTrack}
+                      onChange={(e) => {
+                        setAttachedTaskRequest(null)
+                        setBackgroundMusicTrack(e.target.value)
+                      }}
+                      className="input-field"
+                    >
+                      {backgroundMusicTracks.map((track) => (
+                        <option key={track.id} value={track.id} disabled={track.available === false}>
+                          {track.label || track.title || track.id}{track.available === false ? '（文件缺失）' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-zinc-300 mb-2">背景音乐音量：{Math.round(backgroundMusicVolume * 100)}%</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="0.5"
+                      step="0.01"
+                      value={backgroundMusicVolume}
+                      onChange={(e) => {
+                        setAttachedTaskRequest(null)
+                        setBackgroundMusicVolume(e.target.value)
+                      }}
+                      className="w-full"
+                    />
+                    <p className="text-xs text-zinc-500 mt-1">控制背景音乐铺底音量；默认 16%，想突出解说可调到 8%-12%。</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="grid sm:grid-cols-2 gap-3">
               <label className="flex items-start gap-3 p-4 rounded-xl border border-white/10 bg-white/[0.03] cursor-pointer">
                 <input type="checkbox" className="mt-1" checked={autoVideoSpeed} onChange={(e) => { setAttachedTaskRequest(null); setAutoVideoSpeed(e.target.checked) }} />
@@ -1072,6 +1300,22 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     <div className="text-zinc-500 mb-1">AI 自动变速</div>
                     <div className="text-zinc-100 font-semibold">{displayedAutoVideoSpeed ? '开启' : '关闭'}</div>
                   </div>
+                  {attachedTaskRequest.custom_style_prompt && (
+                    <div className="rounded-lg bg-black/20 border border-white/10 p-3 sm:col-span-2">
+                      <div className="text-zinc-500 mb-1">自定义风格提示词</div>
+                      <div className="line-clamp-3 text-zinc-100">{attachedTaskRequest.custom_style_prompt}</div>
+                    </div>
+                  )}
+                  <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                    <div className="text-zinc-500 mb-1">背景音乐</div>
+                    <div className="text-zinc-100 font-semibold">{displayedBackgroundMusicEnabled ? (selectedBackgroundMusicTrack?.label || '已开启') : '关闭'}</div>
+                  </div>
+                  {displayedBackgroundMusicEnabled && (
+                    <div className="rounded-lg bg-black/20 border border-white/10 p-3">
+                      <div className="text-zinc-500 mb-1">背景音乐音量</div>
+                      <div className="text-zinc-100 font-semibold">{Math.round(Number(displayedBackgroundMusicVolume || 0) * 100)}%</div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1136,6 +1380,12 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                           ? `AI 自动变速：${speedSummary.accelerated_count}/${speedSummary.total_blocks} 个片段加速，约节省 ${speedSummary.saved_seconds} 秒。`
                           : 'AI 自动变速：未发现适合加速的慢节奏片段，全部保持 1x。'
                         : 'AI 自动变速：已关闭，全部保持 1x。'}
+                    </div>
+                  )}
+                  {result.background_music_enabled && (
+                    <div className="mt-3 flex items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-zinc-300">
+                      <Music2 size={14} className="text-cyan-300" />
+                      背景音乐：{result.background_music_label || selectedBackgroundMusicTrack?.label || '默认 奥德彪专属音乐'} · 音量 {Math.round(Number(result.background_music_volume ?? displayedBackgroundMusicVolume ?? 0) * 100)}%
                     </div>
                   )}
                 </div>

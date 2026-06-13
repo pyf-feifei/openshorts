@@ -8,8 +8,9 @@ import {
   getDefaultEdgeVoiceForLanguage,
 } from './commentaryDefaults.js';
 
-test('commentary tab defaults match documentary Chinese remix setup', () => {
-  assert.equal(COMMENTARY_DEFAULTS.style, 'documentary');
+test('commentary tab defaults match hustle Chinese remix setup', () => {
+  assert.equal(COMMENTARY_DEFAULTS.style, 'hustle');
+  assert.equal(COMMENTARY_DEFAULTS.customStylePrompt, '');
   assert.equal(COMMENTARY_DEFAULTS.targetDuration, 'full');
   assert.equal(COMMENTARY_DEFAULTS.analysisMode, 'openai');
   assert.equal(COMMENTARY_DEFAULTS.edgeVoice, 'zh-CN-YunyangNeural');
@@ -19,8 +20,11 @@ test('commentary tab defaults match documentary Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.openAIMaxFrames, 1800);
   assert.equal(COMMENTARY_DEFAULTS.openAISceneMaxKeyframes, 60);
   assert.equal(COMMENTARY_DEFAULTS.openAIBatchSize, 46);
-  assert.equal(COMMENTARY_DEFAULTS.openAIVisualConcurrency, 5);
-  assert.equal(COMMENTARY_DEFAULTS.commentaryBlockConcurrency, 5);
+  assert.equal(COMMENTARY_DEFAULTS.openAIVisualConcurrency, 2);
+  assert.equal(COMMENTARY_DEFAULTS.commentaryBlockConcurrency, 2);
+  assert.equal(COMMENTARY_DEFAULTS.backgroundMusicEnabled, false);
+  assert.equal(COMMENTARY_DEFAULTS.backgroundMusicTrack, 'aodebiao_caravan');
+  assert.equal(COMMENTARY_DEFAULTS.backgroundMusicVolume, 0.16);
 });
 
 test('Chinese Edge voice default is Yunyang and other languages keep first option fallback', () => {
@@ -66,12 +70,34 @@ test('commentary exposes first-person hustle commentary style', () => {
   assert.match(source, /整活解说/);
 });
 
+test('commentary allows a custom style prompt under commentary style', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /id: 'custom'/);
+  assert.match(source, /自定义提示词/);
+  assert.match(source, /customStylePrompt/);
+  assert.match(source, /custom_style_prompt/);
+  assert.match(source, /自定义风格提示词/);
+  assert.match(source, /customStyleOptions/);
+  assert.match(source, /CUSTOM_STYLE_STORAGE_KEY/);
+  assert.match(source, /添加到下拉框/);
+  assert.match(source, /更新下拉框选项/);
+});
+
 test('commentary sends separate pause original audio volume', () => {
   const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
 
   assert.match(source, /pauseOriginalAudioVolume/);
   assert.match(source, /pause_original_audio_volume/);
   assert.match(source, /无解说片段原视频音量/);
+});
+
+test('commentary lets users configure background music volume', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /backgroundMusicVolume/);
+  assert.match(source, /background_music_volume/);
+  assert.match(source, /背景音乐音量/);
 });
 
 test('commentary allows larger OpenAI-compatible visual batches', () => {

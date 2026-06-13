@@ -97,6 +97,7 @@ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 COMMENTARY_MAX_UPLOAD_MB = int(os.environ.get("COMMENTARY_MAX_UPLOAD_MB", "8192"))
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
+COMMENTARY_JOB_RETENTION_SECONDS = int(os.environ.get("COMMENTARY_JOB_RETENTION_SECONDS", str(24 * 3600)))
 
 # Application State
 job_queue = asyncio.Queue()
@@ -105,6 +106,23 @@ thumbnail_sessions: Dict[str, Dict] = {}
 publish_jobs: Dict[str, Dict] = {}  # {publish_id: {status, result, error}}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+
+def is_active_commentary_output_dir(job_id: str) -> bool:
+    job = commentary_jobs.get(job_id)
+    return bool(job and job.get("status") == "processing") or commentary_job_is_active(job_id)
+
+
+def touch_output_dir(path: str) -> None:
+    try:
+        os.utime(path, None)
+    except Exception:
+        pass
+
+
+def is_commentary_output_dir_path(path: str) -> bool:
+    task_file = globals().get("COMMENTARY_TASK_FILE", "commentary_task.json")
+    return os.path.exists(os.path.join(path, task_file))
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -161,7 +179,11 @@ async def cleanup_jobs():
             for job_id in os.listdir(OUTPUT_DIR):
                 job_path = os.path.join(OUTPUT_DIR, job_id)
                 if os.path.isdir(job_path):
-                    if now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS:
+                    if is_active_commentary_output_dir(job_id):
+                        touch_output_dir(job_path)
+                        continue
+                    retention_seconds = COMMENTARY_JOB_RETENTION_SECONDS if is_commentary_output_dir_path(job_path) else JOB_RETENTION_SECONDS
+                    if now - os.path.getmtime(job_path) > retention_seconds:
                         print(f"🧹 Purging old job: {job_id}")
                         shutil.rmtree(job_path, ignore_errors=True)
                         if job_id in jobs:
@@ -459,9 +481,19 @@ from subtitles import generate_srt, burn_subtitles, generate_srt_from_video
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
-from commentary import DEFAULT_ANALYSIS_MODE, generate_commentary_video, generate_edge_voiceover, resolve_commentary_block_concurrency, resolve_openai_sampling_options
+from commentary import (
+    BACKGROUND_MUSIC_TRACKS,
+    DEFAULT_ANALYSIS_MODE,
+    DEFAULT_BACKGROUND_MUSIC_VOLUME,
+    generate_commentary_video,
+    generate_edge_voiceover,
+    get_background_music_tracks,
+    resolve_commentary_block_concurrency,
+    resolve_openai_sampling_options,
+)
 
 commentary_jobs: Dict[str, Dict] = {}
+active_commentary_job_ids = set()
 COMMENTARY_TASK_FILE = "commentary_task.json"
 COMMENTARY_PERSISTED_FIELDS = {
     "job_id",
@@ -491,18 +523,29 @@ COMMENTARY_PERSISTED_FIELDS = {
 
 COMMENTARY_STAGE_PATTERNS = [
     ("source", "准备源视频", "Preparing source video"),
+    ("transcribe", "转写原视频", "Transcribing full video"),
+    ("openai_frames", "抽取视觉分析帧", "Extracting dense timestamped frames"),
+    ("openai_frames", "检测场景并采样", "Detecting scenes for OpenAI-compatible scene-aware frame sampling"),
+    ("openai_frames", "抽取视觉分析帧", "Extracted OpenAI-compatible analysis frames"),
     ("analysis_compress", "压缩 Gemini 分析视频", "Compressing Gemini analysis video"),
     ("analysis_compress", "复用 Gemini 分析视频", "Reusing compressed Gemini analysis video"),
     ("analysis_upload", "上传 Gemini 分析副本", "Uploading 360p Gemini analysis video"),
     ("analysis_upload", "复用 Gemini 分析副本", "Reusing processed Gemini analysis video"),
     ("analysis_upload", "等待 Gemini 文件处理", "Gemini Files API processing"),
     ("openai", "OpenAI 兼容多模态分析", "OpenAI-compatible multimodal visual analysis"),
+    ("openai", "OpenAI 兼容多模态分析", "Analyzing OpenAI-compatible visual batch"),
+    ("openai", "OpenAI 兼容多模态分析", "OpenAI-compatible visual analysis returned"),
+    ("openai", "生成整片解说脚本", "Generating original commentary script with OpenAI-compatible"),
     ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model is writing"),
     ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model returned"),
     ("gemini", "Gemini 分析并写解说", "Gemini is analyzing"),
     ("gemini", "校验解说时间线", "validating timeline sync"),
+    ("voice", "生成分块解说语音", "Generating timestamp-synced commentary blocks"),
+    ("voice", "生成分块解说语音", "timestamp-synced commentary blocks"),
+    ("voice", "生成分块解说语音", "Generating synced commentary block"),
     ("voice", "生成语音并同步画面", "Generating synced commentary block"),
     ("voice", "生成解说语音", "Generating commentary voiceover"),
+    ("render", "准备背景音乐", "Preparing background music bed"),
     ("render", "合成最终视频", "Mixing new voiceover"),
     ("render", "生成字幕", "Generating text-timed subtitles"),
     ("done", "生成完成", "Commentary remix video completed"),
@@ -536,11 +579,14 @@ def save_commentary_task(job_id: str) -> None:
     if not job:
         return
     job["updated_at"] = now_iso()
-    os.makedirs(commentary_job_dir(job_id), exist_ok=True)
+    job_dir = commentary_job_dir(job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    touch_output_dir(job_dir)
     tmp_path = f"{commentary_task_path(job_id)}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(persistable_commentary_task(job), f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, commentary_task_path(job_id))
+    touch_output_dir(job_dir)
 
 
 def load_commentary_task(job_id: str) -> Optional[Dict]:
@@ -558,6 +604,30 @@ def load_commentary_task(job_id: str) -> Optional[Dict]:
     data.setdefault("logs", [])
     commentary_jobs[job_id] = data
     return data
+
+
+def commentary_job_is_active(job_id: str) -> bool:
+    return job_id in active_commentary_job_ids
+
+
+def mark_commentary_job_active(job_id: str) -> None:
+    active_commentary_job_ids.add(job_id)
+    touch_output_dir(commentary_job_dir(job_id))
+
+
+def mark_commentary_job_inactive(job_id: str) -> None:
+    active_commentary_job_ids.discard(job_id)
+
+
+def mark_stale_commentary_processing_state(job_id: str, job: Dict) -> None:
+    job.setdefault("logs", []).append("Marked stale processing state after backend restart; ready to retry.")
+    job["status"] = "failed"
+    job["stage"] = "failed"
+    job["stage_label"] = "生成失败"
+    job["stage_progress"] = None
+    job["error"] = "Previous commentary processing was interrupted by backend restart; please retry."
+    commentary_jobs[job_id] = job
+    save_commentary_task(job_id)
 
 
 def list_commentary_tasks(limit: int = 30) -> List[Dict]:
@@ -583,9 +653,14 @@ def update_commentary_stage(job_id: str, message: str) -> None:
             job["stage"] = stage
             job["stage_label"] = label
             break
-    match = re.search(r"(\d+)%", message)
-    if match:
-        job["stage_progress"] = int(match.group(1))
+    percent_match = re.search(r"(\d+)%", message)
+    ratio_match = re.search(r"(\d+)\s*/\s*(\d+)", message)
+    if percent_match:
+        job["stage_progress"] = int(percent_match.group(1))
+    elif ratio_match and int(ratio_match.group(2)) > 0:
+        done = int(ratio_match.group(1))
+        total = int(ratio_match.group(2))
+        job["stage_progress"] = max(0, min(100, int(done * 100 / total)))
     elif job.get("stage") not in {"analysis_compress", "upload"}:
         job["stage_progress"] = None
 
@@ -604,7 +679,8 @@ COMMENTARY_VOICE_PREVIEW_TEXT = {
 class CommentaryRequest(BaseModel):
     url: str
     language: str = "zh"
-    style: str = "documentary"
+    style: str = "hustle"
+    custom_style_prompt: Optional[str] = None
     target_duration: str = "medium"
     analysis_mode: str = DEFAULT_ANALYSIS_MODE
     gemini_model: Optional[str] = None
@@ -621,6 +697,9 @@ class CommentaryRequest(BaseModel):
     edge_voice: Optional[str] = None
     original_audio_volume: float = 0.3
     pause_original_audio_volume: float = 0.6
+    background_music_enabled: bool = False
+    background_music_track: str = "aodebiao_caravan"
+    background_music_volume: float = DEFAULT_BACKGROUND_MUSIC_VOLUME
     subtitles: bool = True
     vertical: bool = False
     aspect_mode: str = "auto"
@@ -639,6 +718,14 @@ def parse_form_float(value, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_volume(value, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(parsed, 1.0))
 
 
 def parse_form_optional_float(value) -> Optional[float]:
@@ -678,7 +765,8 @@ def commentary_request_from_form(form) -> CommentaryRequest:
     return CommentaryRequest(
         url=str(form.get("url") or ""),
         language=str(form.get("language") or "zh"),
-        style=str(form.get("style") or "documentary"),
+        style=str(form.get("style") or "hustle"),
+        custom_style_prompt=str(form.get("custom_style_prompt") or "") or None,
         target_duration=str(form.get("target_duration") or "medium"),
         analysis_mode=str(form.get("analysis_mode") or DEFAULT_ANALYSIS_MODE),
         gemini_model=str(form.get("gemini_model") or "") or None,
@@ -695,6 +783,9 @@ def commentary_request_from_form(form) -> CommentaryRequest:
         edge_voice=str(form.get("edge_voice") or "") or None,
         original_audio_volume=parse_form_float(form.get("original_audio_volume"), 0.3),
         pause_original_audio_volume=parse_form_float(form.get("pause_original_audio_volume"), 0.6),
+        background_music_enabled=parse_form_bool(form.get("background_music_enabled"), False),
+        background_music_track=str(form.get("background_music_track") or "aodebiao_caravan"),
+        background_music_volume=parse_form_float(form.get("background_music_volume"), DEFAULT_BACKGROUND_MUSIC_VOLUME),
         subtitles=parse_form_bool(form.get("subtitles"), True),
         vertical=parse_form_bool(form.get("vertical"), False),
         aspect_mode=str(form.get("aspect_mode") or "auto"),
@@ -1031,6 +1122,9 @@ async def commentary_generate(
         raise HTTPException(status_code=400, detail="Unsupported TTS provider")
     if tts_provider == "elevenlabs" and not elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+    if req.background_music_enabled and req.background_music_track not in BACKGROUND_MUSIC_TRACKS:
+        raise HTTPException(status_code=400, detail="Unsupported background music track")
+    req.background_music_volume = normalize_volume(req.background_music_volume, DEFAULT_BACKGROUND_MUSIC_VOLUME)
     req.commentary_block_concurrency = resolve_commentary_block_concurrency(req.commentary_block_concurrency)
 
     job_id = str(uuid.uuid4())
@@ -1112,6 +1206,7 @@ async def commentary_generate(
             await upload_file.close()
 
     def run_job():
+        mark_commentary_job_active(job_id)
         try:
             result = generate_commentary_video(
                 source=source_value,
@@ -1125,9 +1220,13 @@ async def commentary_generate(
                 edge_voice=req.edge_voice,
                 language=req.language,
                 style=req.style,
+                custom_style_prompt=req.custom_style_prompt,
                 target_duration=req.target_duration,
                 original_audio_volume=req.original_audio_volume,
                 pause_original_audio_volume=req.pause_original_audio_volume,
+                background_music_enabled=req.background_music_enabled,
+                background_music_track=req.background_music_track,
+                background_music_volume=req.background_music_volume,
                 subtitles=req.subtitles,
                 vertical=req.vertical,
                 aspect_mode=req.aspect_mode,
@@ -1166,6 +1265,8 @@ async def commentary_generate(
             commentary_jobs[job_id]["status"] = "failed"
             commentary_jobs[job_id]["error"] = error_text
             save_commentary_task(job_id)
+        finally:
+            mark_commentary_job_inactive(job_id)
 
     threading.Thread(target=run_job, daemon=True).start()
     return {"job_id": job_id, "status": "processing"}
@@ -1173,6 +1274,11 @@ async def commentary_generate(
 @app.get("/api/commentary/jobs")
 async def commentary_job_list():
     return {"jobs": list_commentary_tasks()}
+
+
+@app.get("/api/commentary/background-music")
+async def commentary_background_music_list():
+    return {"tracks": get_background_music_tracks()}
 
 
 @app.post("/api/commentary/jobs/{job_id}/retry")
@@ -1190,7 +1296,9 @@ async def commentary_retry(
     if not job:
         raise HTTPException(status_code=404, detail="Commentary job not found")
     if job.get("status") == "processing":
-        raise HTTPException(status_code=409, detail="Commentary job is already processing")
+        if commentary_job_is_active(job_id):
+            raise HTTPException(status_code=409, detail="Commentary job is already processing")
+        mark_stale_commentary_processing_state(job_id, job)
 
     body = {}
     if "application/json" in request.headers.get("content-type", ""):
@@ -1236,6 +1344,9 @@ async def commentary_retry(
     tts_provider = (req.tts_provider or "edge").lower()
     if tts_provider == "elevenlabs" and not elevenlabs_key:
         raise HTTPException(status_code=400, detail="Missing ElevenLabs API Key")
+    if req.background_music_enabled and req.background_music_track not in BACKGROUND_MUSIC_TRACKS:
+        raise HTTPException(status_code=400, detail="Unsupported background music track")
+    req.background_music_volume = normalize_volume(req.background_music_volume, DEFAULT_BACKGROUND_MUSIC_VOLUME)
     req.commentary_block_concurrency = resolve_commentary_block_concurrency(req.commentary_block_concurrency)
     job["request"] = commentary_request_to_dict(req)
 
@@ -1287,6 +1398,7 @@ async def commentary_retry(
         prepared_analysis_video_path = None
 
     def run_retry_job():
+        mark_commentary_job_active(job_id)
         try:
             result = generate_commentary_video(
                 source=source_value,
@@ -1300,9 +1412,13 @@ async def commentary_retry(
                 edge_voice=req.edge_voice,
                 language=req.language,
                 style=req.style,
+                custom_style_prompt=req.custom_style_prompt,
                 target_duration=req.target_duration,
                 original_audio_volume=req.original_audio_volume,
                 pause_original_audio_volume=req.pause_original_audio_volume,
+                background_music_enabled=req.background_music_enabled,
+                background_music_track=req.background_music_track,
+                background_music_volume=req.background_music_volume,
                 subtitles=req.subtitles,
                 vertical=req.vertical,
                 aspect_mode=req.aspect_mode,
@@ -1344,6 +1460,8 @@ async def commentary_retry(
             commentary_jobs[job_id]["status"] = "failed"
             commentary_jobs[job_id]["error"] = error_text
             save_commentary_task(job_id)
+        finally:
+            mark_commentary_job_inactive(job_id)
 
     threading.Thread(target=run_retry_job, daemon=True).start()
     return {"job_id": job_id, "status": "processing"}

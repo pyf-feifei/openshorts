@@ -1,6 +1,7 @@
 export const COMMENTARY_DEFAULTS = {
   language: 'zh',
-  style: 'documentary',
+  style: 'hustle',
+  customStylePrompt: '',
   targetDuration: 'full',
   analysisMode: 'openai',
   edgeVoice: 'zh-CN-YunyangNeural',
@@ -10,9 +11,12 @@ export const COMMENTARY_DEFAULTS = {
   openAIMaxFrames: 1800,
   openAISceneMaxKeyframes: 60,
   openAIBatchSize: 46,
-  openAIVisualConcurrency: 5,
-  commentaryBlockConcurrency: 5,
+  openAIVisualConcurrency: 2,
+  commentaryBlockConcurrency: 2,
   autoVideoSpeed: true,
+  backgroundMusicEnabled: false,
+  backgroundMusicTrack: 'aodebiao_caravan',
+  backgroundMusicVolume: 0.16,
 };
 
 export const DEFAULT_EDGE_VOICES_BY_LANGUAGE = {

@@ -41,12 +41,16 @@ class CommentaryUploadTests(unittest.TestCase):
                 headers={"X-Gemini-Key": "gemini-key"},
                 data={
                     "language": "zh",
-                    "style": "documentary",
+                    "style": "custom",
+                    "custom_style_prompt": "用第一人称紧张整活口吻，短句优先。",
                     "target_duration": "medium",
                     "analysis_mode": "video",
                     "tts_provider": "edge",
                     "original_audio_volume": "0.12",
                     "pause_original_audio_volume": "0.7",
+                    "background_music_enabled": "true",
+                    "background_music_track": "aodebiao_caravan",
+                    "background_music_volume": "0.22",
                     "subtitles": "true",
                     "aspect_mode": "auto",
                 },
@@ -62,8 +66,13 @@ class CommentaryUploadTests(unittest.TestCase):
         self.assertEqual("file", kwargs["source_type"])
         self.assertTrue(kwargs["source"].endswith("demo.mp4"))
         self.assertEqual("video", kwargs["analysis_mode"])
+        self.assertEqual("custom", kwargs["style"])
+        self.assertEqual("用第一人称紧张整活口吻，短句优先。", kwargs["custom_style_prompt"])
         self.assertEqual(0.12, kwargs["original_audio_volume"])
         self.assertEqual(0.7, kwargs["pause_original_audio_volume"])
+        self.assertTrue(kwargs["background_music_enabled"])
+        self.assertEqual("aodebiao_caravan", kwargs["background_music_track"])
+        self.assertEqual(0.22, kwargs["background_music_volume"])
         self.assertTrue(os.path.basename(kwargs["source"]).startswith(job_id))
         self.assertEqual("completed", task_data["status"])
         self.assertEqual(job_id, task_data["job_id"])
@@ -144,8 +153,96 @@ class CommentaryUploadTests(unittest.TestCase):
         self.assertEqual("file", kwargs["source_type"])
         self.assertEqual(analysis_path, kwargs["prepared_analysis_video_path"])
         self.assertEqual(0.6, kwargs["pause_original_audio_volume"])
+        self.assertFalse(kwargs["background_music_enabled"])
+        self.assertEqual("aodebiao_caravan", kwargs["background_music_track"])
+        self.assertEqual(app.DEFAULT_BACKGROUND_MUSIC_VOLUME, kwargs["background_music_volume"])
         self.assertEqual("https://files.example/video-1", kwargs["gemini_file"]["uri"])
         self.assertIn("narration_blocks", kwargs["previous_error"])
+
+    def test_commentary_retry_allows_stale_processing_task_after_restart(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "retry", "final.mp4"),
+                "video_url": "/videos/retry/final.mp4",
+                "title": "Retried Commentary",
+            }) as generate:
+            job_id = "stale-processing"
+            job_dir = os.path.join(output_dir, job_id)
+            os.makedirs(job_dir)
+            source_path = os.path.join(job_dir, "source.mp4")
+            open(source_path, "wb").close()
+            script_path = os.path.join(job_dir, "script.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"script": {"narration_blocks": []}}, f)
+            with open(os.path.join(job_dir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "status": "processing",
+                    "stage": "voice",
+                    "logs": ["Generating synced commentary block 4/16..."],
+                    "error": None,
+                    "request": {
+                        "url": "",
+                        "language": "zh",
+                        "style": "hustle",
+                        "target_duration": "full",
+                        "analysis_mode": "openai",
+                        "tts_provider": "edge",
+                        "subtitles": True,
+                        "aspect_mode": "auto",
+                    },
+                    "source_type": "file",
+                    "source_path": source_path,
+                    "source_value": source_path,
+                    "script_path": script_path,
+                }, f)
+            app.commentary_jobs.clear()
+            app.active_commentary_job_ids.clear()
+
+            client = TestClient(app.app)
+            response = client.post(f"/api/commentary/jobs/{job_id}/retry")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertTrue(generate.called)
+        kwargs = generate.call_args.kwargs
+        self.assertEqual(source_path, kwargs["source"])
+
+    def test_commentary_retry_rejects_active_processing_task(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir):
+            job_id = "active-processing"
+            job_dir = os.path.join(output_dir, job_id)
+            os.makedirs(job_dir)
+            source_path = os.path.join(job_dir, "source.mp4")
+            open(source_path, "wb").close()
+            app.commentary_jobs.clear()
+            app.active_commentary_job_ids.clear()
+            app.commentary_jobs[job_id] = {
+                "job_id": job_id,
+                "status": "processing",
+                "logs": [],
+                "request": {
+                    "url": "",
+                    "language": "zh",
+                    "style": "hustle",
+                    "target_duration": "full",
+                    "analysis_mode": "video",
+                    "tts_provider": "edge",
+                    "subtitles": True,
+                    "aspect_mode": "auto",
+                },
+                "source_type": "file",
+                "source_path": source_path,
+                "source_value": source_path,
+            }
+            app.active_commentary_job_ids.add(job_id)
+
+            client = TestClient(app.app)
+            response = client.post(f"/api/commentary/jobs/{job_id}/retry", headers={"X-Gemini-Key": "gemini-key"})
+
+        self.assertEqual(409, response.status_code, response.text)
 
     def test_commentary_generate_accepts_official_gemini_pool(self):
         pool_config = {

@@ -2,115 +2,9 @@ import os
 import uuid
 import time
 import json
-import re
 from google.genai import types
 from gemini_client import create_gemini_client
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
-
-def _load_thumbnail_font(size):
-    root = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(root, "fonts", "NotoSansCJK-Bold.ttc"),
-        os.path.join(root, "fonts", "NotoSerif-Bold.ttf"),
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "C:\\Windows\\Fonts\\msyhbd.ttc",
-        "C:\\Windows\\Fonts\\simhei.ttf",
-    ]
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-
-def _clean_thumbnail_hook(title):
-    text = re.sub(r"[#@]\S+", "", str(title or "")).strip()
-    text = re.sub(r"\s+", " ", text)
-    if not text:
-        return "全程高能"
-    if re.search(r"[\u4e00-\u9fff]", text):
-        return text[:10].strip("，。！？、,.!? ") or "全程高能"
-    return " ".join(text.upper().split()[:4]) or "MUST WATCH"
-
-
-def _wrap_thumbnail_text(text, draw, font, max_width, stroke_width):
-    if re.search(r"[\u4e00-\u9fff]", text):
-        tokens = list(text)
-    else:
-        tokens = text.split()
-    lines = []
-    current = ""
-    joiner = "" if re.search(r"[\u4e00-\u9fff]", text) else " "
-    for token in tokens:
-        candidate = token if not current else f"{current}{joiner}{token}"
-        bbox = draw.textbbox((0, 0), candidate, font=font, stroke_width=stroke_width)
-        if current and bbox[2] - bbox[0] > max_width:
-            lines.append(current)
-            current = token
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    return lines[:3]
-
-
-def _add_art_text_to_thumbnail(image_path, title):
-    with Image.open(image_path) as image:
-        image = image.convert("RGB")
-        width, height = image.size
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        shadow_draw = ImageDraw.Draw(shadow)
-        shadow_draw.rectangle((0, int(height * 0.50), width, height), fill=(0, 0, 0, 150))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(12, width // 80)))
-        overlay.alpha_composite(shadow)
-
-        draw = ImageDraw.Draw(overlay)
-        hook = _clean_thumbnail_hook(title)
-        font_size = max(58, int(height * 0.19))
-        stroke_width = max(5, font_size // 13)
-        font = _load_thumbnail_font(font_size)
-        max_width = int(width * 0.88)
-        lines = _wrap_thumbnail_text(hook, draw, font, max_width, stroke_width)
-        while len(lines) > 2 and font_size > 48:
-            font_size = int(font_size * 0.9)
-            stroke_width = max(5, font_size // 13)
-            font = _load_thumbnail_font(font_size)
-            lines = _wrap_thumbnail_text(hook, draw, font, max_width, stroke_width)
-
-        boxes = [draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width) for line in lines]
-        line_gap = int(font_size * 0.04)
-        total_height = sum(box[3] - box[1] for box in boxes) + line_gap * max(0, len(lines) - 1)
-        y = height - total_height - int(height * 0.08)
-        colors = [(196, 255, 54, 255), (255, 255, 255, 255)]
-        for index, line in enumerate(lines):
-            bbox = boxes[index]
-            text_w = bbox[2] - bbox[0]
-            x = max(int(width * 0.05), (width - text_w) // 2)
-            wobble = int(font_size * (0.04 if index % 2 == 0 else -0.025))
-            draw.text(
-                (x, y + wobble),
-                line,
-                font=font,
-                fill=colors[index % len(colors)],
-                stroke_width=stroke_width,
-                stroke_fill=(0, 0, 0, 255),
-            )
-            highlight_y = y + bbox[3] - bbox[1] + wobble - max(3, font_size // 20)
-            draw.line(
-                (x + int(text_w * 0.05), highlight_y, x + int(text_w * 0.95), highlight_y),
-                fill=(255, 225, 30, 210),
-                width=max(4, font_size // 18),
-            )
-            y += bbox[3] - bbox[1] + line_gap
-
-        composed = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-        composed.save(image_path, quality=94)
+from PIL import Image
 
 
 def analyze_video_for_titles(api_key, video_path, transcript=None, base_url=None):
@@ -321,7 +215,6 @@ VIDEO TITLE (for reference — do NOT put the full title on the thumbnail): "{ti
 {context_block}
 TEXT ON THE THUMBNAIL:
 - Do NOT render any letters, captions, subtitles, words, logos, or UI text inside the generated image
-- Leave a clean lower-third or side area with enough contrast for a later text overlay
 {extra_block}
 DESIGN REQUIREMENTS:
 - Use vibrant, eye-catching colors that match the video's mood
@@ -361,7 +254,6 @@ DESIGN REQUIREMENTS:
                     filename = f"thumb_{i + 1}.jpg"
                     filepath = os.path.join(output_dir, filename)
                     image.save(filepath)
-                    _add_art_text_to_thumbnail(filepath, title)
                     thumbnails.append(f"/thumbnails/{session_id}/{filename}")
                     print(f"✅ [Thumbnail] Saved: {filepath}")
                     break
