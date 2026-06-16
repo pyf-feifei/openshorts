@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, CheckCircle, ChevronDown, ChevronUp, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { Activity, CheckCircle, CheckSquare, ChevronDown, ChevronUp, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Square, Trash2, Upload, Volume2, X, Youtube } from 'lucide-react'
 import { getApiUrl } from '../config'
 import { buildGeminiHeaders, getGeminiAccessMissingMessage, hasGeminiAccess as hasGeminiConfigAccess, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
@@ -59,7 +59,7 @@ const FALLBACK_BACKGROUND_MUSIC_TRACKS = [
   { id: 'aodebiao_caravan', label: '默认 奥德彪专属音乐', available: true },
 ]
 
-const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite-preview'
+const DEFAULT_GEMINI_MODEL = 'Qwen3.7-Plus-thinking'
 
 const VOICE_PREVIEW_TEXT = {
   zh: '你好，这是当前选择的中文解说声音试听。',
@@ -244,6 +244,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [commentaryTasks, setCommentaryTasks] = useState([])
   const [taskListStatus, setTaskListStatus] = useState('idle')
   const [retryingJobId, setRetryingJobId] = useState(null)
+  const [selectedTaskIds, setSelectedTaskIds] = useState([])
+  const [deletingTaskIds, setDeletingTaskIds] = useState([])
   const [voicePreviewStatus, setVoicePreviewStatus] = useState('idle')
   const [attachedTaskRequest, setAttachedTaskRequest] = useState(null)
   const audioRef = useRef(null)
@@ -568,6 +570,73 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     statusPollFailuresRef.current = 0
   }
 
+  const resetAttachedTaskIfDeleted = (deletedIds) => {
+    if (!jobId || !deletedIds.includes(jobId)) return
+    setJobId(null)
+    setStatus('idle')
+    setLogs([])
+    setLogsExpanded(true)
+    setBackendStage(null)
+    setResult(null)
+    setError('')
+    setUploadProgress(null)
+    setUploadPhase('idle')
+    setAttachedTaskRequest(null)
+    statusPollFailuresRef.current = 0
+  }
+
+  const toggleCommentaryTaskSelection = (taskId) => {
+    setSelectedTaskIds((ids) => (
+      ids.includes(taskId) ? ids.filter((id) => id !== taskId) : [...ids, taskId]
+    ))
+  }
+
+  const toggleAllCommentaryTaskSelection = () => {
+    const visibleIds = commentaryTasks.map((task) => task.job_id).filter(Boolean)
+    setSelectedTaskIds((ids) => (
+      visibleIds.length > 0 && visibleIds.every((id) => ids.includes(id)) ? [] : visibleIds
+    ))
+  }
+
+  const deleteCommentaryTasks = async (taskIds) => {
+    const ids = Array.from(new Set((taskIds || []).filter(Boolean)))
+    if (ids.length === 0 || deletingTaskIds.length > 0) return
+    const message = ids.length === 1
+      ? '确定删除这个历史任务？会同时删除对应输出文件，并尝试停止进行中的处理。'
+      : `确定删除选中的 ${ids.length} 个历史任务？会同时删除对应输出文件，并尝试停止进行中的处理。`
+    if (!window.confirm(message)) return
+
+    setError('')
+    setDeletingTaskIds(ids)
+    try {
+      let res
+      if (ids.length === 1) {
+        res = await fetch(getApiUrl(`/api/commentary/jobs/${ids[0]}`), { method: 'DELETE' })
+      } else {
+        res = await fetch(getApiUrl('/api/commentary/jobs/delete'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_ids: ids }),
+        })
+      }
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, '删除任务失败'))
+      }
+      const data = await res.json().catch(() => ({}))
+      if (Array.isArray(data.errors) && data.errors.length > 0) {
+        throw new Error(data.errors.map((item) => `${item.job_id}: ${item.error}`).join('\n'))
+      }
+      resetAttachedTaskIfDeleted(ids)
+      setSelectedTaskIds((selected) => selected.filter((id) => !ids.includes(id)))
+      setCommentaryTasks((tasks) => tasks.filter((task) => !ids.includes(task.job_id)))
+      refreshCommentaryTasks()
+    } catch (e) {
+      setError(e.message || '删除任务失败')
+    } finally {
+      setDeletingTaskIds([])
+    }
+  }
+
   const retryCommentaryTask = async (task) => {
     const taskAnalysisMode = task.request?.analysis_mode || analysisMode
     const selectedAnalysisMode = jobId === task.job_id ? analysisMode : taskAnalysisMode
@@ -665,6 +734,10 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     }
     if (!hasSelectedAnalysisAccess(analysisMode)) {
       setError(analysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : geminiAccessMissingMessage)
+      return
+    }
+    if (analysisMode === 'video' && geminiModels.length === 0) {
+      setError('Gemini 视频输入模式请先点击“获取模型”，确认当前 Key/Base URL 可用后再生成。')
       return
     }
     if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
@@ -783,6 +856,10 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   }
 
   const taskTitle = (task) => task.result?.title || task.source_filename || task.source_value || task.job_id
+  const visibleTaskIds = commentaryTasks.map((task) => task.job_id).filter(Boolean)
+  const selectedVisibleTaskIds = selectedTaskIds.filter((id) => visibleTaskIds.includes(id))
+  const allVisibleTasksSelected = visibleTaskIds.length > 0 && visibleTaskIds.every((id) => selectedTaskIds.includes(id))
+  const isDeletingTasks = deletingTaskIds.length > 0
 
   const latestLog = logs[logs.length - 1] || ''
   const displayAnalysisMode = status === 'idle' ? analysisMode : activeAnalysisMode
@@ -1129,7 +1206,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                     <div>
                       <div className="text-sm font-medium text-zinc-100">Gemini 模型</div>
-                      <p className="text-xs text-zinc-500 mt-1">用于二创解说的 Gemini 分析和脚本生成；可以从当前 Key/Base URL 获取模型，也可以手动填写代理支持的模型名。</p>
+                      <p className="text-xs text-zinc-500 mt-1">用于二创解说的 Gemini 分析和脚本生成；Gemini 视频输入模式需要先点击获取模型，也可以手动填写代理支持的模型名。</p>
                     </div>
                     <button type="button" onClick={fetchGeminiModels} disabled={geminiModelsStatus === 'loading'} className="btn-secondary inline-flex items-center justify-center gap-2 text-sm px-4 py-2 disabled:opacity-60">
                       {geminiModelsStatus === 'loading' && <Loader2 size={14} className="animate-spin" />}
@@ -1162,7 +1239,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                           setGeminiModel(e.target.value)
                         }}
                         className="input-field font-mono"
-                        placeholder="gemini-3.1-flash-lite-preview"
+                        placeholder="Qwen3.7-Plus-thinking"
                       />
                     </div>
                   </div>
@@ -1577,13 +1654,33 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
           </div>
 
           <div className="glass-panel p-6">
-            <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex flex-col gap-3 mb-4">
               <h2 className="text-lg font-semibold flex items-center gap-2">
                 <History size={18} className="text-zinc-400" /> 历史任务
               </h2>
-              <button type="button" onClick={refreshCommentaryTasks} className="text-xs text-cyan-300 hover:text-cyan-200">
-                {taskListStatus === 'loading' ? '刷新中...' : '刷新'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={toggleAllCommentaryTaskSelection}
+                  disabled={commentaryTasks.length === 0 || isDeletingTasks}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-white/5 disabled:opacity-40"
+                >
+                  {allVisibleTasksSelected ? <CheckSquare size={14} /> : <Square size={14} />}
+                  {allVisibleTasksSelected ? '取消全选' : '全选'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteCommentaryTasks(selectedVisibleTaskIds)}
+                  disabled={selectedVisibleTaskIds.length === 0 || isDeletingTasks}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-200 hover:bg-red-500/20 disabled:opacity-40"
+                >
+                  {isDeletingTasks ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  删除选中{selectedVisibleTaskIds.length ? ` ${selectedVisibleTaskIds.length}` : ''}
+                </button>
+                <button type="button" onClick={refreshCommentaryTasks} className="ml-auto text-xs text-cyan-300 hover:text-cyan-200">
+                  {taskListStatus === 'loading' ? '刷新中...' : '刷新'}
+                </button>
+              </div>
             </div>
             <div className="space-y-3 max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
               {commentaryTasks.length === 0 && (
@@ -1594,16 +1691,27 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               {commentaryTasks.map((task) => (
                 <div key={task.job_id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-zinc-200">{taskTitle(task)}</div>
-                      <div className="mt-1 text-xs text-zinc-500">{task.stage_label || task.status} · {formatTaskTime(task.updated_at || task.created_at)}</div>
+                    <div className="flex min-w-0 items-start gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleCommentaryTaskSelection(task.job_id)}
+                        disabled={isDeletingTasks}
+                        className="mt-0.5 shrink-0 text-zinc-400 hover:text-cyan-300 disabled:opacity-40"
+                        aria-label={selectedTaskIds.includes(task.job_id) ? '取消选择任务' : '选择任务'}
+                      >
+                        {selectedTaskIds.includes(task.job_id) ? <CheckSquare size={16} /> : <Square size={16} />}
+                      </button>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium text-zinc-200">{taskTitle(task)}</div>
+                        <div className="mt-1 text-xs text-zinc-500">{task.stage_label || task.status} · {formatTaskTime(task.updated_at || task.created_at)}</div>
+                      </div>
                     </div>
                     <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] ${task.status === 'completed' ? 'bg-green-500/10 text-green-300' : task.status === 'failed' ? 'bg-red-500/10 text-red-300' : 'bg-cyan-500/10 text-cyan-300'}`}>
                       {task.status || 'unknown'}
                     </span>
                   </div>
                   {task.error && <div className="line-clamp-2 text-xs text-red-300">{task.error}</div>}
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
                     <button type="button" onClick={() => attachCommentaryTask(task)} className="btn-secondary text-xs py-2">
                       查看状态
                     </button>
@@ -1622,6 +1730,15 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                     ) : (
                       <button type="button" disabled className="btn-secondary text-xs py-2 opacity-40">下载结果</button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => deleteCommentaryTasks([task.job_id])}
+                      disabled={isDeletingTasks}
+                      className="btn-secondary inline-flex items-center justify-center gap-1 text-xs py-2 text-red-200 hover:border-red-500/40 hover:bg-red-500/10 disabled:opacity-40"
+                    >
+                      {deletingTaskIds.includes(task.job_id) ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                      删除
+                    </button>
                   </div>
                 </div>
               ))}

@@ -501,18 +501,26 @@ from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
 from commentary import (
     BACKGROUND_MUSIC_TRACKS,
+    CommentaryCancelled,
     DEFAULT_ANALYSIS_MODE,
     DEFAULT_BACKGROUND_MUSIC_VOLUME,
+    commentary_job_context,
     generate_commentary_video,
     generate_edge_voiceover,
     get_background_music_tracks,
     resolve_commentary_block_concurrency,
     resolve_openai_sampling_options,
+    terminate_commentary_job_processes,
 )
 
 commentary_jobs: Dict[str, Dict] = {}
 active_commentary_job_ids = set()
+commentary_job_cancel_events: Dict[str, threading.Event] = {}
+commentary_task_locks: Dict[str, threading.RLock] = {}
+commentary_task_locks_guard = threading.Lock()
 COMMENTARY_TASK_FILE = "commentary_task.json"
+COMMENTARY_TASK_SAVE_RETRIES = 8
+COMMENTARY_TASK_SAVE_RETRY_DELAY_SECONDS = 0.05
 COMMENTARY_PERSISTED_FIELDS = {
     "job_id",
     "status",
@@ -575,8 +583,31 @@ def commentary_job_dir(job_id: str) -> str:
     return os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
 
 
+def validate_commentary_job_id(job_id: str) -> str:
+    value = str(job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise HTTPException(status_code=400, detail="Invalid commentary job id")
+    return value
+
+
+def commentary_job_dir_is_safe(job_id: str, path: str) -> bool:
+    output_root = os.path.abspath(OUTPUT_DIR)
+    target = os.path.abspath(path)
+    expected = os.path.abspath(os.path.join(output_root, job_id))
+    return target == expected and os.path.dirname(target) == output_root
+
+
 def commentary_task_path(job_id: str) -> str:
     return os.path.join(commentary_job_dir(job_id), COMMENTARY_TASK_FILE)
+
+
+def commentary_task_lock(job_id: str) -> threading.RLock:
+    with commentary_task_locks_guard:
+        lock = commentary_task_locks.get(job_id)
+        if lock is None:
+            lock = threading.RLock()
+            commentary_task_locks[job_id] = lock
+        return lock
 
 
 def now_iso() -> str:
@@ -597,15 +628,31 @@ def save_commentary_task(job_id: str) -> None:
     job = commentary_jobs.get(job_id)
     if not job:
         return
-    job["updated_at"] = now_iso()
     job_dir = commentary_job_dir(job_id)
     os.makedirs(job_dir, exist_ok=True)
     touch_output_dir(job_dir)
-    tmp_path = f"{commentary_task_path(job_id)}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(persistable_commentary_task(job), f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, commentary_task_path(job_id))
-    touch_output_dir(job_dir)
+    task_path = commentary_task_path(job_id)
+    tmp_path = f"{task_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    with commentary_task_lock(job_id):
+        job["updated_at"] = now_iso()
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(persistable_commentary_task(job), f, ensure_ascii=False, indent=2)
+            for attempt in range(COMMENTARY_TASK_SAVE_RETRIES):
+                try:
+                    os.replace(tmp_path, task_path)
+                    break
+                except PermissionError:
+                    if attempt == COMMENTARY_TASK_SAVE_RETRIES - 1:
+                        raise
+                    time.sleep(COMMENTARY_TASK_SAVE_RETRY_DELAY_SECONDS * (attempt + 1))
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        touch_output_dir(job_dir)
 
 
 def load_commentary_task(job_id: str) -> Optional[Dict]:
@@ -613,8 +660,9 @@ def load_commentary_task(job_id: str) -> Optional[Dict]:
     if not os.path.exists(task_path):
         return None
     try:
-        with open(task_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with commentary_task_lock(job_id):
+            with open(task_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -636,6 +684,46 @@ def mark_commentary_job_active(job_id: str) -> None:
 
 def mark_commentary_job_inactive(job_id: str) -> None:
     active_commentary_job_ids.discard(job_id)
+    commentary_job_cancel_events.pop(job_id, None)
+
+
+def commentary_job_is_cancelled(job_id: str) -> bool:
+    event = commentary_job_cancel_events.get(job_id)
+    return bool(event and event.is_set())
+
+
+def create_commentary_cancel_event(job_id: str) -> threading.Event:
+    event = commentary_job_cancel_events.get(job_id)
+    if event is None:
+        event = threading.Event()
+        commentary_job_cancel_events[job_id] = event
+    return event
+
+
+def cancel_commentary_job_runtime(job_id: str) -> None:
+    event = commentary_job_cancel_events.get(job_id)
+    if event is None:
+        event = create_commentary_cancel_event(job_id)
+    event.set()
+    terminate_commentary_job_processes(job_id)
+
+
+def delete_commentary_task(job_id: str) -> Dict:
+    job_id = validate_commentary_job_id(job_id)
+    existed = bool(commentary_jobs.get(job_id) or os.path.exists(commentary_task_path(job_id)) or os.path.isdir(commentary_job_dir(job_id)))
+    cancel_commentary_job_runtime(job_id)
+    active_commentary_job_ids.discard(job_id)
+    commentary_jobs.pop(job_id, None)
+    with commentary_task_locks_guard:
+        commentary_task_locks.pop(job_id, None)
+
+    job_dir = commentary_job_dir(job_id)
+    if os.path.isdir(job_dir):
+        if not commentary_job_dir_is_safe(job_id, job_dir):
+            raise HTTPException(status_code=500, detail="Refusing to delete unsafe commentary job directory")
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    return {"job_id": job_id, "deleted": existed}
 
 
 def mark_stale_commentary_processing_state(job_id: str, job: Dict) -> None:
@@ -653,8 +741,10 @@ def list_commentary_tasks(limit: int = 30) -> List[Dict]:
     tasks = []
     for task_path in glob.glob(os.path.join(os.path.abspath(OUTPUT_DIR), "*", COMMENTARY_TASK_FILE)):
         try:
-            with open(task_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            job_id = os.path.basename(os.path.dirname(task_path))
+            with commentary_task_lock(job_id):
+                with open(task_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
         except Exception:
             continue
         if isinstance(data, dict):
@@ -687,6 +777,11 @@ class CommentaryVoicePreviewRequest(BaseModel):
     language: str = "zh"
     edge_voice: str
     text: Optional[str] = None
+
+
+class CommentaryBulkDeleteRequest(BaseModel):
+    job_ids: List[str]
+
 
 COMMENTARY_VOICE_PREVIEW_TEXT = {
     "zh": "你好，这是当前选择的中文解说声音试听。",
@@ -1194,11 +1289,15 @@ async def commentary_generate(
     save_commentary_task(job_id)
 
     def log(message: str):
+        if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+            raise CommentaryCancelled("Commentary job was cancelled.")
         commentary_jobs[job_id]["logs"].append(message)
         update_commentary_stage(job_id, message)
         save_commentary_task(job_id)
 
     def upload_log(stage: str, message: str, percent=None):
+        if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+            raise CommentaryCancelled("Commentary job was cancelled.")
         commentary_jobs[job_id]["stage"] = stage
         commentary_jobs[job_id]["stage_label"] = "上传原视频"
         commentary_jobs[job_id]["stage_progress"] = percent
@@ -1206,6 +1305,8 @@ async def commentary_generate(
         save_commentary_task(job_id)
 
     def checkpoint(fields: Dict):
+        if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+            raise CommentaryCancelled("Commentary job was cancelled.")
         commentary_jobs[job_id].update(fields)
         save_commentary_task(job_id)
 
@@ -1246,47 +1347,51 @@ async def commentary_generate(
             await upload_file.close()
 
     def run_job():
+        cancel_event = create_commentary_cancel_event(job_id)
         mark_commentary_job_active(job_id)
         try:
-            result = generate_commentary_video(
-                source=source_value,
-                source_type=source_type,
-                output_dir=job_output_dir,
-                gemini_key=gemini_key or "",
-                gemini_pool=effective_gemini_pool,
-                elevenlabs_key=elevenlabs_key,
-                tts_provider=tts_provider,
-                voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
-                edge_voice=req.edge_voice,
-                language=req.language,
-                style=req.style,
-                custom_style_prompt=req.custom_style_prompt,
-                target_duration=req.target_duration,
-                original_audio_volume=req.original_audio_volume,
-                pause_original_audio_volume=req.pause_original_audio_volume,
-                background_music_enabled=req.background_music_enabled,
-                background_music_track=req.background_music_track,
-                background_music_volume=req.background_music_volume,
-                subtitles=req.subtitles,
-                vertical=req.vertical,
-                aspect_mode=req.aspect_mode,
-                source_language=req.source_language,
-                gemini_base_url=gemini_base_url,
-                analysis_mode=analysis_mode,
-                gemini_model=req.gemini_model,
-                openai_key=openai_config["api_key"],
-                openai_base_url=openai_config["base_url"],
-                openai_model=openai_config["model"],
-                openai_frame_interval_seconds=req.openai_frame_interval_seconds,
-                openai_max_frames=req.openai_max_frames,
-                openai_scene_max_keyframes=req.openai_scene_max_keyframes,
-                openai_batch_size=req.openai_batch_size,
-                openai_visual_concurrency=req.openai_visual_concurrency,
-                commentary_block_concurrency=req.commentary_block_concurrency,
-                auto_video_speed=req.auto_video_speed,
-                progress=log,
-                checkpoint=checkpoint,
-            )
+            with commentary_job_context(job_id, cancel_event):
+                result = generate_commentary_video(
+                    source=source_value,
+                    source_type=source_type,
+                    output_dir=job_output_dir,
+                    gemini_key=gemini_key or "",
+                    gemini_pool=effective_gemini_pool,
+                    elevenlabs_key=elevenlabs_key,
+                    tts_provider=tts_provider,
+                    voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
+                    edge_voice=req.edge_voice,
+                    language=req.language,
+                    style=req.style,
+                    custom_style_prompt=req.custom_style_prompt,
+                    target_duration=req.target_duration,
+                    original_audio_volume=req.original_audio_volume,
+                    pause_original_audio_volume=req.pause_original_audio_volume,
+                    background_music_enabled=req.background_music_enabled,
+                    background_music_track=req.background_music_track,
+                    background_music_volume=req.background_music_volume,
+                    subtitles=req.subtitles,
+                    vertical=req.vertical,
+                    aspect_mode=req.aspect_mode,
+                    source_language=req.source_language,
+                    gemini_base_url=gemini_base_url,
+                    analysis_mode=analysis_mode,
+                    gemini_model=req.gemini_model,
+                    openai_key=openai_config["api_key"],
+                    openai_base_url=openai_config["base_url"],
+                    openai_model=openai_config["model"],
+                    openai_frame_interval_seconds=req.openai_frame_interval_seconds,
+                    openai_max_frames=req.openai_max_frames,
+                    openai_scene_max_keyframes=req.openai_scene_max_keyframes,
+                    openai_batch_size=req.openai_batch_size,
+                    openai_visual_concurrency=req.openai_visual_concurrency,
+                    commentary_block_concurrency=req.commentary_block_concurrency,
+                    auto_video_speed=req.auto_video_speed,
+                    progress=log,
+                    checkpoint=checkpoint,
+                )
+            if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+                return
             commentary_jobs[job_id]["result"] = result
             commentary_jobs[job_id]["gemini_events"] = result.get("gemini_events", [])
             commentary_jobs[job_id]["stage"] = "done"
@@ -1295,7 +1400,18 @@ async def commentary_generate(
             commentary_jobs[job_id]["status"] = "completed"
             commentary_jobs[job_id]["error"] = None
             save_commentary_task(job_id)
+        except CommentaryCancelled:
+            if job_id in commentary_jobs:
+                commentary_jobs[job_id]["logs"].append("Commentary job was cancelled.")
+                commentary_jobs[job_id]["stage"] = "cancelled"
+                commentary_jobs[job_id]["stage_label"] = "已取消"
+                commentary_jobs[job_id]["stage_progress"] = None
+                commentary_jobs[job_id]["status"] = "cancelled"
+                commentary_jobs[job_id]["error"] = "Commentary job was cancelled."
+                save_commentary_task(job_id)
         except Exception as e:
+            if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+                return
             error_text = str(e)
             commentary_jobs[job_id]["logs"].append(f"Error: {error_text}")
             commentary_jobs[job_id]["gemini_events"] = effective_gemini_pool.event_dicts() if effective_gemini_pool else []
@@ -1314,6 +1430,29 @@ async def commentary_generate(
 @app.get("/api/commentary/jobs")
 async def commentary_job_list():
     return {"jobs": list_commentary_tasks()}
+
+
+@app.delete("/api/commentary/jobs/{job_id}")
+async def commentary_job_delete(job_id: str):
+    result = delete_commentary_task(job_id)
+    return result
+
+
+@app.post("/api/commentary/jobs/delete")
+async def commentary_jobs_delete(req: CommentaryBulkDeleteRequest):
+    job_ids = list(dict.fromkeys(str(job_id or "").strip() for job_id in (req.job_ids or []) if str(job_id or "").strip()))
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No commentary job ids provided")
+    results = []
+    errors = []
+    for job_id in job_ids:
+        try:
+            results.append(delete_commentary_task(job_id))
+        except HTTPException as exc:
+            errors.append({"job_id": job_id, "error": exc.detail})
+        except Exception as exc:
+            errors.append({"job_id": job_id, "error": str(exc)})
+    return {"deleted": results, "errors": errors}
 
 
 @app.get("/api/commentary/background-music")
@@ -1426,11 +1565,15 @@ async def commentary_retry(
     save_commentary_task(job_id)
 
     def log(message: str):
+        if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+            raise CommentaryCancelled("Commentary job was cancelled.")
         commentary_jobs[job_id]["logs"].append(message)
         update_commentary_stage(job_id, message)
         save_commentary_task(job_id)
 
     def checkpoint(fields: Dict):
+        if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+            raise CommentaryCancelled("Commentary job was cancelled.")
         commentary_jobs[job_id].update(fields)
         save_commentary_task(job_id)
 
@@ -1447,50 +1590,54 @@ async def commentary_retry(
         prepared_analysis_video_path = None
 
     def run_retry_job():
+        cancel_event = create_commentary_cancel_event(job_id)
         mark_commentary_job_active(job_id)
         try:
-            result = generate_commentary_video(
-                source=source_value,
-                source_type=source_type,
-                output_dir=job_output_dir,
-                gemini_key=gemini_key or "",
-                gemini_pool=effective_gemini_pool,
-                elevenlabs_key=elevenlabs_key,
-                tts_provider=tts_provider,
-                voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
-                edge_voice=req.edge_voice,
-                language=req.language,
-                style=req.style,
-                custom_style_prompt=req.custom_style_prompt,
-                target_duration=req.target_duration,
-                original_audio_volume=req.original_audio_volume,
-                pause_original_audio_volume=req.pause_original_audio_volume,
-                background_music_enabled=req.background_music_enabled,
-                background_music_track=req.background_music_track,
-                background_music_volume=req.background_music_volume,
-                subtitles=req.subtitles,
-                vertical=req.vertical,
-                aspect_mode=req.aspect_mode,
-                source_language=req.source_language,
-                gemini_base_url=gemini_base_url,
-                analysis_mode=analysis_mode,
-                gemini_model=req.gemini_model,
-                openai_key=openai_config["api_key"],
-                openai_base_url=openai_config["base_url"],
-                openai_model=openai_config["model"],
-                openai_frame_interval_seconds=req.openai_frame_interval_seconds,
-                openai_max_frames=req.openai_max_frames,
-                openai_scene_max_keyframes=req.openai_scene_max_keyframes,
-                openai_batch_size=req.openai_batch_size,
-                openai_visual_concurrency=req.openai_visual_concurrency,
-                commentary_block_concurrency=req.commentary_block_concurrency,
-                auto_video_speed=req.auto_video_speed,
-                progress=log,
-                checkpoint=checkpoint,
-                prepared_analysis_video_path=prepared_analysis_video_path,
-                gemini_file=gemini_file,
-                previous_error=previous_error,
-            )
+            with commentary_job_context(job_id, cancel_event):
+                result = generate_commentary_video(
+                    source=source_value,
+                    source_type=source_type,
+                    output_dir=job_output_dir,
+                    gemini_key=gemini_key or "",
+                    gemini_pool=effective_gemini_pool,
+                    elevenlabs_key=elevenlabs_key,
+                    tts_provider=tts_provider,
+                    voice_id=req.voice_id or "21m00Tcm4TlvDq8ikWAM",
+                    edge_voice=req.edge_voice,
+                    language=req.language,
+                    style=req.style,
+                    custom_style_prompt=req.custom_style_prompt,
+                    target_duration=req.target_duration,
+                    original_audio_volume=req.original_audio_volume,
+                    pause_original_audio_volume=req.pause_original_audio_volume,
+                    background_music_enabled=req.background_music_enabled,
+                    background_music_track=req.background_music_track,
+                    background_music_volume=req.background_music_volume,
+                    subtitles=req.subtitles,
+                    vertical=req.vertical,
+                    aspect_mode=req.aspect_mode,
+                    source_language=req.source_language,
+                    gemini_base_url=gemini_base_url,
+                    analysis_mode=analysis_mode,
+                    gemini_model=req.gemini_model,
+                    openai_key=openai_config["api_key"],
+                    openai_base_url=openai_config["base_url"],
+                    openai_model=openai_config["model"],
+                    openai_frame_interval_seconds=req.openai_frame_interval_seconds,
+                    openai_max_frames=req.openai_max_frames,
+                    openai_scene_max_keyframes=req.openai_scene_max_keyframes,
+                    openai_batch_size=req.openai_batch_size,
+                    openai_visual_concurrency=req.openai_visual_concurrency,
+                    commentary_block_concurrency=req.commentary_block_concurrency,
+                    auto_video_speed=req.auto_video_speed,
+                    progress=log,
+                    checkpoint=checkpoint,
+                    prepared_analysis_video_path=prepared_analysis_video_path,
+                    gemini_file=gemini_file,
+                    previous_error=previous_error,
+                )
+            if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+                return
             commentary_jobs[job_id]["result"] = result
             commentary_jobs[job_id]["gemini_events"] = result.get("gemini_events", [])
             commentary_jobs[job_id]["stage"] = "done"
@@ -1499,7 +1646,18 @@ async def commentary_retry(
             commentary_jobs[job_id]["status"] = "completed"
             commentary_jobs[job_id]["error"] = None
             save_commentary_task(job_id)
+        except CommentaryCancelled:
+            if job_id in commentary_jobs:
+                commentary_jobs[job_id]["logs"].append("Commentary job was cancelled.")
+                commentary_jobs[job_id]["stage"] = "cancelled"
+                commentary_jobs[job_id]["stage_label"] = "已取消"
+                commentary_jobs[job_id]["stage_progress"] = None
+                commentary_jobs[job_id]["status"] = "cancelled"
+                commentary_jobs[job_id]["error"] = "Commentary job was cancelled."
+                save_commentary_task(job_id)
         except Exception as e:
+            if commentary_job_is_cancelled(job_id) or job_id not in commentary_jobs:
+                return
             error_text = str(e)
             commentary_jobs[job_id]["logs"].append(f"Error: {error_text}")
             commentary_jobs[job_id]["gemini_events"] = effective_gemini_pool.event_dicts() if effective_gemini_pool else []

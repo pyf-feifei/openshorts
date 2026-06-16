@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -22,6 +23,86 @@ from gemini_pool import GeminiKeyPool
 from main import detect_scenes, download_youtube_video, transcribe_video
 from resource_limits import resolve_thread_count
 from saasshorts import generate_voiceover
+
+
+class CommentaryCancelled(Exception):
+    pass
+
+
+_COMMENTARY_RUNTIME = threading.local()
+_COMMENTARY_PROCESS_LOCK = threading.RLock()
+_COMMENTARY_PROCESSES: Dict[str, List[subprocess.Popen]] = {}
+
+
+def _current_commentary_cancel_event():
+    return getattr(_COMMENTARY_RUNTIME, "cancel_event", None)
+
+
+def _current_commentary_job_id() -> Optional[str]:
+    return getattr(_COMMENTARY_RUNTIME, "job_id", None)
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if not process or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=3)
+    except Exception:
+        try:
+            process.kill()
+            process.wait(timeout=3)
+        except Exception:
+            pass
+
+
+def _raise_if_commentary_cancelled(process: Optional[subprocess.Popen] = None) -> None:
+    cancel_event = _current_commentary_cancel_event()
+    if cancel_event is not None and cancel_event.is_set():
+        if process is not None:
+            _terminate_process(process)
+        raise CommentaryCancelled("Commentary job was cancelled.")
+
+
+def _register_commentary_process(process: subprocess.Popen) -> None:
+    job_id = _current_commentary_job_id()
+    if not job_id or not process:
+        return
+    with _COMMENTARY_PROCESS_LOCK:
+        _COMMENTARY_PROCESSES.setdefault(job_id, []).append(process)
+
+
+def _unregister_commentary_process(process: subprocess.Popen) -> None:
+    job_id = _current_commentary_job_id()
+    if not job_id or not process:
+        return
+    with _COMMENTARY_PROCESS_LOCK:
+        processes = _COMMENTARY_PROCESSES.get(job_id)
+        if not processes:
+            return
+        _COMMENTARY_PROCESSES[job_id] = [item for item in processes if item is not process]
+        if not _COMMENTARY_PROCESSES[job_id]:
+            _COMMENTARY_PROCESSES.pop(job_id, None)
+
+
+def terminate_commentary_job_processes(job_id: str) -> None:
+    with _COMMENTARY_PROCESS_LOCK:
+        processes = list(_COMMENTARY_PROCESSES.pop(job_id, []))
+    for process in processes:
+        _terminate_process(process)
+
+
+@contextmanager
+def commentary_job_context(job_id: str, cancel_event=None):
+    previous_job_id = getattr(_COMMENTARY_RUNTIME, "job_id", None)
+    previous_cancel_event = getattr(_COMMENTARY_RUNTIME, "cancel_event", None)
+    _COMMENTARY_RUNTIME.job_id = job_id
+    _COMMENTARY_RUNTIME.cancel_event = cancel_event
+    try:
+        yield
+    finally:
+        _COMMENTARY_RUNTIME.job_id = previous_job_id
+        _COMMENTARY_RUNTIME.cancel_event = previous_cancel_event
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
@@ -266,10 +347,10 @@ def _resolve_ffmpeg_binary() -> str:
     found = shutil.which("ffmpeg")
     if found:
         return found
+    project_root = os.path.dirname(os.path.abspath(__file__))
     for candidate in (
-        "/mnt/c/Apps/ffmpeg-2025-04-14-git-3b2a9410ef-full_build/ffmpeg-2025-04-14-git-3b2a9410ef-full_build/bin/ffmpeg.exe",
-        "/mnt/c/Apps/OrderEXE/ffmpeg.exe",
-        "/mnt/c/Apps/mediago/resources/bin/ffmpeg.exe",
+        os.path.join(project_root, "render-service", "node_modules", "@remotion", "compositor-win32-x64-msvc", "ffmpeg.exe"),
+        os.path.join(project_root, "remotion", "node_modules", "@remotion", "compositor-win32-x64-msvc", "ffmpeg.exe"),
     ):
         if os.path.exists(candidate):
             return candidate
@@ -328,15 +409,45 @@ def _limit_ffmpeg_threads(cmd: List[str]) -> List[str]:
     return [cmd[0], "-threads", str(FFMPEG_THREADS), *cmd[1:]]
 
 
+def _ffmpeg_output_format_args(output_path: str) -> List[str]:
+    if str(output_path or "").lower().endswith(".m4a"):
+        return ["-f", "mp4"]
+    return []
+
+
+def _run_capture_command(cmd: List[str], cwd: Optional[str] = None):
+    _raise_if_commentary_cancelled()
+    process = subprocess.Popen(
+        _limit_ffmpeg_threads(cmd),
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    _register_commentary_process(process)
+    try:
+        while True:
+            _raise_if_commentary_cancelled(process)
+            try:
+                stdout, stderr = process.communicate(timeout=0.25)
+                return process.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        _unregister_commentary_process(process)
+
+
 def _run_command(cmd: List[str], cwd: Optional[str] = None) -> None:
     try:
-        result = subprocess.run(_limit_ffmpeg_threads(cmd), cwd=cwd, capture_output=True, text=True)
+        returncode, stdout, stderr = _run_capture_command(cmd, cwd=cwd)
     except FileNotFoundError as exc:
         raise Exception(
             f"FFmpeg executable not found: {FFMPEG_BINARY}. Install ffmpeg or set OPENSHORTS_FFMPEG_BINARY to a valid binary."
         ) from exc
-    if result.returncode != 0:
-        raise Exception(result.stderr or result.stdout or f"Command failed: {' '.join(cmd)}")
+    if returncode != 0:
+        raise Exception(stderr or stdout or f"Command failed: {' '.join(cmd)}")
 
 
 def _clean_publish_text(value: str) -> str:
@@ -593,32 +704,43 @@ def _run_ffmpeg_with_progress(
         return
 
     run_cmd = _limit_ffmpeg_threads([cmd[0], "-nostats", "-progress", "pipe:1", *cmd[1:]])
+    _raise_if_commentary_cancelled()
     process = subprocess.Popen(
         run_cmd,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
+    _register_commentary_process(process)
     output_lines = []
     last_percent = -1
-    if process.stdout:
-        for raw_line in process.stdout:
-            line = raw_line.strip()
-            if line:
-                output_lines.append(line)
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            seconds = _parse_ffmpeg_progress_seconds(key, value)
-            if seconds is None:
-                continue
-            percent = int(max(0, min(99, (seconds / duration) * 100)))
-            if percent >= last_percent + 5:
-                last_percent = percent
-                progress(f"{label}: {percent}%")
-    return_code = process.wait()
+    try:
+        if process.stdout:
+            for raw_line in process.stdout:
+                _raise_if_commentary_cancelled(process)
+                line = raw_line.strip()
+                if line:
+                    output_lines.append(line)
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                seconds = _parse_ffmpeg_progress_seconds(key, value)
+                if seconds is None:
+                    continue
+                percent = int(max(0, min(99, (seconds / duration) * 100)))
+                if percent >= last_percent + 5:
+                    last_percent = percent
+                    progress(f"{label}: {percent}%")
+        while process.poll() is None:
+            _raise_if_commentary_cancelled(process)
+            time.sleep(0.1)
+        return_code = process.returncode
+    finally:
+        _unregister_commentary_process(process)
     if return_code != 0:
         raise Exception("\n".join(output_lines[-80:]) or f"Command failed: {' '.join(cmd)}")
     progress(f"{label}: 100%")
@@ -5016,6 +5138,7 @@ def _analyze_openai_visual_timeline(
     candidate_segments = []
 
     def analyze_batch(index: int, batch: List[Dict]) -> Dict:
+        _raise_if_commentary_cancelled()
         prompt = _openai_visual_batch_prompt(video_title, duration, batch, index, len(batches))
         text = _call_openai_compatible_chat(
             api_key=api_key,
@@ -5041,19 +5164,30 @@ def _analyze_openai_visual_timeline(
             f"{len(batches)} batches with concurrency {visual_concurrency}..."
         )
     batch_results = [None] * len(batches)
+    context_job_id = _current_commentary_job_id()
+    context_cancel_event = _current_commentary_cancel_event()
+
+    def analyze_batch_with_context(index: int, batch: List[Dict]) -> Dict:
+        if context_job_id:
+            with commentary_job_context(context_job_id, context_cancel_event):
+                return analyze_batch(index, batch)
+        return analyze_batch(index, batch)
+
     if visual_concurrency <= 1:
         for index, batch in enumerate(batches, start=1):
+            _raise_if_commentary_cancelled()
             if progress:
                 progress(f"OpenAI-compatible multimodal visual analysis batch {index}/{len(batches)}...")
-            batch_results[index - 1] = analyze_batch(index, batch)
+            batch_results[index - 1] = analyze_batch_with_context(index, batch)
     else:
         with ThreadPoolExecutor(max_workers=visual_concurrency) as executor:
             futures = {
-                executor.submit(analyze_batch, index, batch): index
+                executor.submit(analyze_batch_with_context, index, batch): index
                 for index, batch in enumerate(batches, start=1)
             }
             completed = 0
             for future in as_completed(futures):
+                _raise_if_commentary_cancelled()
                 index = futures[future]
                 batch_results[index - 1] = future.result()
                 completed += 1
@@ -6187,6 +6321,7 @@ def _create_background_music_bed(
         "-af", f"volume={safe_volume},afade=t=out:st={max(0.0, target_duration - 1.5):.3f}:d={min(1.5, target_duration):.3f}",
         "-c:a", "aac",
         "-b:a", "128k",
+        *_ffmpeg_output_format_args(output_path),
         output_path,
     ]
     _run_command(cmd)
@@ -6220,6 +6355,7 @@ def _create_ambient_audio_bed(
             "-af", _ambient_audio_filter(volume),
             "-c:a", "aac",
             "-b:a", "128k",
+            *_ffmpeg_output_format_args(part_path),
             part_path,
         ]
         try:
@@ -6243,6 +6379,7 @@ def _create_ambient_audio_bed(
         "-safe", "0",
         "-i", list_path,
         "-c", "copy",
+        *_ffmpeg_output_format_args(output_path),
         output_path,
     ]
     _run_command(cmd)
@@ -6263,7 +6400,7 @@ def _fit_video_to_voiceover(video_path: str, voiceover_path: str, output_path: s
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-filter:v", f"setpts=PTS/{ratio:.6f}",
+        "-filter:v", f"setpts=PTS*{(1.0 / ratio):.6f}",
         "-an",
         "-c:v", "libx264",
         "-preset", "fast",
@@ -6332,6 +6469,7 @@ def _concat_audio_parts_precise(paths: List[str], output_path: str, codec: str =
     ])
     if audio_codec == "aac" and bitrate:
         cmd.extend(["-b:a", bitrate])
+    cmd.extend(_ffmpeg_output_format_args(output_path))
     cmd.append(output_path)
     _run_command(cmd)
 
@@ -6370,6 +6508,7 @@ def _fit_audio_part_to_duration(input_audio_path: str, output_audio_path: str, t
         "-t", f"{target_duration:.3f}",
         "-c:a", "aac",
         "-b:a", "192k",
+        *_ffmpeg_output_format_args(output_audio_path),
         output_audio_path,
     ]
     _run_command(cmd)
@@ -6384,6 +6523,7 @@ def _trim_audio_part_to_duration(input_audio_path: str, output_audio_path: str, 
         "-t", f"{target_duration:.3f}",
         "-c:a", "aac",
         "-b:a", "192k",
+        *_ffmpeg_output_format_args(output_audio_path),
         output_audio_path,
     ]
     _run_command(cmd)
@@ -6397,6 +6537,7 @@ def _create_silent_audio_clip(output_path: str, duration: float) -> None:
         "-t", f"{max(0.1, float(duration or 0.0)):.3f}",
         "-c:a", "aac",
         "-b:a", "48k",
+        *_ffmpeg_output_format_args(output_path),
         output_path,
     ]
     _run_command(cmd)
@@ -6412,6 +6553,7 @@ def _force_audio_clip_duration(audio_path: str, duration: float, work_dir: str, 
         "-t", f"{target_duration:.3f}",
         "-c:a", "aac",
         "-b:a", bitrate,
+        *_ffmpeg_output_format_args(tmp_path),
         tmp_path,
     ]
     _run_command(cmd)
@@ -6423,20 +6565,16 @@ def _probe_media_format_duration(path: str) -> Optional[float]:
         return None
     ffprobe_name = os.path.basename(str(FFPROBE_BINARY)).lower()
     probe_path = _windows_path_from_wsl(path) if ffprobe_name == "ffprobe.exe" else path
-    result = subprocess.run(
-        [
-            FFPROBE_BINARY, "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            probe_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    returncode, stdout, _stderr = _run_capture_command([
+        FFPROBE_BINARY, "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        probe_path,
+    ])
+    if returncode != 0:
         return None
     try:
-        return float((result.stdout or "").strip() or 0.0)
+        return float((stdout or "").strip() or 0.0)
     except ValueError:
         return None
 
@@ -6485,6 +6623,7 @@ def _extract_original_audio_clip(
     cmd.extend([
         "-c:a", "aac",
         "-b:a", "128k",
+        *_ffmpeg_output_format_args(output_path),
         output_path,
     ])
     _run_command(cmd)
@@ -6494,7 +6633,7 @@ def _block_video_filter(aspect_filter: str, speed: float) -> str:
     filters = []
     speed = _safe_render_video_speed(speed)
     if speed > 1.0001:
-        filters.append(f"setpts=PTS/{speed:.6f}")
+        filters.append(f"setpts=PTS*{(1.0 / speed):.6f}")
     if aspect_filter:
         filters.append(aspect_filter)
     return ",".join(filters) or "setsar=1"
@@ -6624,6 +6763,7 @@ def _create_block_synced_visuals_and_audio(
         }
 
     def process_block(index: int, block: Dict) -> List[Dict]:
+        _raise_if_commentary_cancelled()
         is_pause = bool(block.get("pause"))
         source_start = float(block["start"])
         source_duration = max(0.1, float(block["end"]) - source_start)
@@ -6797,12 +6937,21 @@ def _create_block_synced_visuals_and_audio(
             )
         ]
 
+    context_job_id = _current_commentary_job_id()
+    context_cancel_event = _current_commentary_cancel_event()
+
+    def process_block_with_context(index: int, block: Dict) -> List[Dict]:
+        if context_job_id:
+            with commentary_job_context(context_job_id, context_cancel_event):
+                return process_block(index, block)
+        return process_block(index, block)
+
     if resolved_concurrency > 1:
         with ThreadPoolExecutor(max_workers=resolved_concurrency) as executor:
-            futures = [executor.submit(process_block, index, block) for index, block in enumerate(blocks, start=1)]
+            futures = [executor.submit(process_block_with_context, index, block) for index, block in enumerate(blocks, start=1)]
             block_results = [item for future in as_completed(futures) for item in future.result()]
     else:
-        block_results = [item for index, block in enumerate(blocks, start=1) for item in process_block(index, block)]
+        block_results = [item for index, block in enumerate(blocks, start=1) for item in process_block_with_context(index, block)]
 
     block_results.sort(key=lambda item: (item["index"], item.get("sub_index", 0)))
     video_parts = [item["video_path"] for item in block_results]
@@ -6883,19 +7032,15 @@ def _mix_voiceover_with_video(
 
 
 def _get_audio_duration(audio_path: str) -> float:
-    result = subprocess.run(
-        [
-            FFPROBE_BINARY, "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            _windows_path_from_wsl(audio_path) if os.path.basename(str(FFPROBE_BINARY)).lower() == "ffprobe.exe" else audio_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise Exception(result.stderr or result.stdout or f"Failed to probe audio: {audio_path}")
-    return float(result.stdout.strip() or 0)
+    returncode, stdout, stderr = _run_capture_command([
+        FFPROBE_BINARY, "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        _windows_path_from_wsl(audio_path) if os.path.basename(str(FFPROBE_BINARY)).lower() == "ffprobe.exe" else audio_path,
+    ])
+    if returncode != 0:
+        raise Exception(stderr or stdout or f"Failed to probe audio: {audio_path}")
+    return float(stdout.strip() or 0)
 
 
 def _format_ass_time(seconds: float) -> str:
@@ -6926,20 +7071,16 @@ def _normalize_ass_dimensions(width: Optional[int] = None, height: Optional[int]
 def _probe_video_dimensions(video_path: str) -> Tuple[int, int]:
     ffprobe_name = os.path.basename(str(FFPROBE_BINARY)).lower()
     probe_path = _windows_path_from_wsl(video_path) if ffprobe_name == "ffprobe.exe" else video_path
-    result = subprocess.run(
-        [
-            FFPROBE_BINARY, "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x",
-            probe_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    returncode, stdout, _stderr = _run_capture_command([
+        FFPROBE_BINARY, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        probe_path,
+    ])
+    if returncode != 0:
         return _normalize_ass_dimensions()
-    first_line = (result.stdout or "").strip().splitlines()[0:1]
+    first_line = (stdout or "").strip().splitlines()[0:1]
     if not first_line or "x" not in first_line[0]:
         return _normalize_ass_dimensions()
     width, height = first_line[0].split("x", 1)
@@ -7323,11 +7464,13 @@ def generate_commentary_video(
     resolved_background_music_volume = max(0.0, min(float(background_music_volume or 0.0), 1.0))
 
     def log(message: str) -> None:
+        _raise_if_commentary_cancelled()
         print(f"[Commentary] {message}")
         if progress:
             progress(message)
 
     os.makedirs(output_dir, exist_ok=True)
+    _raise_if_commentary_cancelled()
     if openai_sampling_options:
         log(
             "OpenAI-compatible sampling settings: "
@@ -7347,6 +7490,7 @@ def generate_commentary_video(
     if analysis_fallback_reason:
         log(analysis_fallback_reason)
     log("Preparing source video...")
+    _raise_if_commentary_cancelled()
 
     video_path = None
     analysis_video_path = None
@@ -7383,6 +7527,7 @@ def generate_commentary_video(
             analysis_video_path = video_path
 
     if analysis_mode == "video":
+        _raise_if_commentary_cancelled()
         reusable_analysis_path = prepared_analysis_video_path if prepared_analysis_video_path and os.path.exists(prepared_analysis_video_path) else None
         if reusable_analysis_path:
             analysis_video_path = reusable_analysis_path
@@ -7401,6 +7546,7 @@ def generate_commentary_video(
             })
 
     video_info = _get_video_info(video_path)
+    _raise_if_commentary_cancelled()
     duration = float(video_info.get("duration") or 0)
     resolved_aspect = "9:16" if vertical else _resolve_aspect_mode(video_info, aspect_mode)
     log(f"Resolved output aspect ratio: {resolved_aspect}")
@@ -7447,6 +7593,7 @@ def generate_commentary_video(
         cached_script_path = None
 
     if not cached_script_path:
+        _raise_if_commentary_cancelled()
         if analysis_mode in {"current", "openai"}:
             transcript = _load_cached_commentary_transcript(output_dir)
             if transcript:
@@ -7478,6 +7625,7 @@ def generate_commentary_video(
             }
 
         if analysis_mode == "openai":
+            _raise_if_commentary_cancelled()
             log("Generating original commentary script with OpenAI-compatible multimodal model...")
             script = generate_openai_commentary_script(
                 transcript=transcript,
@@ -7498,6 +7646,7 @@ def generate_commentary_video(
             )
             openai_visual_analysis = _load_cached_openai_visual_analysis(output_dir)
         else:
+            _raise_if_commentary_cancelled()
             log("Generating original commentary script with Gemini...")
             try:
                 script = generate_commentary_script(
@@ -7564,6 +7713,7 @@ def generate_commentary_video(
                     previous_error=previous_error,
                 )
 
+    _raise_if_commentary_cancelled()
     _normalize_script_timeline(script, duration, target_duration, language)
     if not using_rendered_cached_script:
         _sanitize_generated_commentary_script(script)
@@ -7643,6 +7793,7 @@ def generate_commentary_video(
     auto_video_speed_summary = _summarize_auto_video_speed(narration_blocks, auto_video_speed)
     use_block_synced_render = bool(narration_blocks)
     if use_block_synced_render:
+        _raise_if_commentary_cancelled()
         if not auto_video_speed:
             log("AI auto video speed disabled; rendering all commentary blocks at 1.0x.")
         elif auto_video_speed_summary["accelerated_count"] > 0:
@@ -7669,6 +7820,7 @@ def generate_commentary_video(
     synced_block_durations = []
 
     if use_block_synced_render:
+        _raise_if_commentary_cancelled()
         log(f"Generating {len(narration_blocks)} timestamp-synced commentary blocks with {tts_provider} TTS...")
         ambient_audio, synced_block_durations = _create_block_synced_visuals_and_audio(
             video_path=video_path,
@@ -7701,6 +7853,7 @@ def generate_commentary_video(
         if not synced_block_durations:
             _validate_voiceover_duration_for_target(voiceover_path, edit_segments, duration, target_duration)
     else:
+        _raise_if_commentary_cancelled()
         log(f"Generating commentary voiceover with {tts_provider} TTS...")
         generate_commentary_voiceover(
             text=script["narration"],
@@ -7730,6 +7883,7 @@ def generate_commentary_video(
         log("Preparing low-volume original audio bed as ambient sound...")
         ambient_audio = _create_ambient_audio_bed(video_path, edit_segments, ambient_audio_path, original_audio_volume, work_dir)
     background_music_bed = None
+    _raise_if_commentary_cancelled()
     if resolved_background_music and background_music_bed_path and resolved_background_music_volume > 0:
         background_duration = _get_audio_duration(voiceover_path) if trim_to_voiceover else _get_video_duration(timed_video_path)
         log(f"Preparing background music bed: {resolved_background_music['label']}...")
@@ -7754,6 +7908,7 @@ def generate_commentary_video(
     subtitle_path = None
     final_path = mixed_path
     if subtitles:
+        _raise_if_commentary_cancelled()
         subtitle_path = os.path.join(output_dir, f"{slug}_commentary.ass")
         subtitled_path = os.path.join(output_dir, f"{slug}_final.mp4")
         log("Generating text-timed subtitles from the commentary narration...")
@@ -7781,6 +7936,7 @@ def generate_commentary_video(
     commentary_episodes = script.get("episodes") if isinstance(script.get("episodes"), list) else []
     rendered_episodes = []
     if target_duration == "full" and narration_blocks and commentary_episodes and episode_plan.get("should_split"):
+        _raise_if_commentary_cancelled()
         log(f"Rendering {len(commentary_episodes)} AI-planned commentary episodes while keeping the complete video...")
         rendered_episodes = _render_commentary_episode_videos(
             final_path=final_path,
@@ -7793,6 +7949,7 @@ def generate_commentary_video(
         )
 
     publish_fields = _build_douyin_publish_fields(script)
+    _raise_if_commentary_cancelled()
     log("Generating local commentary cover images from the current task video frame/source thumbnail...")
     cover_source_path = next(
         (

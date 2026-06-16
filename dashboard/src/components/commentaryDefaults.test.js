@@ -49,10 +49,16 @@ test('commentary task manager lists jobs and retries saved tasks', () => {
 
   assert.match(source, /\/api\/commentary\/jobs/);
   assert.match(source, /\/api\/commentary\/jobs\/\$\{task\.job_id\}\/retry/);
+  assert.match(source, /\/api\/commentary\/jobs\/\$\{ids\[0\]\}/);
+  assert.match(source, /\/api\/commentary\/jobs\/delete/);
+  assert.match(source, /job_ids: ids/);
   assert.match(source, /analysis_mode: selectedAnalysisMode/);
   assert.match(source, /gemini_model: selectedAnalysisMode === 'openai' \? undefined : geminiModel\.trim\(\)/);
   assert.match(source, /setJobId\(data\.job_id\)/);
   assert.match(source, /历史任务/);
+  assert.match(source, /selectedTaskIds/);
+  assert.match(source, /CheckSquare/);
+  assert.match(source, /Trash2/);
 });
 
 test('commentary supports OpenAI-compatible multimodal analysis mode', () => {
@@ -73,10 +79,18 @@ test('commentary lets users fetch or manually enter the Gemini analysis model', 
   assert.match(source, /geminiModel/);
   assert.match(source, /\/api\/settings\/gemini-models/);
   assert.match(source, /gemini_model/);
+  assert.match(source, /Qwen3\.7-Plus-thinking/);
   assert.match(source, /Gemini 模型/);
   assert.match(source, /获取模型/);
   assert.match(source, /手动填写/);
   assert.match(source, /request\.gemini_model/);
+});
+
+test('commentary requires fetching Gemini models before video-input analysis', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /analysisMode === 'video' && geminiModels\.length === 0/);
+  assert.match(source, /Gemini 视频输入模式请先点击/);
 });
 
 test('commentary selects the first fetched Gemini model when still using the built-in default', () => {
