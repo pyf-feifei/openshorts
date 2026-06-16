@@ -7,6 +7,10 @@ import {
   COMMENTARY_DEFAULTS,
   getDefaultEdgeVoiceForLanguage,
 } from './commentaryDefaults.js';
+import {
+  COMMENTARY_LOG_PANEL_BODY_CLASS,
+  getCommentaryLogPanelState,
+} from './commentaryLogPanel.js';
 
 test('commentary tab defaults match hustle Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.style, 'hustle');
@@ -45,6 +49,8 @@ test('commentary task manager lists jobs and retries saved tasks', () => {
 
   assert.match(source, /\/api\/commentary\/jobs/);
   assert.match(source, /\/api\/commentary\/jobs\/\$\{task\.job_id\}\/retry/);
+  assert.match(source, /analysis_mode: selectedAnalysisMode/);
+  assert.match(source, /gemini_model: selectedAnalysisMode === 'openai' \? undefined : geminiModel\.trim\(\)/);
   assert.match(source, /setJobId\(data\.job_id\)/);
   assert.match(source, /历史任务/);
 });
@@ -59,6 +65,26 @@ test('commentary supports OpenAI-compatible multimodal analysis mode', () => {
   assert.match(source, /openai_visual_concurrency/);
   assert.match(source, /commentary_block_concurrency/);
   assert.match(source, /解说分块生成并发数/);
+});
+
+test('commentary lets users fetch or manually enter the Gemini analysis model', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /geminiModel/);
+  assert.match(source, /\/api\/settings\/gemini-models/);
+  assert.match(source, /gemini_model/);
+  assert.match(source, /Gemini 模型/);
+  assert.match(source, /获取模型/);
+  assert.match(source, /手动填写/);
+  assert.match(source, /request\.gemini_model/);
+});
+
+test('commentary selects the first fetched Gemini model when still using the built-in default', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /DEFAULT_GEMINI_MODEL/);
+  assert.match(source, /geminiModel\s*===\s*DEFAULT_GEMINI_MODEL/);
+  assert.match(source, /setGeminiModel\(models\[0\]\.id\)/);
 });
 
 test('commentary exposes first-person hustle commentary style', () => {
@@ -126,4 +152,17 @@ test('commentary result exposes Douyin publish copy and cover downloads', () => 
   assert.match(source, /cover_portrait_url/);
   assert.match(source, /横封面 4:3/);
   assert.match(source, /竖封面 3:4/);
+});
+
+test('commentary log panel can collapse while expanded logs stay internally scrollable', () => {
+  const expandedState = getCommentaryLogPanelState(['Queued commentary remix job...', 'Rendering final video...'], true);
+  assert.equal(expandedState.countLabel, '2 条日志');
+  assert.equal(expandedState.toggleLabel, '收起运行日志');
+  assert.match(COMMENTARY_LOG_PANEL_BODY_CLASS, /max-h-\[320px\]/);
+  assert.match(COMMENTARY_LOG_PANEL_BODY_CLASS, /overflow-y-auto/);
+
+  const collapsedState = getCommentaryLogPanelState([], false);
+  assert.equal(collapsedState.countLabel, '暂无日志');
+  assert.equal(collapsedState.toggleLabel, '展开运行日志');
+  assert.equal(collapsedState.emptyText, '等待开始...');
 });

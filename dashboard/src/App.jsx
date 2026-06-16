@@ -40,6 +40,8 @@ import {
   buildGeminiConfig,
   buildGeminiHeaders,
   fingerprintGeminiKey,
+  getGeminiAccessMissingMessage,
+  hasGeminiAccess as hasGeminiConfigAccess,
   normalizeGeminiBaseUrl,
 } from './lib/geminiHeaders'
 import { useI18n } from './i18n/I18nProvider'
@@ -453,10 +455,8 @@ function App() {
     keyPool: geminiKeyPool,
     stats: geminiKeyPoolStats,
   })
-  const hasGeminiAccess =
-    geminiConfig.mode === 'official_pool'
-      ? geminiConfig.keys.length > 0
-      : Boolean(geminiConfig.apiKey)
+  const hasGeminiAccess = hasGeminiConfigAccess(geminiConfig)
+  const geminiAccessMissingMessage = getGeminiAccessMissingMessage(geminiConfig)
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -797,8 +797,11 @@ function App() {
             )}
 
             {!hasGeminiAccess && (
-              <span className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
-                {t('clipGenerator.apiKeyMissing')}
+              <span
+                className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20"
+                title={geminiAccessMissingMessage}
+              >
+                {geminiConfig.mode === 'official_pool' ? 'Gemini 多 Key 未配置' : t('clipGenerator.apiKeyMissing')}
               </span>
             )}
           </div>

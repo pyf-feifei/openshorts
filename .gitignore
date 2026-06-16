@@ -13,6 +13,7 @@ __pycache__/
 *.pyc
 
 # Temporary files / runtime dirs
+*.log
 temp_*
 uploads/
 downloads/
@@ -42,4 +43,3 @@ references/
 .claude/
 skills/
 skills-lock.json
-

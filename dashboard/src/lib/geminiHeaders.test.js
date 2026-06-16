@@ -7,6 +7,8 @@ import {
   buildGeminiConfig,
   buildGeminiHeaders,
   fingerprintGeminiKey,
+  getGeminiAccessMissingMessage,
+  hasGeminiAccess,
   mergeGeminiEvents,
   normalizeGeminiBaseUrl,
 } from './geminiHeaders.js';
@@ -21,6 +23,13 @@ test('normalizes Gemini base URL by trimming whitespace and trailing slashes', (
   assert.equal(
     normalizeGeminiBaseUrl('  https://gemini-proxy.example.com///  '),
     'https://gemini-proxy.example.com',
+  );
+});
+
+test('normalizes Gemini base URL by removing SDK-appended API version suffixes', () => {
+  assert.equal(
+    normalizeGeminiBaseUrl('http://195.242.178.82:8080/v1beta'),
+    'http://195.242.178.82:8080',
   );
 });
 
@@ -91,6 +100,20 @@ test('buildGeminiHeaders sends official pool payload instead of single key heade
   assert.ok(headers['X-Gemini-Pool']);
   assert.equal(headers['X-Gemini-Key'], undefined);
   assert.equal(headers['X-Gemini-Base-URL'], undefined);
+});
+
+test('reports missing access clearly when official pool mode has no keys', () => {
+  const config = buildGeminiConfig({
+    mode: 'official_pool',
+    apiKey: 'single-key',
+    keyPool: [],
+  });
+
+  assert.equal(hasGeminiAccess(config), false);
+  assert.equal(
+    getGeminiAccessMissingMessage(config),
+    '请在 Settings 的 Gemini 访问模式中添加至少一个官方 Gemini API Key，或切回「自定义代理 / 单 Key」',
+  );
 });
 
 test('App wires saved Gemini base URL into settings and all Gemini-backed tabs', () => {

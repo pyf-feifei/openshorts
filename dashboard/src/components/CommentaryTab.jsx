@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, CheckCircle, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { Activity, CheckCircle, ChevronDown, ChevronUp, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Upload, Volume2, X, Youtube } from 'lucide-react'
 import { getApiUrl } from '../config'
-import { buildGeminiHeaders, mergeGeminiEvents } from '../lib/geminiHeaders'
+import { buildGeminiHeaders, getGeminiAccessMissingMessage, hasGeminiAccess as hasGeminiConfigAccess, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
 import { COMMENTARY_DEFAULTS, getDefaultEdgeVoiceForLanguage } from './commentaryDefaults'
+import { COMMENTARY_LOG_PANEL_BODY_CLASS, getCommentaryLogPanelState } from './commentaryLogPanel'
 
 const STYLE_OPTIONS = [
   { id: 'documentary', label: '纪录片解说' },
@@ -57,6 +58,8 @@ const DURATION_OPTIONS = [
 const FALLBACK_BACKGROUND_MUSIC_TRACKS = [
   { id: 'aodebiao_caravan', label: '默认 奥德彪专属音乐', available: true },
 ]
+
+const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite-preview'
 
 const VOICE_PREVIEW_TEXT = {
   zh: '你好，这是当前选择的中文解说声音试听。',
@@ -207,6 +210,10 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [targetDuration, setTargetDuration] = useState(COMMENTARY_DEFAULTS.targetDuration)
   const [analysisMode, setAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
   const [activeAnalysisMode, setActiveAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
+  const [geminiModel, setGeminiModel] = useState(DEFAULT_GEMINI_MODEL)
+  const [geminiModels, setGeminiModels] = useState([])
+  const [geminiModelsStatus, setGeminiModelsStatus] = useState('idle')
+  const [geminiModelsError, setGeminiModelsError] = useState('')
   const [ttsProvider, setTtsProvider] = useState('edge')
   const [voiceId, setVoiceId] = useState('21m00Tcm4TlvDq8ikWAM')
   const [edgeVoice, setEdgeVoice] = useState(COMMENTARY_DEFAULTS.edgeVoice)
@@ -228,6 +235,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState('idle')
   const [logs, setLogs] = useState([])
+  const [logsExpanded, setLogsExpanded] = useState(true)
   const [backendStage, setBackendStage] = useState(null)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
@@ -242,9 +250,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const audioUrlRef = useRef(null)
   const statusPollFailuresRef = useRef(0)
   const eventsMergedRef = useRef(null)
-  const hasGeminiAccess = geminiConfig?.mode === 'official_pool'
-    ? (geminiConfig.keys || []).length > 0
-    : Boolean(geminiApiKey)
+  const hasGeminiAccess = hasGeminiConfigAccess(geminiConfig || geminiApiKey)
+  const geminiAccessMissingMessage = getGeminiAccessMissingMessage(geminiConfig || geminiApiKey)
   const hasSelectedAnalysisAccess = (mode = analysisMode) => (
     mode === 'openai' ? hasOpenAICompatibleAccess(openAICompatibleConfig) : hasGeminiAccess
   )
@@ -446,6 +453,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     if (request.custom_style_prompt !== undefined) setCustomStylePrompt(request.custom_style_prompt || '')
     if (request.target_duration) setTargetDuration(request.target_duration)
     if (request.analysis_mode) setAnalysisMode(request.analysis_mode)
+    if (request.gemini_model) setGeminiModel(request.gemini_model)
     if (request.tts_provider) setTtsProvider(request.tts_provider)
     if (request.voice_id) setVoiceId(request.voice_id)
     if (request.edge_voice) setEdgeVoice(request.edge_voice)
@@ -552,6 +560,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     setJobId(currentTask.job_id)
     setStatus(currentTask.status || 'processing')
     setLogs(currentTask.logs || [])
+    setLogsExpanded(true)
     setBackendStage(currentTask.stage ? { stage: currentTask.stage, label: currentTask.stage_label, progress: currentTask.stage_progress } : null)
     setResult(currentTask.result || null)
     setUploadProgress(null)
@@ -561,22 +570,27 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
 
   const retryCommentaryTask = async (task) => {
     const taskAnalysisMode = task.request?.analysis_mode || analysisMode
-    if (!hasSelectedAnalysisAccess(taskAnalysisMode)) {
-      setError(taskAnalysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : '请先在 Settings 配置 Gemini API Key')
+    const selectedAnalysisMode = jobId === task.job_id ? analysisMode : taskAnalysisMode
+    if (!hasSelectedAnalysisAccess(selectedAnalysisMode)) {
+      setError(selectedAnalysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : geminiAccessMissingMessage)
       return
     }
     setError('')
-    setActiveAnalysisMode(taskAnalysisMode)
+    setActiveAnalysisMode(selectedAnalysisMode)
     setRetryingJobId(task.job_id)
     try {
       const headers = {
-        ...buildAnalysisHeaders(taskAnalysisMode, { 'Content-Type': 'application/json' }),
+        ...buildAnalysisHeaders(selectedAnalysisMode, { 'Content-Type': 'application/json' }),
         ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
       }
       const res = await fetch(getApiUrl(`/api/commentary/jobs/${task.job_id}/retry`), {
         method: 'POST',
         headers,
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          analysis_mode: selectedAnalysisMode,
+          gemini_model: selectedAnalysisMode === 'openai' ? undefined : geminiModel.trim(),
+          openai_model: selectedAnalysisMode === 'openai' ? openAICompatibleConfig?.model : undefined,
+        }),
       })
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, 'Retry failed'))
@@ -586,6 +600,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       setJobId(data.job_id)
       setStatus('processing')
       setLogs([...(task.logs || []), 'Retrying commentary remix from saved task checkpoints...'])
+      setLogsExpanded(true)
       setBackendStage({ stage: 'queued', label: '准备重试', progress: null })
       setResult(null)
       setUploadProgress(null)
@@ -613,6 +628,31 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     commentary_block_concurrency: Math.round(positiveNumberOrDefault(commentaryBlockConcurrency, COMMENTARY_DEFAULTS.commentaryBlockConcurrency)),
   })
 
+  const fetchGeminiModels = async () => {
+    if (!hasGeminiAccess) {
+      setGeminiModelsError(geminiAccessMissingMessage)
+      return
+    }
+    setGeminiModelsStatus('loading')
+    setGeminiModelsError('')
+    try {
+      const res = await fetch(getApiUrl('/api/settings/gemini-models'), {
+        headers: buildAnalysisHeaders('video'),
+      })
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, '获取 Gemini 模型失败'))
+      }
+      const data = await res.json()
+      const models = Array.isArray(data.models) ? data.models : []
+      setGeminiModels(models)
+      if ((!geminiModel.trim() || geminiModel === DEFAULT_GEMINI_MODEL) && models[0]?.id) setGeminiModel(models[0].id)
+    } catch (e) {
+      setGeminiModelsError(e.message || '获取 Gemini 模型失败，可以手动填写模型名')
+    } finally {
+      setGeminiModelsStatus('idle')
+    }
+  }
+
   const handleGenerate = async () => {
     const usingFile = sourceMode === 'file'
     if (!usingFile && !url.trim()) {
@@ -624,7 +664,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       return
     }
     if (!hasSelectedAnalysisAccess(analysisMode)) {
-      setError(analysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : '请先在 Settings 配置 Gemini API Key')
+      setError(analysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : geminiAccessMissingMessage)
       return
     }
     if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
@@ -637,6 +677,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     setActiveAnalysisMode(analysisMode)
     setStatus('processing')
     setLogs([usingFile ? 'Preparing to upload local video...' : 'Starting commentary remix...'])
+    setLogsExpanded(true)
     setBackendStage(null)
     setResult(null)
     setUploadProgress(usingFile ? 0 : null)
@@ -662,6 +703,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
           Object.entries(buildOpenAISamplingPayload()).forEach(([key, value]) => {
             formData.append(key, String(value))
           })
+        } else {
+          formData.append('gemini_model', geminiModel.trim())
         }
         if (analysisMode !== 'openai' && geminiConfig?.mode === 'official_pool') formData.append('gemini_pool', JSON.stringify(geminiConfig))
         formData.append('tts_provider', ttsProvider)
@@ -686,6 +729,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
           custom_style_prompt: effectiveCustomStylePrompt,
           target_duration: targetDuration,
           analysis_mode: analysisMode,
+          gemini_model: analysisMode === 'openai' ? undefined : geminiModel.trim(),
           openai_model: analysisMode === 'openai' ? openAICompatibleConfig?.model : undefined,
           ...(analysisMode === 'openai' ? buildOpenAISamplingPayload() : {}),
           tts_provider: ttsProvider,
@@ -869,6 +913,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     : '生成二创解说视频'
 
   const displayedOpenAIFrameIntervalSeconds = attachedTaskRequest?.openai_frame_interval_seconds ?? openAIFrameIntervalSeconds
+  const displayedGeminiModel = attachedTaskRequest?.gemini_model ?? geminiModel
   const displayedOpenAIMaxFrames = attachedTaskRequest?.openai_max_frames ?? openAIMaxFrames
   const displayedOpenAISceneMaxKeyframes = attachedTaskRequest?.openai_scene_max_keyframes ?? openAISceneMaxKeyframes
   const displayedOpenAIBatchSize = attachedTaskRequest?.openai_batch_size ?? openAIBatchSize
@@ -887,6 +932,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     result?.summary,
     Array.isArray(result?.hashtags) ? result.hashtags.join(' ') : '',
   ].filter(Boolean).join('\n\n')
+  const logPanelState = getCommentaryLogPanelState(logs, logsExpanded)
   const commentaryCovers = [
     result?.cover_landscape_url ? { label: '横封面 4:3', url: result.cover_landscape_url, className: 'aspect-[4/3]' } : null,
     result?.cover_portrait_url ? { label: '竖封面 3:4', url: result.cover_portrait_url, className: 'aspect-[3/4]' } : null,
@@ -897,6 +943,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     setJobId(null)
     setAttachedTaskRequest(null)
     setLogs([])
+    setLogsExpanded(true)
     setBackendStage(null)
     setResult(null)
     setError('')
@@ -1077,6 +1124,51 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                 </select>
                 <p className="text-xs text-zinc-500 mt-1">Gemini 视频模式会上传 360p 分析副本；OpenAI 兼容模式会转录全片并按时间线密集抽帧，分批发送到 Settings 里配置的多模态接口。最终剪辑仍使用高清源视频。</p>
               </div>
+              {analysisMode !== 'openai' && (
+                <div className="sm:col-span-2 rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-zinc-100">Gemini 模型</div>
+                      <p className="text-xs text-zinc-500 mt-1">用于二创解说的 Gemini 分析和脚本生成；可以从当前 Key/Base URL 获取模型，也可以手动填写代理支持的模型名。</p>
+                    </div>
+                    <button type="button" onClick={fetchGeminiModels} disabled={geminiModelsStatus === 'loading'} className="btn-secondary inline-flex items-center justify-center gap-2 text-sm px-4 py-2 disabled:opacity-60">
+                      {geminiModelsStatus === 'loading' && <Loader2 size={14} className="animate-spin" />}
+                      {geminiModelsStatus === 'loading' ? '获取中...' : '获取模型'}
+                    </button>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">模型列表</label>
+                      <select
+                        value={geminiModels.some((model) => model.id === geminiModel) ? geminiModel : ''}
+                        onChange={(e) => {
+                          setAttachedTaskRequest(null)
+                          if (e.target.value) setGeminiModel(e.target.value)
+                        }}
+                        className="input-field"
+                      >
+                        <option value="">{geminiModels.length ? '选择已获取模型' : '先点击获取模型'}</option>
+                        {geminiModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.display_name || model.id}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-300 mb-2">手动填写</label>
+                      <input
+                        value={geminiModel}
+                        onChange={(e) => {
+                          setAttachedTaskRequest(null)
+                          setGeminiModel(e.target.value)
+                        }}
+                        className="input-field font-mono"
+                        placeholder="gemini-3.1-flash-lite-preview"
+                      />
+                    </div>
+                  </div>
+                  {geminiModelsError && <p className="text-xs text-yellow-300">{geminiModelsError}</p>}
+                </div>
+              )}
               {analysisMode === 'openai' && (
                 <div className="sm:col-span-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] p-4 space-y-4">
                   <div>
@@ -1284,6 +1376,12 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               <div className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] p-4">
                 <div className="text-sm font-medium text-cyan-100 mb-3">当前任务参数</div>
                 <div className="grid sm:grid-cols-3 gap-3 text-xs">
+                  {attachedTaskRequest.analysis_mode !== 'openai' && (
+                    <div className="rounded-lg bg-black/20 border border-white/10 p-3 sm:col-span-3">
+                      <div className="text-zinc-500 mb-1">Gemini 模型</div>
+                      <div className="text-zinc-100 font-semibold font-mono">{displayedGeminiModel || '默认模型'}</div>
+                    </div>
+                  )}
                   <div className="rounded-lg bg-black/20 border border-white/10 p-3">
                     <div className="text-zinc-500 mb-1">每批图片数</div>
                     <div className="text-zinc-100 font-semibold">{attachedTaskRequest.openai_batch_size ?? '—'}</div>
@@ -1336,9 +1434,29 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               ))}
             </div>
 
-            <div className="flex-1 rounded-xl bg-black/30 border border-white/5 p-4 overflow-y-auto custom-scrollbar font-mono text-xs text-zinc-400 space-y-2">
-              {logs.length === 0 && <div>等待开始...</div>}
-              {logs.map((line, idx) => <div key={`${line}-${idx}`}>› {line}</div>)}
+            <div className="rounded-xl overflow-hidden">
+              <div className={`flex items-center justify-between gap-3 rounded-t-xl border border-white/5 bg-black/40 px-4 py-3 ${logsExpanded ? 'border-b-0' : 'rounded-b-xl'}`}>
+                <div>
+                  <div className="text-sm font-medium text-zinc-200">运行日志</div>
+                  <div className="text-xs text-zinc-500">{logPanelState.countLabel}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLogsExpanded((value) => !value)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white"
+                  title={logPanelState.toggleLabel}
+                  aria-label={logPanelState.toggleLabel}
+                  aria-expanded={logsExpanded}
+                >
+                  {logsExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
+              </div>
+              {logsExpanded && (
+                <div className={COMMENTARY_LOG_PANEL_BODY_CLASS}>
+                  {logs.length === 0 && <div>{logPanelState.emptyText}</div>}
+                  {logs.map((line, idx) => <div key={`${line}-${idx}`}>› {line}</div>)}
+                </div>
+              )}
             </div>
 
             {result && (

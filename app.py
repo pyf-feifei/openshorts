@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 from gemini_pool import parse_gemini_pool_config
+from gemini_client import list_gemini_models
 
 load_dotenv()
 
@@ -68,6 +69,23 @@ def resolve_openai_compat_config(
         "base_url": normalize_openai_compat_base_url(header_base_url or os.environ.get("OPENAI_COMPAT_BASE_URL") or ""),
         "model": (header_model or request_model or os.environ.get("OPENAI_COMPAT_MODEL") or "").strip(),
     }
+
+
+def commentary_retry_error_context(job: Dict) -> str:
+    parts = []
+    error = str((job or {}).get("error") or "").strip()
+    if error:
+        parts.append(error)
+    for log_entry in (job or {}).get("logs") or []:
+        text = str(log_entry or "").strip()
+        lowered = text.lower()
+        if (
+            "ali-oss" in lowered
+            or "responsetimeouterror" in lowered
+            or "response timeout for 60000ms" in lowered
+        ):
+            parts.append(text)
+    return "\n".join(dict.fromkeys(part for part in parts if part))
 
 
 def resolve_gemini_access(
@@ -514,6 +532,7 @@ COMMENTARY_PERSISTED_FIELDS = {
     "gemini_file_uri",
     "gemini_file_name",
     "gemini_file_mime_type",
+    "transcript_path",
     "script_path",
     "metadata_path",
     "result",
@@ -1045,6 +1064,27 @@ async def verify_youtube_cookies(req: YouTubeCookiesVerifyRequest):
         raise HTTPException(status_code=status_code, detail=result)
     return result
 
+@app.get("/api/settings/gemini-models")
+async def get_gemini_models(
+    request: Request,
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    x_gemini_base_url: Optional[str] = Header(None, alias=GEMINI_BASE_URL_HEADER),
+):
+    try:
+        api_key, gemini_base_url, _pool = resolve_gemini_access(
+            request,
+            header_key=x_gemini_key,
+            header_base_url=x_gemini_base_url,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    try:
+        return {"models": list_gemini_models(api_key, gemini_base_url)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to list Gemini models: {exc}")
+
 @app.post("/api/commentary/voice-preview")
 async def commentary_voice_preview(req: CommentaryVoicePreviewRequest):
     voice = (req.edge_voice or "").strip()
@@ -1316,6 +1356,15 @@ async def commentary_retry(
     if not request_data:
         request_data = {"url": job.get("source_value") or ""}
     req = CommentaryRequest(**request_data)
+    requested_analysis_mode = str(body.get("analysis_mode") or "").strip().lower()
+    if requested_analysis_mode:
+        req.analysis_mode = requested_analysis_mode
+    requested_gemini_model = str(body.get("gemini_model") or "").strip()
+    if requested_gemini_model:
+        req.gemini_model = requested_gemini_model
+    requested_openai_model = str(body.get("openai_model") or "").strip()
+    if requested_openai_model:
+        req.openai_model = requested_openai_model
     effective_gemini_pool = gemini_pool if gemini_pool.keys else None
     analysis_mode = (req.analysis_mode or DEFAULT_ANALYSIS_MODE).strip().lower()
     if analysis_mode not in {"current", "video", "openai"}:
@@ -1339,7 +1388,7 @@ async def commentary_retry(
             req.openai_model = openai_config["model"]
         apply_openai_sampling_options_to_request(req)
         job["request"] = commentary_request_to_dict(req)
-    elif not gemini_key and not gemini_pool.keys:
+    elif not has_cached_script and not gemini_key and not gemini_pool.keys:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key")
     tts_provider = (req.tts_provider or "edge").lower()
     if tts_provider == "elevenlabs" and not elevenlabs_key:
@@ -1364,7 +1413,7 @@ async def commentary_retry(
 
     job_output_dir = commentary_job_dir(job_id)
     os.makedirs(job_output_dir, exist_ok=True)
-    previous_error = job.get("error") or ""
+    previous_error = commentary_retry_error_context(job)
     job.update({
         "status": "processing",
         "stage": "queued",

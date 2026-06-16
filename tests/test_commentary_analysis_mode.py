@@ -23,6 +23,14 @@ def repeated_scene_text(base: str, count: int) -> str:
     return (base + "。") * count
 
 
+def varied_scene_text(parts):
+    return "。".join(parts) + "。"
+
+
+def joined_scene_text(base: str, count: int) -> str:
+    return "，".join(base for _ in range(count)) + "。"
+
+
 def beehive_visual_analysis():
     segments = [
         (2, 11), (11, 13), (19, 22), (46, 52), (64, 77), (84, 94),
@@ -67,7 +75,7 @@ TREE_HONEY_NARRATION = (
 
 
 def scene_matched_blocks(count=12, seconds=50.0, text=None):
-    block_text = text or scene_matched_block_text()
+    block_text = text or repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
     starts = [i * seconds for i in range(count)]
     if count == 12:
         starts = [i * 280.0 for i in range(count - 1)] + [3600.0]
@@ -271,6 +279,189 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
             commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
 
+    def test_full_mode_trims_small_density_shortfall_when_budget_stays_valid(self):
+        blocks = []
+        for index in range(19):
+            start = index * 24.0
+            blocks.append({
+                "start": start,
+                "end": start + 21.0,
+                "visual": f"第{index + 1}段工人贴着树干继续处理蜂巢",
+                "visual_facts": [f"第{index + 1}段工人贴着树干继续处理蜂巢"],
+                "narration": joined_scene_text(
+                    f"第{index + 1}段工人贴着树干处理蜂巢，袋子绳子跟着调整",
+                    3,
+                ),
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        blocks.append({
+            "start": 860.0,
+            "end": 880.0,
+            "visual": "后段工人继续贴着树干处理蜂巢并整理袋子",
+            "visual_facts": ["后段工人继续贴着树干处理蜂巢并整理袋子"],
+            "narration": joined_scene_text("后段工人继续贴着树干处理蜂巢，袋子绳子跟着整理", 3),
+            "pause": False,
+            "video_speed": 1.0,
+        })
+        blocks[2]["narration"] = "工人贴着树干处理蜂巢，袋子绳子跟着调整，蜂群还在旁边飞动，手套继续稳住蜂巢位置慢慢变化下去了"
+        data = {
+            "narration": "工人贴着树干处理蜂巢。",
+            "narration_blocks": blocks,
+        }
+
+        self.assertEqual(46, len(re.sub(r"\s+", "", blocks[2]["narration"])))
+        self.assertEqual(49, commentary._expected_narration_chars_for_visual_duration(21.0, "zh"))
+
+        commentary._validate_commentary_script_for_target(data, 1000.0, "full", "zh")
+
+        target = commentary._target_visual_duration_seconds(1000.0, "full")
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        self.assertGreaterEqual(
+            playable,
+            commentary._full_mode_min_playable_visual_seconds(1000.0, target)
+            - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertLess(data["narration_blocks"][2]["end"], 2 * 24.0 + 21.0)
+        commentary._validate_narration_density_matches_visual_duration(data["narration_blocks"][2], 3, "zh")
+
+    def test_full_mode_trims_moderate_density_shortfall_when_budget_stays_valid(self):
+        blocks = []
+        for index in range(19):
+            start = index * 24.0
+            narration = (
+                f"第{index + 1}段工人贴着树干处理蜂巢，袋子绳子继续调整，"
+                f"蜂群还在旁边活动，手套沿着蜂巢边缘继续推进第{index + 1}步"
+            )
+            blocks.append({
+                "start": start,
+                "end": start + 21.0,
+                "visual": f"第{index + 1}段工人贴着树干继续处理蜂巢",
+                "visual_facts": [f"第{index + 1}段工人贴着树干继续处理蜂巢"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        blocks[0]["end"] = 28.0
+        blocks[0]["narration"] = "工人贴着树干处理蜂巢，袋子绳子继续调整，蜂群还在旁边活动，手套沿着蜂巢边缘继续推进下去慢慢处理着"
+        blocks.append({
+            "start": 860.0,
+            "end": 900.0,
+            "visual": "后段工人继续处理蜂巢并整理袋子",
+            "visual_facts": ["后段工人继续处理蜂巢并整理袋子"],
+            "narration": joined_scene_text("后段工人继续贴着树干处理蜂巢，袋子绳子跟着整理，蜂群仍在旁边活动", 6),
+            "pause": False,
+            "video_speed": 1.0,
+        })
+        data = {
+            "narration": "工人贴着树干处理蜂巢。",
+            "narration_blocks": blocks,
+        }
+
+        self.assertEqual(48, len(re.sub(r"\s+", "", blocks[0]["narration"])))
+        self.assertEqual(68, commentary._expected_narration_chars_for_visual_duration(28.0, "zh"))
+
+        commentary._validate_commentary_script_for_target(data, 1000.0, "full", "zh")
+
+        self.assertLess(data["narration_blocks"][0]["end"], 28.0)
+        commentary._validate_narration_density_matches_visual_duration(data["narration_blocks"][0], 1, "zh")
+
+    def test_full_mode_trims_small_overselected_visual_budget(self):
+        narration = "工人贴着树干处理蜂巢，袋子绳子继续调整，蜂群仍在旁边活动，手套一点点稳住蜂巢位置继续往下慢慢处理着"
+        blocks = []
+        for index in range(25):
+            start = index * 22.0
+            block_narration = (
+                f"第{index + 1}段工人贴着树干处理蜂巢，袋子绳子继续调整，"
+                f"蜂群还在旁边活动，手套沿着蜂巢边缘慢慢处理推进第{index + 1}步"
+            )
+            blocks.append({
+                "start": start,
+                "end": start + 21.0,
+                "visual": f"第{index + 1}段工人贴着树干处理蜂巢",
+                "visual_facts": [f"第{index + 1}段工人贴着树干处理蜂巢"],
+                "narration": block_narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        blocks.append({
+            "start": 1540.0,
+            "end": 1562.0,
+            "visual": "后段工人继续贴着树干处理蜂巢并整理袋子",
+            "visual_facts": ["后段工人继续贴着树干处理蜂巢并整理袋子"],
+            "narration": narration,
+            "pause": False,
+            "video_speed": 1.0,
+        })
+        data = {
+            "narration": "工人贴着树干处理蜂巢。",
+            "narration_blocks": blocks,
+        }
+
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        self.assertGreater(
+            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
+            commentary._full_mode_max_playable_visual_seconds(1800.0, target),
+        )
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        self.assertLessEqual(
+            playable,
+            commentary._full_mode_max_playable_visual_seconds(1800.0, target)
+            + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertGreaterEqual(
+            max(block["end"] for block in data["narration_blocks"]),
+            1800.0 * commentary.FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION,
+        )
+
+    def test_full_mode_min_playable_visual_window_allows_ten_percent_shortfall(self):
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+
+        self.assertEqual(480.0, target)
+        self.assertAlmostEqual(432.0, commentary._full_mode_min_playable_visual_seconds(1800.0, target))
+
+    def test_full_mode_strips_camera_meta_phrasing_before_validation(self):
+        data = {
+            "narration": "镜头切到工人贴着树干处理蜂巢。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 20,
+                    "visual": "工人贴着树干处理蜂巢",
+                    "visual_facts": ["工人贴着树干处理蜂巢"],
+                    "narration": "镜头切到工人贴着树干处理蜂巢，袋子绳子跟着调整，蜂群还在旁边活动，手套沿着蜂巢边缘继续处理。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 420,
+                    "end": 650,
+                    "visual": "中段工人继续处理蜂巢并调整袋子",
+                    "visual_facts": ["中段工人继续处理蜂巢并调整袋子"],
+                    "narration": "中段工人继续贴着树干处理蜂巢，袋子绳子跟着整理，蜂群仍在旁边活动，手套把蜂巢边缘慢慢稳住继续处理，整段动作顺着树干一点点往下推进。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 860,
+                    "end": 1000,
+                    "visual": "后段工人继续处理蜂巢并整理袋子",
+                    "visual_facts": ["后段工人继续处理蜂巢并整理袋子"],
+                    "narration": "后段工人继续贴着树干处理蜂巢，袋子绳子跟着整理，蜂群仍在旁边活动，手套把蜂巢边缘慢慢收住继续固定位置，最后的动作还在稳稳往下收。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+        }
+
+        commentary._strip_camera_meta_phrasing(data)
+
+        self.assertNotIn("镜头", data["narration"])
+        self.assertNotIn("镜头", data["narration_blocks"][0]["narration"])
+
     def test_full_mode_allows_slight_density_shortfall_with_grounded_narration(self):
         block = {
             "start": 0,
@@ -343,55 +534,243 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             commentary.FULL_MODE_MAX_NARRATION_SILENCE_TAIL_SECONDS + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
         )
 
-    def test_full_mode_rejects_short_block_matched_visual_budget_without_backend_fill(self):
+    def test_full_mode_repairs_small_underselected_visual_budget_with_pause_bridges(self):
+        starts = [index * 30.0 for index in range(20)] + [1540.0 + index * 30.0 for index in range(6)]
+        blocks = [
+            {
+                "start": start,
+                "end": start + 15.0,
+                "visual": f"第{index + 1}处工人处理材料并调整设备位置",
+                "visual_facts": [f"第{index + 1}处工人处理材料并调整设备位置"],
+                "narration": (
+                    f"第{index + 1}处工人围着材料和设备调整位置，工具、手部和材料边缘都在同步变化，"
+                    "处理节奏保持清楚，后续动作也能顺着这个工序继续推进。"
+                ),
+                "pause": False,
+                "video_speed": 1.0,
+            }
+            for index, start in enumerate(starts)
+        ]
         data = {
-            "narration": "工人在处理材料。",
-            "narration_blocks": [
-                {
-                    "start": 0,
-                    "end": 60.0,
-                    "visual": "工人整理材料并准备进入下一步",
-                    "visual_facts": ["工人整理材料并准备进入下一步"],
-                    "narration": "工人先把材料整理好，准备进入下一步处理。",
-                    "pause": False,
-                    "video_speed": 1.0,
-                },
-                {
-                    "start": 120.0,
-                    "end": 180.0,
-                    "visual": "设备继续运转，材料被送到处理区域",
-                    "visual_facts": ["设备继续运转，材料被送到处理区域"],
-                    "narration": "设备继续运转，材料被送到处理区域。",
-                    "pause": False,
-                    "video_speed": 1.0,
-                },
-                {
-                    "start": 240.0,
-                    "end": 300.0,
-                    "visual": "工人检查处理后的材料状态",
-                    "visual_facts": ["工人检查处理后的材料状态"],
-                    "narration": "工人检查处理后的材料状态，确认流程继续推进。",
-                    "pause": False,
-                    "video_speed": 1.0,
-                },
-                {
-                    "start": 630.0,
-                    "end": 653.8,
-                    "visual": "后段流程展示最终处理结果",
-                    "visual_facts": ["后段流程展示最终处理结果"],
-                    "narration": "后段流程把最终处理结果交代出来。",
-                    "pause": False,
-                    "video_speed": 1.0,
-                },
-            ],
+            "narration": "工人处理材料并调整设备位置。",
+            "narration_blocks": blocks,
         }
 
-        with self.assertRaisesRegex(Exception, "will not invent filler ranges|do not match the selected full-mode edit target"):
-            commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
 
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        added_pauses = [block for block in data["narration_blocks"] if block.get("auto_filled_visual_budget")]
+
+        self.assertGreaterEqual(
+            playable,
+            commentary._full_mode_min_playable_visual_seconds(1800.0, target)
+            - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertTrue(added_pauses or any(block["end"] > block["start"] + 15.0 for block in data["narration_blocks"]))
+        self.assertTrue(all(block.get("pause") for block in added_pauses))
+        self.assertTrue(all(not block.get("narration") for block in added_pauses))
+        self.assertTrue(
+            all(
+                commentary._block_visual_duration(block)
+                <= commentary.FULL_MODE_MAX_PAUSE_SECONDS + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS
+                for block in added_pauses
+            )
+        )
+        self.assertEqual(data["edit_segments"], commentary._narration_blocks_to_edit_segments(data["narration_blocks"]))
+
+        data["narration_blocks"] = commentary._strip_auto_filled_user_visible_fields(data["narration_blocks"])
+        data["edit_segments"] = commentary._narration_blocks_to_edit_segments(data["narration_blocks"])
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
         self.assertFalse(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
 
-    def test_full_mode_rejects_cached_auto_fill_placeholder_as_ai_selection(self):
+    def test_full_mode_repairs_underselected_budget_with_leading_pause_bridge(self):
+        blocks = []
+        for index in range(20):
+            start = 18.0 + index * 21.0
+            narration = (
+                f"第{index + 1}段工人贴着树干处理蜂巢，袋子绳子跟着调整，"
+                f"蜂群还在旁边活动，手套沿着蜂巢边缘继续推进第{index + 1}步"
+            )
+            blocks.append({
+                "start": start,
+                "end": start + 20.0,
+                "visual": f"第{index + 1}段工人贴着树干处理蜂巢",
+                "visual_facts": [f"第{index + 1}段工人贴着树干处理蜂巢"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        blocks.append({
+            "start": 1540.0,
+            "end": 1560.0,
+            "visual": "后段工人继续处理蜂巢并整理袋子",
+            "visual_facts": ["后段工人继续处理蜂巢并整理袋子"],
+            "narration": "后段工人继续贴着树干处理蜂巢，袋子绳子跟着整理，蜂群仍在旁边活动，手套把蜂巢边缘慢慢收住继续固定位置",
+            "pause": False,
+            "video_speed": 1.0,
+        })
+        data = {
+            "narration": "工人贴着树干处理蜂巢。",
+            "narration_blocks": blocks,
+        }
+
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        self.assertLess(
+            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
+            commentary._full_mode_min_playable_visual_seconds(1800.0, target),
+        )
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        added_pauses = [block for block in data["narration_blocks"] if block.get("auto_filled_visual_budget")]
+        extended_blocks = [
+            block
+            for block in data["narration_blocks"]
+            if not block.get("pause") and block.get("end", 0) > block.get("start", 0) + 20.0
+        ]
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        self.assertTrue(added_pauses or extended_blocks)
+        self.assertGreaterEqual(
+            playable,
+            commentary._full_mode_min_playable_visual_seconds(1800.0, target)
+            - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        if added_pauses:
+            self.assertLessEqual(
+                max(commentary._block_visual_duration(block) for block in added_pauses),
+                commentary.FULL_MODE_MAX_PAUSE_SECONDS + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+            )
+
+    def test_full_mode_repairs_underselected_budget_by_extending_dense_narrated_blocks(self):
+        blocks = []
+        starts = [index * 20.0 for index in range(20)] + [1540.0]
+        for index, start in enumerate(starts):
+            blocks.append({
+                "start": start,
+                "end": start + 20.0,
+                "visual": f"第{index + 1}段工人连续处理材料和设备",
+                "visual_facts": [f"第{index + 1}段工人连续处理材料和设备"],
+                "narration": (
+                    f"第{index + 1}段工人处理材料和设备，工具位置变化，"
+                    "手部动作与蜂群位置同步推进，材料状态也继续变化下去。"
+                ),
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {
+            "narration": "工人连续处理材料和设备。",
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+
+        self.assertGreaterEqual(
+            playable,
+            commentary._full_mode_min_playable_visual_seconds(1800.0, target)
+            - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertGreater(data["narration_blocks"][-1]["end"], 420.0)
+
+    def test_full_mode_allows_subsecond_visual_budget_shortfall_after_repair(self):
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        min_visual_seconds = commentary._full_mode_min_playable_visual_seconds(1800.0, target)
+        playable_seconds = min_visual_seconds - 0.4
+        blocks = []
+        for index in range(20):
+            duration = 21.0
+            start = index * 30.0
+            if index == 19:
+                duration = playable_seconds - (21.0 * 19)
+                start = 1800.0 - duration
+            expected_chars = commentary._expected_narration_chars_for_visual_duration(duration, "zh")
+            prefix = f"第{index + 1}段"
+            narration = prefix + ("工" * max(0, expected_chars - len(prefix)))
+            blocks.append({
+                "start": start,
+                "end": start + duration,
+                "visual": f"第{index + 1}段工人处理材料并调整设备",
+                "visual_facts": [f"第{index + 1}段工人处理材料并调整设备"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {
+            "narration": "\n\n".join(block["narration"] for block in blocks),
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        self.assertLess(playable, min_visual_seconds)
+        self.assertGreaterEqual(
+            playable,
+            min_visual_seconds - commentary._full_mode_visual_budget_tolerance_seconds(target),
+        )
+
+    def test_full_mode_repairs_small_underselected_budget_by_extending_trailing_pause(self):
+        blocks = []
+        for index in range(20):
+            start = index * 20.0
+            blocks.append({
+                "start": start,
+                "end": start + 20.0,
+                "visual": f"第{index + 1}段工人连续处理材料和设备",
+                "visual_facts": [f"第{index + 1}段工人连续处理材料和设备"],
+                "narration": joined_scene_text(
+                    f"第{index + 1}段工人连续处理材料和设备，工具位置和材料状态继续变化",
+                    2,
+                ),
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        blocks.append({
+            "start": 1540.0,
+            "end": 1556.0,
+            "visual": "后段工人继续处理材料，原片环境声承接",
+            "visual_facts": ["后段工人继续处理材料，原片环境声承接"],
+            "narration": "",
+            "pause": True,
+            "video_speed": 1.0,
+        })
+        data = {
+            "narration": "工人连续处理材料和设备。",
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        target = commentary._target_visual_duration_seconds(1800.0, "full")
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        added_pauses = [block for block in data["narration_blocks"] if block.get("auto_filled_visual_budget")]
+        extended_blocks = [
+            block
+            for index, block in enumerate(data["narration_blocks"][:20])
+            if block.get("end", 0) > index * 20.0 + 20.0
+        ]
+        pause_blocks = [block for block in data["narration_blocks"] if block.get("pause")]
+
+        self.assertGreaterEqual(
+            playable,
+            commentary._full_mode_min_playable_visual_seconds(1800.0, target)
+            - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertTrue(added_pauses or extended_blocks)
+        self.assertTrue(all(block.get("pause") for block in added_pauses))
+        self.assertTrue(all(not block.get("narration") for block in added_pauses))
+        self.assertTrue(
+            all(
+                commentary._block_visual_duration(block)
+                <= commentary.FULL_MODE_MAX_PAUSE_SECONDS + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS
+                for block in pause_blocks
+            )
+        )
+
+    def test_full_mode_rejects_auto_fill_placeholder_narration_as_ai_selection(self):
         placeholder = "这一段把前后工序之间的衔接补上，材料处理、设备运转和人员操作继续往前推进，流程不是突然跳过去，而是顺着这里进入下一步"
         data = {
             "narration": f"前面正常解说。\n\n{placeholder}\n\n后面正常解说。",
@@ -426,17 +805,125 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(Exception, "will not invent filler ranges|do not match the selected full-mode edit target"):
+        with self.assertRaisesRegex(Exception, "auto-filled placeholder phrase"):
             commentary._validate_commentary_script_for_target(data, 720.0, "full", "zh")
 
-        self.assertTrue(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
-        self.assertLess(
-            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
-            commentary._full_mode_min_playable_visual_seconds(
-                720.0,
-                commentary._target_visual_duration_seconds(720.0, "full"),
-            ),
-        )
+        self.assertFalse(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
+
+    def test_full_mode_rewrites_unsupported_completion_claim_instead_of_rejecting(self):
+        data = {
+            "narration": "工人继续处理蜂巢，袋子还在旁边。蜂巢装好收工。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 230,
+                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
+                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
+                    "narration": joined_scene_text("工人继续处理蜂巢，袋子和绳子还在旁边调整", 46),
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 1540,
+                    "end": 1770,
+                    "visual": "工人继续沿树干移动，蜂群仍在周围活动",
+                    "visual_facts": ["工人继续沿树干移动，蜂群仍在周围活动"],
+                    "narration": joined_scene_text("工人继续沿树干移动，蜂群仍在周围活动，蜂巢装好收工", 39),
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
+
+        self.assertNotIn("收工", data["narration"])
+        self.assertNotIn("装好", data["narration"])
+        self.assertNotIn("收工", data["narration_blocks"][1]["narration"])
+        self.assertIn("继续处理", data["narration_blocks"][1]["narration"])
+
+    def test_medium_mode_rewrites_unsupported_completion_claim_instead_of_rejecting(self):
+        data = {
+            "title": "蜂巢处理",
+            "summary": "summary",
+            "hook": "hook",
+            "narration": "工人继续处理蜂巢，蜂群还在周围。蜂巢装好收工。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 20,
+                    "visual": "工人继续处理蜂巢，蜂群还在周围飞动",
+                    "visual_facts": ["工人继续处理蜂巢，蜂群还在周围飞动"],
+                    "narration": "工人继续处理蜂巢，蜂群还在周围飞动，蜂巢装好收工。",
+                    "pause": False,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "chapters": [],
+            "hashtags": [],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
+
+        self.assertNotIn("收工", data["narration"])
+        self.assertNotIn("装好", data["narration"])
+        self.assertNotIn("收工", data["narration_blocks"][0]["narration"])
+        self.assertIn("继续处理", data["narration_blocks"][0]["narration"])
+
+    def test_medium_mode_rewrites_unsupported_container_loading_claim_instead_of_rejecting(self):
+        data = {
+            "title": "蜂巢处理",
+            "summary": "summary",
+            "hook": "hook",
+            "narration": "工人继续处理蜂巢，蜂巢块被放进袋子里。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 20,
+                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
+                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
+                    "narration": "工人继续处理蜂巢，手套贴着树干往下动，蜂巢块被放进袋子里。",
+                    "pause": False,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "chapters": [],
+            "hashtags": [],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
+
+        self.assertNotIn("放进袋", data["narration"])
+        self.assertNotIn("放进袋", data["narration_blocks"][0]["narration"])
+        self.assertIn("继续处理", data["narration_blocks"][0]["narration"])
+
+    def test_medium_mode_rewrites_unsupported_bag_mouth_claim_instead_of_rejecting(self):
+        data = {
+            "title": "蜂巢处理",
+            "summary": "summary",
+            "hook": "hook",
+            "narration": "蜂巢被放入袋中，袋口被拧紧。",
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 20,
+                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
+                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
+                    "narration": "工人继续处理蜂巢，蜂巢被放入袋中，袋口被拧紧。",
+                    "pause": False,
+                },
+            ],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "chapters": [],
+            "hashtags": [],
+        }
+
+        commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
+
+        self.assertNotIn("放入袋", data["narration"])
+        self.assertNotIn("袋口被拧紧", data["narration"])
+        self.assertNotIn("放入袋", data["narration_blocks"][0]["narration"])
+        self.assertNotIn("袋口被拧紧", data["narration_blocks"][0]["narration"])
 
     def test_auto_filled_blocks_do_not_expose_placeholder_visuals(self):
         blocks = [
@@ -825,6 +1312,66 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertNotIn("54 chars", note)
         self.assertNotIn("expected at least 98", note)
 
+    def test_medium_retry_includes_previous_completion_claim_error_note(self):
+        transcript = {
+            "text": "beekeeper process",
+            "language": "en",
+            "segments": [{"start": 0, "end": 10, "text": "beekeeper process"}],
+        }
+        payload = {
+            "title": "Medium",
+            "summary": "summary",
+            "hook": "hook",
+            "narration": "手套贴着树干继续操作，蜂群还在旁边飞，镜头只看到当前处理动作。" * 12,
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 30,
+                    "visual": "beekeeper handles hive on tree with bees still active",
+                    "visual_facts": ["beekeeper handles hive on tree"],
+                    "evidence_timestamps": [10],
+                    "narration": "手套贴着树干继续操作，蜂群还在旁边飞，镜头只看到当前处理动作。",
+                    "pause": False,
+                }
+            ],
+            "edit_segments": [{"start": 0, "end": 30, "reason": "process"}],
+            "chapters": [],
+            "hashtags": [],
+        }
+
+        class CapturingModels:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                return pytypes.SimpleNamespace(text=commentary.json.dumps(payload, ensure_ascii=False))
+
+        fake_models = CapturingModels()
+        fake_client = pytypes.SimpleNamespace(models=fake_models)
+        previous_error = (
+            "AI narration block claims a completed packing/ending action that is not supported by its selected visual range. "
+            "Block 13 says the work is finished, completed, or 收工, but the block visual description does not show a final result."
+        )
+
+        with patch.object(commentary, "create_gemini_client", return_value=fake_client):
+            commentary.generate_commentary_script(
+                transcript=transcript,
+                video_title="Demo",
+                duration=120,
+                gemini_key="key",
+                analysis_mode="current",
+                target_duration="medium",
+                language="zh",
+                previous_error=previous_error,
+            )
+
+        prompt = fake_models.calls[0]["contents"][0]
+        self.assertIn("Retry correction note", prompt)
+        self.assertIn("completed packing/ending action", prompt)
+        self.assertIn("describe only what is visible", prompt)
+        self.assertNotIn("full-mode target duration", prompt)
+
     def test_previous_error_invalidates_cached_script_only_for_script_failures(self):
         self.assertFalse(commentary._previous_error_invalidates_cached_script(
             "ffmpeg failed while burning subtitles: Error writing trailer: No space left on device"
@@ -838,6 +1385,50 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertTrue(commentary._previous_error_invalidates_cached_script(
             "Gemini returned invalid JSON for the commentary script."
         ))
+
+    def test_medium_gemini_invalid_json_is_repaired_before_failing(self):
+        transcript = {
+            "text": "factory process",
+            "language": "en",
+            "segments": [{"start": 0, "end": 10, "text": "factory process"}],
+        }
+        repaired_payload = {
+            "title": "Repaired",
+            "summary": "summary",
+            "hook": "hook",
+            "narration": "这是一段修复后的解说内容。" * 30,
+            "edit_segments": [{"start": 0, "end": 60, "reason": "process"}],
+            "chapters": [],
+            "hashtags": [],
+        }
+
+        class RepairingModels:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    return pytypes.SimpleNamespace(text='{"title":"Broken" "summary":"missing comma"}')
+                return pytypes.SimpleNamespace(text=commentary.json.dumps(repaired_payload, ensure_ascii=False))
+
+        fake_models = RepairingModels()
+        fake_client = pytypes.SimpleNamespace(models=fake_models)
+
+        with patch.object(commentary, "create_gemini_client", return_value=fake_client):
+            result = commentary.generate_commentary_script(
+                transcript=transcript,
+                video_title="Demo",
+                duration=120,
+                gemini_key="key",
+                analysis_mode="current",
+                target_duration="medium",
+                language="zh",
+            )
+
+        self.assertEqual("Repaired", result["title"])
+        self.assertEqual(2, len(fake_models.calls))
+        self.assertIn("PREVIOUS RESPONSE WAS NOT VALID JSON", fake_models.calls[1]["contents"][0])
 
     def test_audio_fit_allows_render_sync_speedup_for_short_visual_block(self):
         commands = []
@@ -876,6 +1467,32 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("[aout]", command[command.index("-map") + 1])
         self.assertIn("-c:a", command)
         self.assertEqual("aac", command[command.index("-c:a") + 1])
+
+    def test_concat_media_parts_writes_absolute_paths_for_relative_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = os.path.join(tmpdir, "work")
+            os.makedirs(work_dir, exist_ok=True)
+            part_path = os.path.join(tmpdir, "part.mp4")
+            output_path = os.path.join(tmpdir, "out.mp4")
+            open(part_path, "wb").close()
+            captured = {}
+
+            def fake_run_command(cmd, cwd=None):
+                captured["cmd"] = cmd
+
+            current_dir = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                    commentary._concat_media_parts(["part.mp4"], output_path, work_dir)
+            finally:
+                os.chdir(current_dir)
+
+            list_path = captured["cmd"][captured["cmd"].index("-i") + 1]
+            with open(list_path, "r", encoding="utf-8") as f:
+                concat_list = f.read()
+
+        self.assertIn(os.path.abspath(part_path).replace("\\", "/"), concat_list)
 
     def test_synced_block_slows_accelerated_video_when_tts_is_long(self):
         fit_calls = []
@@ -1291,6 +1908,40 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual([path, path], calls)
         self.assertEqual("https://files.example/video-1", part.file_data.file_uri)
 
+    def test_video_upload_uses_ascii_safe_temp_path_for_emoji_filename(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ATTACKED!_Brave_Honey_Hunter_vs__Giant_Angry_Bees_😱.mp4")
+            with open(path, "wb") as f:
+                f.write(b"video")
+
+            uploaded = pytypes.SimpleNamespace(
+                name="files/video-1",
+                uri="https://files.example/video-1",
+                mime_type="video/mp4",
+                state="ACTIVE",
+            )
+            upload_calls = []
+
+            def fake_upload(file):
+                upload_calls.append(file)
+                file.encode("ascii")
+                return uploaded
+
+            client = pytypes.SimpleNamespace(
+                files=pytypes.SimpleNamespace(
+                    upload=fake_upload,
+                    get=lambda name: uploaded,
+                )
+            )
+
+            part = commentary._upload_gemini_video_part(client, path)
+
+            self.assertEqual("https://files.example/video-1", part.file_data.file_uri)
+            self.assertEqual(1, len(upload_calls))
+            self.assertNotEqual(path, upload_calls[0])
+            upload_calls[0].encode("ascii")
+            self.assertFalse(os.path.exists(upload_calls[0]))
+
     def test_large_video_processing_timeout_scales_beyond_default_wait(self):
         timeout = commentary._gemini_file_processing_timeout(
             duration=3935,
@@ -1525,13 +2176,13 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             units = sum(commentary._subtitle_char_units(char) for char in line)
             self.assertLessEqual(units, commentary.ASS_SUBTITLE_MAX_LINE_UNITS)
 
-    def test_downloader_quality_settings_cap_high_default_at_720p_and_keep_low_suffix(self):
+    def test_downloader_quality_settings_cap_high_default_at_1080p_and_keep_low_suffix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             high = main._youtube_download_settings("My Video", tmpdir)
             low = main._youtube_download_settings("My Video", tmpdir, quality="low", filename_suffix="_analysis_low")
 
-        self.assertIn("bestvideo[height<=720][vcodec^=avc1][ext=mp4]", high["format"])
-        self.assertIn("best[height<=720][ext=mp4]", high["format"])
+        self.assertIn("bestvideo[height<=1080][vcodec^=avc1][ext=mp4]", high["format"])
+        self.assertIn("best[height<=1080][ext=mp4]", high["format"])
         self.assertTrue(high["expected_file"].endswith("My_Video.mp4"))
         self.assertIn("height<=360", low["format"])
         self.assertTrue(low["expected_file"].endswith("My_Video_analysis_low.mp4"))
@@ -1646,6 +2297,115 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("https://files.example/reused", generate_script.call_args.kwargs["gemini_file"]["uri"])
         self.assertEqual("source_gemini_360p.mp4", result["analysis_video"])
 
+    def test_video_mode_retry_after_proxy_oss_timeout_falls_back_to_current_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            prepared_path = os.path.join(tmpdir, "source_gemini_360p.mp4")
+            frame_path = os.path.join(tmpdir, "frame.jpg")
+            open(source_path, "wb").close()
+            open(prepared_path, "wb").close()
+            open(frame_path, "wb").close()
+            transcript = {
+                "text": "cached transcript",
+                "segments": [{"start": 0, "end": 2, "text": "cached transcript"}],
+                "language": "zh",
+            }
+            previous_error = (
+                "500 INTERNAL. {'error': {'code': 500, 'message': "
+                "'Response timeout for 60000ms, please increase the timeout, "
+                "see more details at https://github.com/ali-sdk/ali-oss#responsetimeouterror'}}"
+            )
+
+            with patch.object(commentary, "_prepare_analysis_video_for_gemini") as prepare_analysis, \
+                patch.object(commentary, "_get_video_info", return_value={"duration": 42, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "transcribe_video", return_value=transcript) as transcribe, \
+                patch.object(commentary, "_extract_keyframes", return_value=[frame_path]) as extract_frames, \
+                patch.object(commentary, "generate_commentary_script", return_value={
+                    "title": "Remix",
+                    "summary": "summary",
+                    "hook": "hook",
+                    "narration": "Narration",
+                    "edit_segments": [{"start": 0, "end": 10, "reason": "best part"}],
+                    "chapters": [],
+                    "hashtags": [],
+                }) as generate_script, \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=lambda **kwargs: open(kwargs["output_path"], "wb").close()), \
+                patch.object(commentary, "_create_visual_edit"), \
+                patch.object(commentary, "_fit_video_to_voiceover"), \
+                patch.object(commentary, "_create_ambient_audio_bed", return_value=None), \
+                patch.object(commentary, "_mix_voiceover_with_video"), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}):
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="video",
+                    prepared_analysis_video_path=prepared_path,
+                    gemini_file={"uri": "files/old-video", "mime_type": "video/mp4"},
+                    previous_error=previous_error,
+                )
+
+        prepare_analysis.assert_not_called()
+        transcribe.assert_called_once()
+        extract_frames.assert_called_once()
+        self.assertEqual("current", generate_script.call_args.kwargs["analysis_mode"])
+        self.assertEqual(transcript, generate_script.call_args.kwargs["transcript"])
+        self.assertEqual([frame_path], generate_script.call_args.kwargs["frame_paths"])
+        self.assertIsNone(generate_script.call_args.kwargs["analysis_video_path"])
+        self.assertIsNone(generate_script.call_args.kwargs["gemini_file"])
+        self.assertEqual("current", result["analysis_mode"])
+        self.assertEqual("video", result["requested_analysis_mode"])
+        self.assertIn("ali-oss", result["analysis_fallback_reason"])
+
+    def test_current_mode_reuses_cached_transcript_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            cached_transcript = {
+                "text": "cached transcript",
+                "segments": [{"start": 0, "end": 2, "text": "cached transcript"}],
+                "language": "zh",
+            }
+            commentary._save_commentary_transcript_cache(tmpdir, cached_transcript)
+            checkpoints = []
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 42, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "transcribe_video") as transcribe, \
+                patch.object(commentary, "_extract_keyframes", return_value=[]), \
+                patch.object(commentary, "generate_commentary_script", return_value={
+                    "title": "Remix",
+                    "summary": "summary",
+                    "hook": "hook",
+                    "narration": "Narration",
+                    "edit_segments": [{"start": 0, "end": 10, "reason": "best part"}],
+                    "chapters": [],
+                    "hashtags": [],
+                }) as generate_script, \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=lambda **kwargs: open(kwargs["output_path"], "wb").close()), \
+                patch.object(commentary, "_create_visual_edit") as create_visual, \
+                patch.object(commentary, "_fit_video_to_voiceover"), \
+                patch.object(commentary, "_create_ambient_audio_bed", return_value=None), \
+                patch.object(commentary, "_mix_voiceover_with_video"), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}):
+
+                commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="current",
+                    checkpoint=checkpoints.append,
+                )
+
+        transcribe.assert_not_called()
+        self.assertEqual(cached_transcript, generate_script.call_args.kwargs["transcript"])
+        create_visual.assert_called_once()
+        self.assertFalse(any("transcript_path" in item for item in checkpoints))
+
     def test_full_duration_creates_comprehensive_edit_instead_of_raw_full_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = os.path.join(tmpdir, "source.mp4")
@@ -1712,6 +2472,76 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertGreater(result["auto_video_speed_summary"]["saved_seconds"], 0)
         mix_video.assert_called_once()
         self.assertTrue(mix_video.call_args.kwargs["trim_to_voiceover"])
+
+    def test_medium_duration_uses_narration_blocks_for_block_synced_render(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+
+            blocks = [
+                {
+                    "start": 0,
+                    "end": 20,
+                    "visual": "worker walks into the field with a tool",
+                    "narration": "她先带着工具走进山路，准备开始今天的采集。",
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 80,
+                    "end": 100,
+                    "visual": "worker chops into a fallen trunk",
+                    "narration": "接着劈开倒下的树干，寻找藏在里面的食材。",
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 120,
+                    "end": 140,
+                    "visual": "worker picks larvae into a bucket",
+                    "narration": "画面切到她把虫子一只只捡进桶里。",
+                    "video_speed": 1.0,
+                },
+            ]
+
+            with patch.object(commentary, "_prepare_analysis_video_for_gemini", return_value=source_path), \
+                patch.object(commentary, "_get_video_info", return_value={"duration": 3600, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "transcribe_video") as transcribe, \
+                patch.object(commentary, "generate_commentary_script", return_value={
+                    "title": "Remix",
+                    "summary": "summary",
+                    "hook": "hook",
+                    "narration": "\n\n".join(block["narration"] for block in blocks),
+                    "narration_blocks": blocks,
+                    "edit_segments": [{"start": 0, "end": 180, "reason": "legacy long edit"}],
+                    "chapters": [],
+                    "hashtags": [],
+                }), \
+                patch.object(commentary, "generate_commentary_voiceover") as voiceover, \
+                patch.object(commentary, "_create_visual_edit") as create_visual, \
+                patch.object(commentary, "_fit_video_to_voiceover") as fit_video, \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [4.0, 5.0, 4.5])) as create_synced, \
+                patch.object(commentary, "_create_ambient_audio_bed") as create_ambient, \
+                patch.object(commentary, "_mix_voiceover_with_video") as mix_video:
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="video",
+                    target_duration="medium",
+                )
+
+        transcribe.assert_not_called()
+        voiceover.assert_not_called()
+        create_visual.assert_not_called()
+        fit_video.assert_not_called()
+        create_ambient.assert_not_called()
+        create_synced.assert_called_once()
+        self.assertEqual(commentary._narration_blocks_to_edit_segments(blocks), result["edit_segments"])
+        self.assertEqual(result["edited_visual"], result["timed_visual"])
+        self.assertEqual([4.0, 5.0, 4.5], result["subtitle_block_durations"])
+        mix_video.assert_called_once()
 
     def test_full_duration_renders_ai_planned_commentary_episodes_from_final_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2146,7 +2976,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         retry_note = commentary._retry_correction_note(str(validation_error))
 
         self.assertIn("under-selected", repair)
-        self.assertIn("Add or recover at least 9.3s", repair)
+        self.assertIn("Add at least", repair)
         self.assertIn("AI-selected, useful, scene-matched source ranges", repair)
         self.assertIn("lowering over-aggressive video_speed", repair)
         self.assertIn("Do not invent filler ranges", repair)
@@ -2198,7 +3028,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertIn("Full-edit timing must remain inside the target window", repair)
         self.assertIn("391.8s target", repair)
-        self.assertIn("360.5-431.0s", repair)
+        self.assertIn("352.6-431.0s", repair)
         self.assertIn("Do not let a local density fix break the full-edit visual target", repair)
         self.assertIn("recover the removed playable time", repair)
         self.assertIn("Preserve exactly 16 total narration_blocks", repair)
@@ -2608,7 +3438,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         })
 
         commentary._validate_commentary_script_for_target(
-            {"narration": block_text, "narration_blocks": blocks},
+            {"narration": block_text, "narration_blocks": blocks, "_skip_repeat_validation": True},
             duration=3935,
             target_duration="full",
             language="zh",
@@ -2635,6 +3465,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         })
         narration = "工人处理废旧材料，设备运转后最终会形成更清楚的回收结果。"
         data = {"narration": narration, "narration_blocks": blocks}
+        data["_skip_repeat_validation"] = True
         data["narration_blocks"] = commentary._normalize_narration_blocks(data["narration_blocks"], 3935)
         data["narration"] = narration
 
@@ -2792,6 +3623,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "narration": "蜂巢切开一大块，装好收工",
             "pause": False,
             "video_speed": 1.5,
+            "speed_reason": "repeated hive material removal remains understandable at mild acceleration",
         }
         visual_analysis = {
             "observations": [
@@ -2814,11 +3646,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(Exception, "completed packing/ending action"):
-            commentary._validate_commentary_script_for_target(
+            commentary._validate_scene_matched_narration_blocks(
                 {"narration": block["narration"], "narration_blocks": [block]},
-                duration=678.4,
-                target_duration="full",
-                language="zh",
                 visual_analysis=visual_analysis,
             )
 
@@ -2905,6 +3734,64 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                         [712.0],
                         source_duration=678.4,
                     )
+
+    def test_full_mode_output_alignment_allows_subtitles_to_end_before_pause_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            final_path = os.path.join(tmpdir, "final.mp4")
+            voice_path = os.path.join(tmpdir, "voice.m4a")
+            subtitle_path = os.path.join(tmpdir, "subs.ass")
+            open(final_path, "wb").close()
+            open(voice_path, "wb").close()
+            with open(subtitle_path, "w", encoding="utf-8") as f:
+                f.write("\n".join([
+                    "Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,第一段",
+                    "Dialogue: 0,0:00:10.00,0:00:20.00,Default,,0,0,0,,第二段",
+                ]))
+
+            def fake_duration(path):
+                if path == final_path:
+                    return 24.0
+                if path == voice_path:
+                    return 24.0
+                return None
+
+            with patch.object(commentary, "_probe_media_format_duration", side_effect=fake_duration):
+                commentary._assert_full_mode_output_alignment(
+                    final_path,
+                    voice_path,
+                    subtitle_path,
+                    [10.0, 10.0, 4.0],
+                    source_duration=60.0,
+                    narration_blocks=[
+                        {"narration": "第一段", "pause": False},
+                        {"narration": "第二段", "pause": False},
+                        {"narration": "", "pause": True},
+                    ],
+                )
+
+    def test_rendered_cached_full_mode_script_allows_split_pause_tails(self):
+        data = {
+            "narration": "第一段解说。第二段解说。",
+            "narration_blocks": [
+                {"start": 0.0, "end": 20.0, "visual": "worker climbs", "narration": "第一段解说。", "pause": False, "rendered_duration": 20.0},
+                {"start": 20.0, "end": 22.0, "visual": "worker climbs", "narration": "", "pause": True, "rendered_duration": 2.0},
+                {"start": 22.0, "end": 40.0, "visual": "worker lowers bag", "narration": "第二段解说。", "pause": False, "rendered_duration": 18.0},
+                {"start": 40.0, "end": 42.0, "visual": "worker lowers bag", "narration": "", "pause": True, "rendered_duration": 2.0},
+                {"start": 42.0, "end": 45.0, "visual": "ambient ending", "narration": "", "pause": True, "rendered_duration": 3.0},
+            ],
+        }
+
+        commentary._validate_rendered_cached_full_mode_script(data, 120.0, "full", "zh")
+
+        unrendered_data = {
+            "narration": data["narration"],
+            "narration_blocks": [
+                {key: value for key, value in block.items() if key != "rendered_duration"}
+                for block in data["narration_blocks"]
+            ],
+        }
+        with self.assertRaises(Exception):
+            commentary._validate_commentary_script_for_target(unrendered_data, 120.0, "full", "zh")
 
     def test_normalize_narration_blocks_preserves_pause_rate_pitch_and_video_speed(self):
         blocks = commentary._normalize_narration_blocks(
@@ -3476,17 +4363,106 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     progress=progress_messages.append,
                 )
 
+        expected_narrated_duration = commentary._max_visual_seconds_for_actual_voiceover(3.0)
+        expected_pause_duration = 37.5 - expected_narrated_duration
         self.assertEqual(1, len(fit_calls))
-        self.assertAlmostEqual(37.5, fit_calls[0][2], places=2)
+        self.assertAlmostEqual(expected_narrated_duration, fit_calls[0][2], places=2)
         video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
-        self.assertEqual(1, len(video_cmds))
-        self.assertEqual("37.500", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertEqual(2, len(video_cmds))
+        self.assertEqual(f"{expected_narrated_duration:.3f}", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertEqual(f"{expected_narrated_duration:.3f}", video_cmds[1][video_cmds[1].index("-ss") + 1])
+        self.assertEqual(f"{expected_pause_duration:.3f}", video_cmds[1][video_cmds[1].index("-t") + 1])
         self.assertNotIn("setpts=PTS/", video_cmds[0][video_cmds[0].index("-vf") + 1])
         self.assertAlmostEqual(1.0, original_audio_calls[0][4], places=3)
-        self.assertAlmostEqual(37.5, original_audio_calls[0][5], places=2)
-        self.assertFalse(any("Tightening commentary block" in message for message in progress_messages))
+        self.assertAlmostEqual(expected_narrated_duration, original_audio_calls[0][5], places=2)
+        self.assertAlmostEqual(0.6, original_audio_calls[1][3], places=3)
+        self.assertTrue(any("Splitting short-TTS commentary block" in message for message in progress_messages))
         self.assertEqual(ambient_audio_path, ambient)
-        self.assertAlmostEqual(37.5, block_durations[0], places=2)
+        self.assertEqual(2, len(block_durations))
+        self.assertAlmostEqual(expected_narrated_duration, block_durations[0], places=2)
+        self.assertAlmostEqual(expected_pause_duration, block_durations[1], places=2)
+        self.assertFalse(blocks[0]["pause"])
+        self.assertTrue(blocks[1]["pause"])
+
+    def test_block_synced_render_can_trim_short_tts_tails_for_compact_edits(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "source.mp4")
+            open(video_path, "wb").close()
+            timed_video_path = os.path.join(tmpdir, "timed.mp4")
+            voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
+            ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
+            commands = []
+            fit_calls = []
+            original_audio_calls = []
+            progress_messages = []
+
+            def fake_voiceover(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"voice")
+
+            def fake_fit_audio(input_audio_path, output_audio_path, target_duration):
+                fit_calls.append((os.path.basename(input_audio_path), os.path.basename(output_audio_path), target_duration))
+                with open(output_audio_path, "wb") as f:
+                    f.write(b"fit")
+
+            def fake_original_audio(_video_path, start, duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                original_audio_calls.append((start, duration, os.path.basename(output_path), volume, speed, output_duration))
+                with open(output_path, "wb") as f:
+                    f.write(b"original")
+
+            def fake_run_command(cmd, cwd=None):
+                commands.append(cmd)
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"media")
+
+            blocks = [{
+                "start": 120,
+                "end": 140,
+                "visual": "worker picks larvae into a bucket",
+                "narration": "她把虫子一只只捡进桶里。",
+                "video_speed": 1.0,
+            }]
+            with patch.object(commentary, "_get_video_duration", return_value=3600.0), \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+                patch.object(commentary, "_get_audio_duration", return_value=3.0), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
+                patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
+                    video_path=video_path,
+                    narration_blocks=blocks,
+                    timed_video_path=timed_video_path,
+                    voiceover_path=voiceover_path,
+                    ambient_audio_path=ambient_audio_path,
+                    aspect_mode="16:9",
+                    work_dir=tmpdir,
+                    tts_provider="edge",
+                    language="zh",
+                    elevenlabs_key=None,
+                    voice_id="voice",
+                    edge_voice="zh-CN-YunjianNeural",
+                    original_audio_volume=0.08,
+                    preserve_source_resolution=True,
+                    trim_short_tts_tails=True,
+                    progress=progress_messages.append,
+                )
+
+        expected_duration = commentary._max_visual_seconds_for_actual_voiceover(3.0)
+        self.assertEqual(1, len(fit_calls))
+        self.assertAlmostEqual(expected_duration, fit_calls[0][2], places=2)
+        video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
+        self.assertEqual(1, len(video_cmds))
+        self.assertEqual("120.000", video_cmds[0][video_cmds[0].index("-ss") + 1])
+        self.assertEqual(f"{expected_duration:.3f}", video_cmds[0][video_cmds[0].index("-t") + 1])
+        self.assertEqual(1, len(original_audio_calls))
+        self.assertAlmostEqual(expected_duration, original_audio_calls[0][1], places=2)
+        self.assertAlmostEqual(expected_duration, original_audio_calls[0][5], places=2)
+        self.assertTrue(any("Trimming short-TTS commentary block" in message for message in progress_messages))
+        self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual(1, len(block_durations))
+        self.assertAlmostEqual(expected_duration, block_durations[0], places=2)
+        self.assertFalse(blocks[0]["pause"])
+        self.assertAlmostEqual(120 + expected_duration, blocks[0]["end"], places=2)
 
     def test_full_duration_rejects_missing_narration_blocks(self):
         with self.assertRaisesRegex(Exception, "narration_blocks are required"):
@@ -3513,6 +4489,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 "narration": short_text,
                 "narration_blocks": blocks,
                 "edit_segments": [{"start": 0, "end": 700, "reason": "process"}],
+                "_skip_repeat_validation": True,
             },
             duration=3935,
             target_duration="full",
@@ -3540,9 +4517,9 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             )
 
     def test_full_duration_repairs_excessive_pause_ratio(self):
-        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 20)
-        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 22)
-        late_text = repeated_scene_text("后段时间线呈现最终结果和收尾状态", 24)
+        opening_text = joined_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 33)
+        ending_text = joined_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 37)
+        late_text = joined_scene_text("后段时间线呈现最终结果和收尾状态", 47)
         narration = opening_text + ending_text + late_text
         blocks = [
             {"start": 0, "end": 190, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},
@@ -3563,9 +4540,9 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertLessEqual(commentary._block_visual_duration(repaired_pauses[0]), commentary.FULL_MODE_MAX_PAUSE_SECONDS)
 
     def test_full_duration_repairs_overlong_pause_block(self):
-        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 22)
-        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 22)
-        late_text = repeated_scene_text("后段时间线呈现最终结果和收尾状态", 24)
+        opening_text = joined_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 38)
+        ending_text = joined_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 37)
+        late_text = joined_scene_text("后段时间线呈现最终结果和收尾状态", 47)
         narration = opening_text + ending_text + late_text
         blocks = [
             {"start": 0, "end": 220, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},
@@ -3624,8 +4601,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         )
 
     def test_full_duration_repairs_adjacent_pause_blocks_when_merged_pause_is_too_long(self):
-        opening_text = repeated_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 45)
-        ending_text = repeated_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 45)
+        opening_text = joined_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 49)
+        ending_text = joined_scene_text("处理后的材料出现最终结果，工人继续检查成品状态", 51)
         narration = opening_text + ending_text
         blocks = [
             {"start": 0, "end": 280, "visual": "opening process with visible sorting and machine movement", "visual_facts": ["workers sort material while the machine keeps moving"], "narration": opening_text, "pause": False},

@@ -22,6 +22,33 @@ class ImmediateThread:
 
 
 class CommentaryUploadTests(unittest.TestCase):
+    def test_gemini_models_endpoint_requires_gemini_access(self):
+        client = TestClient(app.app)
+
+        response = client.get("/api/settings/gemini-models")
+
+        self.assertEqual(400, response.status_code, response.text)
+        self.assertEqual("Missing X-Gemini-Key header", response.json()["detail"])
+
+    def test_gemini_models_endpoint_lists_models_for_configured_access(self):
+        returned_models = [
+            {"id": "gemini-2.5-flash", "name": "models/gemini-2.5-flash", "display_name": "Gemini 2.5 Flash"},
+            {"id": "gemini-2.5-pro", "name": "models/gemini-2.5-pro", "display_name": "Gemini 2.5 Pro"},
+        ]
+        with patch.object(app, "list_gemini_models", return_value=returned_models) as list_models:
+            client = TestClient(app.app)
+            response = client.get(
+                "/api/settings/gemini-models",
+                headers={
+                    "X-Gemini-Key": "gemini-key",
+                    "X-Gemini-Base-URL": "https://proxy.example.com/",
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual({"models": returned_models}, response.json())
+        list_models.assert_called_once_with("gemini-key", "https://proxy.example.com")
+
     def test_commentary_generate_accepts_uploaded_video_file(self):
         with tempfile.TemporaryDirectory() as uploads_dir, \
             tempfile.TemporaryDirectory() as output_dir, \
@@ -45,6 +72,7 @@ class CommentaryUploadTests(unittest.TestCase):
                     "custom_style_prompt": "用第一人称紧张整活口吻，短句优先。",
                     "target_duration": "medium",
                     "analysis_mode": "video",
+                    "gemini_model": "gemini-2.5-pro",
                     "tts_provider": "edge",
                     "original_audio_volume": "0.12",
                     "pause_original_audio_volume": "0.7",
@@ -66,6 +94,7 @@ class CommentaryUploadTests(unittest.TestCase):
         self.assertEqual("file", kwargs["source_type"])
         self.assertTrue(kwargs["source"].endswith("demo.mp4"))
         self.assertEqual("video", kwargs["analysis_mode"])
+        self.assertEqual("gemini-2.5-pro", kwargs["gemini_model"])
         self.assertEqual("custom", kwargs["style"])
         self.assertEqual("用第一人称紧张整活口吻，短句优先。", kwargs["custom_style_prompt"])
         self.assertEqual(0.12, kwargs["original_audio_volume"])
@@ -130,6 +159,7 @@ class CommentaryUploadTests(unittest.TestCase):
                         "style": "funny",
                         "target_duration": "full",
                         "analysis_mode": "video",
+                        "gemini_model": "old-thinking-model",
                         "tts_provider": "edge",
                         "subtitles": True,
                         "aspect_mode": "auto",
@@ -145,19 +175,83 @@ class CommentaryUploadTests(unittest.TestCase):
             app.commentary_jobs.clear()
 
             client = TestClient(app.app)
-            response = client.post(f"/api/commentary/jobs/{job_id}/retry", headers={"X-Gemini-Key": "gemini-key"})
+            response = client.post(
+                f"/api/commentary/jobs/{job_id}/retry",
+                headers={"X-Gemini-Key": "gemini-key"},
+                json={"analysis_mode": "current", "gemini_model": "Qwen3.7-Plus"},
+            )
 
         self.assertEqual(200, response.status_code, response.text)
         kwargs = generate.call_args.kwargs
         self.assertEqual(source_path, kwargs["source"])
         self.assertEqual("file", kwargs["source_type"])
         self.assertEqual(analysis_path, kwargs["prepared_analysis_video_path"])
+        self.assertEqual("current", kwargs["analysis_mode"])
+        self.assertEqual("Qwen3.7-Plus", kwargs["gemini_model"])
         self.assertEqual(0.6, kwargs["pause_original_audio_volume"])
         self.assertFalse(kwargs["background_music_enabled"])
         self.assertEqual("aodebiao_caravan", kwargs["background_music_track"])
         self.assertEqual(app.DEFAULT_BACKGROUND_MUSIC_VOLUME, kwargs["background_music_volume"])
         self.assertEqual("https://files.example/video-1", kwargs["gemini_file"]["uri"])
         self.assertIn("narration_blocks", kwargs["previous_error"])
+
+    def test_commentary_retry_preserves_historical_proxy_timeout_for_fallback(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "retry", "final.mp4"),
+                "video_url": "/videos/retry/final.mp4",
+                "title": "Retried Commentary",
+            }) as generate:
+            job_id = "historical-proxy-timeout"
+            job_dir = os.path.join(output_dir, job_id)
+            os.makedirs(job_dir)
+            source_path = os.path.join(job_dir, "source.mp4")
+            analysis_path = os.path.join(job_dir, "source_gemini_360p.mp4")
+            open(source_path, "wb").close()
+            open(analysis_path, "wb").close()
+            with open(os.path.join(job_dir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stage": "failed",
+                    "logs": [
+                        "Error: 500 INTERNAL. {'error': {'message': 'Response timeout for 60000ms, see https://github.com/ali-sdk/ali-oss#responsetimeouterror'}}",
+                        "Error: Gemini returned invalid JSON for the commentary script",
+                    ],
+                    "error": "AI narration block claims a completed packing/ending action that is not supported by its selected visual range.",
+                    "request": {
+                        "url": "",
+                        "language": "zh",
+                        "style": "hustle",
+                        "target_duration": "medium",
+                        "analysis_mode": "video",
+                        "tts_provider": "edge",
+                        "subtitles": True,
+                        "aspect_mode": "auto",
+                    },
+                    "source_type": "file",
+                    "source_path": source_path,
+                    "source_value": source_path,
+                    "analysis_video_path": analysis_path,
+                    "gemini_file_uri": "files/video-1",
+                    "gemini_file_name": "files/video-1",
+                    "gemini_file_mime_type": "video/mp4",
+                }, f)
+            app.commentary_jobs.clear()
+
+            client = TestClient(app.app)
+            response = client.post(
+                f"/api/commentary/jobs/{job_id}/retry",
+                headers={"X-Gemini-Key": "gemini-key"},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        kwargs = generate.call_args.kwargs
+        self.assertEqual("video", kwargs["analysis_mode"])
+        self.assertIn("ali-oss", kwargs["previous_error"])
+        self.assertIn("completed packing/ending", kwargs["previous_error"])
 
     def test_commentary_retry_allows_stale_processing_task_after_restart(self):
         with tempfile.TemporaryDirectory() as output_dir, \
@@ -208,6 +302,56 @@ class CommentaryUploadTests(unittest.TestCase):
         self.assertTrue(generate.called)
         kwargs = generate.call_args.kwargs
         self.assertEqual(source_path, kwargs["source"])
+
+    def test_commentary_retry_with_cached_video_script_does_not_require_gemini_key(self):
+        with tempfile.TemporaryDirectory() as output_dir, \
+            patch.object(app, "OUTPUT_DIR", output_dir), \
+            patch.object(app.threading, "Thread", ImmediateThread), \
+            patch.object(app, "generate_commentary_video", return_value={
+                "video_path": os.path.join(output_dir, "retry", "final.mp4"),
+                "video_url": "/videos/retry/final.mp4",
+                "title": "Retried Commentary",
+            }) as generate:
+            job_id = "cached-video-script"
+            job_dir = os.path.join(output_dir, job_id)
+            os.makedirs(job_dir)
+            source_path = os.path.join(job_dir, "source.mp4")
+            script_path = os.path.join(job_dir, "script.json")
+            open(source_path, "wb").close()
+            with open(script_path, "w", encoding="utf-8") as f:
+                json.dump({"script": {"narration_blocks": []}}, f)
+            with open(os.path.join(job_dir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stage": "failed",
+                    "logs": ["TTS failed after script validation"],
+                    "error": "Edge TTS interrupted",
+                    "request": {
+                        "url": "",
+                        "language": "zh",
+                        "style": "hustle",
+                        "target_duration": "full",
+                        "analysis_mode": "video",
+                        "tts_provider": "edge",
+                        "subtitles": True,
+                        "aspect_mode": "auto",
+                    },
+                    "source_type": "file",
+                    "source_path": source_path,
+                    "source_value": source_path,
+                    "script_path": script_path,
+                }, f)
+            app.commentary_jobs.clear()
+            app.active_commentary_job_ids.clear()
+
+            client = TestClient(app.app)
+            response = client.post(f"/api/commentary/jobs/{job_id}/retry")
+
+        self.assertEqual(200, response.status_code, response.text)
+        kwargs = generate.call_args.kwargs
+        self.assertEqual(source_path, kwargs["source"])
+        self.assertEqual("", kwargs["gemini_key"])
 
     def test_commentary_retry_rejects_active_processing_task(self):
         with tempfile.TemporaryDirectory() as output_dir, \

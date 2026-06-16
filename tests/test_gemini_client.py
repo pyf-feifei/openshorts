@@ -37,6 +37,33 @@ class GeminiClientTests(unittest.TestCase):
         self.assertEqual("https://proxy.example.com", calls[0]["http_options"].base_url)
         self.assertEqual(654321, calls[0]["http_options"].timeout)
 
+    def test_custom_base_url_strips_gemini_api_version_suffix(self):
+        self.assertEqual(
+            "http://195.242.178.82:8080",
+            gemini_client.normalize_gemini_base_url("http://195.242.178.82:8080/v1beta"),
+        )
+
+    def test_list_gemini_models_normalizes_model_names(self):
+        class FakeModels:
+            def list(self):
+                return [
+                    type("Model", (), {"name": "models/gemini-2.5-flash", "display_name": "Gemini 2.5 Flash"})(),
+                    {"name": "models/gemini-2.5-pro", "display_name": "Gemini 2.5 Pro"},
+                ]
+
+        fake_client = type("Client", (), {"models": FakeModels()})()
+
+        with patch.object(gemini_client, "create_gemini_client", return_value=fake_client):
+            models = gemini_client.list_gemini_models("key", "https://proxy.example.com/")
+
+        self.assertEqual(
+            [
+                {"id": "gemini-2.5-flash", "name": "models/gemini-2.5-flash", "display_name": "Gemini 2.5 Flash"},
+                {"id": "gemini-2.5-pro", "name": "models/gemini-2.5-pro", "display_name": "Gemini 2.5 Pro"},
+            ],
+            models,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

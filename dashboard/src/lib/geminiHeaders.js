@@ -1,5 +1,6 @@
 export function normalizeGeminiBaseUrl(baseUrl = '') {
-  return String(baseUrl || '').trim().replace(/\/+$/, '');
+  const value = String(baseUrl || '').trim().replace(/\/+$/, '');
+  return value.replace(/\/v1beta$/i, '').replace(/\/v1$/i, '');
 }
 
 export function fingerprintGeminiKey(apiKey = '') {
@@ -41,6 +42,21 @@ export function buildGeminiConfig(optionsOrKey, baseUrl = '', stats = {}) {
     baseUrl: normalizeGeminiBaseUrl(baseUrl),
     stats,
   };
+}
+
+export function hasGeminiAccess(config = {}) {
+  const normalized = buildGeminiConfig(config);
+  return normalized.mode === 'official_pool'
+    ? normalized.keys.length > 0
+    : Boolean(normalized.apiKey);
+}
+
+export function getGeminiAccessMissingMessage(config = {}) {
+  const normalized = buildGeminiConfig(config);
+  if (normalized.mode === 'official_pool') {
+    return '请在 Settings 的 Gemini 访问模式中添加至少一个官方 Gemini API Key，或切回「自定义代理 / 单 Key」';
+  }
+  return '请先在 Settings 配置 Gemini API Key';
 }
 
 export function mergeGeminiEvents(currentStats, events) {
