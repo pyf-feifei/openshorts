@@ -8,6 +8,11 @@ import {
   getDefaultEdgeVoiceForLanguage,
 } from './commentaryDefaults.js';
 import {
+  findCustomStyleOption,
+  normalizeCustomStyleOptions,
+  resolveCommentaryStyleRequest,
+} from './commentaryCustomStyles.js';
+import {
   COMMENTARY_LOG_PANEL_BODY_CLASS,
   getCommentaryLogPanelState,
 } from './commentaryLogPanel.js';
@@ -15,7 +20,7 @@ import {
 test('commentary tab defaults match hustle Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.style, 'hustle');
   assert.equal(COMMENTARY_DEFAULTS.customStylePrompt, '');
-  assert.equal(COMMENTARY_DEFAULTS.targetDuration, 'full');
+  assert.equal(COMMENTARY_DEFAULTS.targetDuration, 'two_to_four');
   assert.equal(COMMENTARY_DEFAULTS.analysisMode, 'openai');
   assert.equal(COMMENTARY_DEFAULTS.edgeVoice, 'zh-CN-YunyangNeural');
   assert.equal(COMMENTARY_DEFAULTS.originalAudioVolume, 0.3);
@@ -29,6 +34,14 @@ test('commentary tab defaults match hustle Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.backgroundMusicEnabled, false);
   assert.equal(COMMENTARY_DEFAULTS.backgroundMusicTrack, 'aodebiao_caravan');
   assert.equal(COMMENTARY_DEFAULTS.backgroundMusicVolume, 0.16);
+});
+
+test('commentary target length includes default selected 2-4 minute option', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /id: 'two_to_four'/);
+  assert.match(source, /label: '2-4 分钟'/);
+  assert.match(source, /useState\(COMMENTARY_DEFAULTS\.targetDuration\)/);
 });
 
 test('Chinese Edge voice default is Yunyang and other languages keep first option fallback', () => {
@@ -86,11 +99,13 @@ test('commentary lets users fetch or manually enter the Gemini analysis model', 
   assert.match(source, /request\.gemini_model/);
 });
 
-test('commentary requires fetching Gemini models before video-input analysis', () => {
+test('commentary allows manually entered Gemini models for video-input analysis', () => {
   const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
 
-  assert.match(source, /analysisMode === 'video' && geminiModels\.length === 0/);
-  assert.match(source, /Gemini 视频输入模式请先点击/);
+  assert.match(source, /const selectedGeminiModel = geminiModel\.trim\(\)/);
+  assert.match(source, /analysisMode !== 'openai' && !selectedGeminiModel/);
+  assert.match(source, /手动填写当前 Key\/Base URL 支持的模型名/);
+  assert.doesNotMatch(source, /analysisMode === 'video' && geminiModels\.length === 0/);
 });
 
 test('commentary selects the first fetched Gemini model when still using the built-in default', () => {
@@ -122,6 +137,50 @@ test('commentary allows a custom style prompt under commentary style', () => {
   assert.match(source, /CUSTOM_STYLE_STORAGE_KEY/);
   assert.match(source, /添加到下拉框/);
   assert.match(source, /更新下拉框选项/);
+  assert.match(source, /customStyleOptionsRef/);
+});
+
+test('commentary custom styles are unique by style name after restart cleanup', () => {
+  const options = normalizeCustomStyleOptions([
+    { id: 'custom:first', label: '自定义视频解说风格', prompt: '旧提示词' },
+    { id: 'custom:second', label: ' 自定义视频解说风格 ', prompt: '新提示词' },
+    { id: 'custom:third', label: '另一种风格', prompt: '提示词' },
+  ]);
+
+  assert.deepEqual(options.map((item) => item.label), ['自定义视频解说风格', '另一种风格']);
+  assert.equal(options[0].id, 'custom:second');
+  assert.equal(options[0].prompt, '新提示词');
+});
+
+test('commentary task recovery reuses an existing custom style with the same name', () => {
+  const options = normalizeCustomStyleOptions([
+    { id: 'custom:existing', label: '自定义视频解说风格', prompt: '本地保存的最新版提示词' },
+  ]);
+
+  const recovered = findCustomStyleOption(options, '自定义视频解说风格', '历史任务里保存的旧提示词');
+
+  assert.equal(recovered.id, 'custom:existing');
+  assert.equal(recovered.prompt, '本地保存的最新版提示词');
+});
+
+test('commentary sends saved custom style prompt when a dropdown custom style is selected', () => {
+  const options = normalizeCustomStyleOptions([
+    { id: 'custom:existing', label: '自定义视频解说风格', prompt: '用保存的风格写，先说画面再加语气。' },
+  ]);
+
+  const request = resolveCommentaryStyleRequest('custom:existing', '', options);
+
+  assert.equal(request.style, '自定义视频解说风格');
+  assert.equal(request.customStylePrompt, '用保存的风格写，先说画面再加语气。');
+  assert.equal(request.isCustomStyle, true);
+});
+
+test('commentary clears stale custom prompt for built-in style requests', () => {
+  const request = resolveCommentaryStyleRequest('documentary', '上一轮自定义提示词', []);
+
+  assert.equal(request.style, 'documentary');
+  assert.equal(request.customStylePrompt, '');
+  assert.equal(request.isCustomStyle, false);
 });
 
 test('commentary sends separate pause original audio volume', () => {
@@ -154,6 +213,21 @@ test('commentary status steps use the active job analysis mode', () => {
   assert.match(source, /data\.request\?\.analysis_mode/);
   assert.match(source, /task\.request\?\.analysis_mode/);
   assert.match(source, /displayAnalysisMode === 'openai'/);
+});
+
+test('commentary OpenAI status steps follow the edit-first chain', () => {
+  const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+
+  assert.match(source, /OpenAI 兼容多模态：先剪辑再解说/);
+  assert.match(source, /检查原片解说音频/);
+  assert.match(source, /全片抽帧/);
+  assert.match(source, /全片多模态分析/);
+  assert.match(source, /生成中间剪辑/);
+  assert.match(source, /剪辑片抽帧/);
+  assert.match(source, /剪辑片多模态分析/);
+  assert.match(source, /基于剪辑片写解说/);
+  assert.match(source, /openai_edited_frames/);
+  assert.doesNotMatch(source, /label: 'OpenAI 写解说脚本'/);
 });
 
 test('commentary result exposes Douyin publish copy and cover downloads', () => {

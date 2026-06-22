@@ -48,7 +48,7 @@ def classify_gemini_error(error_text: str) -> GeminiErrorClassification:
     if "429" in text or "resource_exhausted" in lower:
         delay = _extract_retry_delay_seconds(text) or 60
         return GeminiErrorClassification("cooldown", "Gemini rate limit exceeded", delay)
-    if any(marker in lower for marker in ["500", "503", "unavailable", "timeout", "timed out"]):
+    if any(marker in lower for marker in ["500", "502", "503", "bad gateway", "unavailable", "timeout", "timed out", "empty response text"]):
         return GeminiErrorClassification("cooldown", "Gemini transient server or network error", 30)
     return GeminiErrorClassification("terminal", "Gemini request failed")
 

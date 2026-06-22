@@ -2,7 +2,7 @@ export const COMMENTARY_DEFAULTS = {
   language: 'zh',
   style: 'hustle',
   customStylePrompt: '',
-  targetDuration: 'full',
+  targetDuration: 'two_to_four',
   analysisMode: 'openai',
   edgeVoice: 'zh-CN-YunyangNeural',
   originalAudioVolume: 0.3,

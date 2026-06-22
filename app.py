@@ -12,7 +12,7 @@ import yt_dlp
 import tempfile
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -270,8 +270,17 @@ async def lifespan(app: FastAPI):
     # Start worker and cleanup
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
-    yield
-    # Cleanup (optional: cancel worker)
+    try:
+        yield
+    finally:
+        await shutdown_commentary_jobs()
+        for task in (worker_task, cleanup_task):
+            task.cancel()
+        for task in (worker_task, cleanup_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -516,6 +525,8 @@ from commentary import (
 commentary_jobs: Dict[str, Dict] = {}
 active_commentary_job_ids = set()
 commentary_job_cancel_events: Dict[str, threading.Event] = {}
+commentary_job_threads: Dict[str, threading.Thread] = {}
+commentary_job_threads_guard = threading.Lock()
 commentary_task_locks: Dict[str, threading.RLock] = {}
 commentary_task_locks_guard = threading.Lock()
 COMMENTARY_TASK_FILE = "commentary_task.json"
@@ -551,20 +562,28 @@ COMMENTARY_PERSISTED_FIELDS = {
 COMMENTARY_STAGE_PATTERNS = [
     ("source", "准备源视频", "Preparing source video"),
     ("transcribe", "转写原视频", "Transcribing full video"),
-    ("openai_frames", "抽取视觉分析帧", "Extracting dense timestamped frames"),
-    ("openai_frames", "检测场景并采样", "Detecting scenes for OpenAI-compatible scene-aware frame sampling"),
-    ("openai_frames", "抽取视觉分析帧", "Extracted OpenAI-compatible analysis frames"),
+    ("openai_audio", "检测原片解说音频", "Testing whether the configured OpenAI-compatible model can inspect source audio"),
+    ("openai_audio", "分析原片解说音频", "OpenAI-compatible source audio analysis is supported"),
+    ("openai_audio", "音频分析回退转录", "Configured OpenAI-compatible model did not confirm source audio support"),
+    ("openai_audio", "音频分析回退转录", "OpenAI-compatible audio analysis skipped"),
+    ("openai_audio", "音频分析回退转录", "OpenAI-compatible audio analysis failed"),
+    ("openai_audio", "检测原片解说音频", "OpenAI-compatible audio probe"),
+    ("openai_source_frames", "准备全片抽帧分析", "Preparing OpenAI-compatible"),
+    ("openai_source_frames", "准备全片抽帧分析", "Reusing OpenAI-compatible 360p frame-analysis video"),
+    ("openai_source_frames", "准备全片抽帧分析", "OpenAI-compatible frame-analysis video ready"),
+    ("openai_source_frames", "抽取全片视觉帧", "Extracting dense timestamped frames"),
     ("analysis_compress", "压缩 Gemini 分析视频", "Compressing Gemini analysis video"),
     ("analysis_compress", "复用 Gemini 分析视频", "Reusing compressed Gemini analysis video"),
     ("analysis_upload", "上传 Gemini 分析副本", "Uploading 360p Gemini analysis video"),
     ("analysis_upload", "复用 Gemini 分析副本", "Reusing processed Gemini analysis video"),
     ("analysis_upload", "等待 Gemini 文件处理", "Gemini Files API processing"),
-    ("openai", "OpenAI 兼容多模态分析", "OpenAI-compatible multimodal visual analysis"),
-    ("openai", "OpenAI 兼容多模态分析", "Analyzing OpenAI-compatible visual batch"),
-    ("openai", "OpenAI 兼容多模态分析", "OpenAI-compatible visual analysis returned"),
-    ("openai", "生成整片解说脚本", "Generating original commentary script with OpenAI-compatible"),
-    ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model is writing"),
-    ("openai", "OpenAI 兼容模型写解说", "OpenAI-compatible model returned"),
+    ("openai_source_frames", "准备全片抽帧分析", "Generating OpenAI-compatible edit-first commentary"),
+    ("openai_source_analysis", "复用全片多模态分析", "Reusing cached full-source OpenAI-compatible multimodal visual analysis"),
+    ("openai_edit", "生成中间视觉剪辑", "OpenAI-compatible edit-first flow locked visual cut"),
+    ("openai_edited_frames", "抽取剪辑片视觉帧", "Extracting frames from the intermediate edited video"),
+    ("openai_edited_analysis", "剪辑片多模态分析", "Analyzing the intermediate edited video with OpenAI-compatible multimodal model"),
+    ("openai_final_script", "基于剪辑片写最终解说", "Writing final commentary from the edited-video analysis"),
+    ("openai_final_script", "基于剪辑片写最终解说", "Generating original commentary script with OpenAI-compatible"),
     ("gemini", "Gemini 分析并写解说", "Gemini is analyzing"),
     ("gemini", "校验解说时间线", "validating timeline sync"),
     ("voice", "生成分块解说语音", "Generating timestamp-synced commentary blocks"),
@@ -577,6 +596,46 @@ COMMENTARY_STAGE_PATTERNS = [
     ("render", "生成字幕", "Generating text-timed subtitles"),
     ("done", "生成完成", "Commentary remix video completed"),
 ]
+
+OPENAI_FRAME_STAGE_MARKERS = (
+    "Detecting scenes for OpenAI-compatible scene-aware frame sampling",
+    "Using uniform OpenAI-compatible frame sampling fallback",
+    "Reusing OpenAI-compatible analysis frames",
+    "OpenAI-compatible frame extraction failed",
+    "Extracted OpenAI-compatible analysis frames",
+)
+
+OPENAI_VISUAL_STAGE_MARKERS = (
+    "OpenAI-compatible multimodal visual analysis",
+    "Analyzing OpenAI-compatible visual batch",
+    "OpenAI-compatible visual analysis returned",
+)
+
+OPENAI_SCRIPT_STAGE_MARKERS = (
+    "OpenAI-compatible model is writing",
+    "OpenAI-compatible model returned",
+    "script validation failed",
+    "returned a corrected commentary script",
+    "returned a repaired commentary script",
+)
+
+
+def resolve_commentary_stage(message: str, current_stage: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    for stage, label, marker in COMMENTARY_STAGE_PATTERNS:
+        if marker in message:
+            return stage, label
+    edited_chain_stages = {"openai_edit", "openai_edited_frames", "openai_edited_analysis", "openai_final_script"}
+    if any(marker in message for marker in OPENAI_FRAME_STAGE_MARKERS):
+        if current_stage in edited_chain_stages:
+            return "openai_edited_frames", "抽取剪辑片视觉帧"
+        return "openai_source_frames", "抽取全片视觉帧"
+    if any(marker in message for marker in OPENAI_VISUAL_STAGE_MARKERS):
+        if current_stage in edited_chain_stages:
+            return "openai_edited_analysis", "剪辑片多模态分析"
+        return "openai_source_analysis", "全片多模态分析"
+    if any(marker in message for marker in OPENAI_SCRIPT_STAGE_MARKERS):
+        return "openai_final_script", "基于剪辑片写最终解说"
+    return None, None
 
 
 def commentary_job_dir(job_id: str) -> str:
@@ -687,6 +746,41 @@ def mark_commentary_job_inactive(job_id: str) -> None:
     commentary_job_cancel_events.pop(job_id, None)
 
 
+def start_commentary_job_thread(job_id: str, target) -> None:
+    def wrapped_target():
+        try:
+            target()
+        finally:
+            with commentary_job_threads_guard:
+                commentary_job_threads.pop(job_id, None)
+
+    thread = threading.Thread(target=wrapped_target, daemon=False)
+    with commentary_job_threads_guard:
+        commentary_job_threads[job_id] = thread
+    thread.start()
+
+
+async def shutdown_commentary_jobs(timeout_seconds: float = 10.0) -> None:
+    active_job_ids = list(active_commentary_job_ids)
+    if active_job_ids:
+        print(f"Cancelling {len(active_job_ids)} active commentary job(s) before backend shutdown.")
+    for job_id in active_job_ids:
+        cancel_commentary_job_runtime(job_id)
+
+    deadline = time.time() + max(0.0, timeout_seconds)
+    while time.time() < deadline:
+        with commentary_job_threads_guard:
+            live_threads = [thread for thread in commentary_job_threads.values() if thread.is_alive()]
+        if not live_threads:
+            return
+        await asyncio.sleep(0.1)
+
+    with commentary_job_threads_guard:
+        stuck_jobs = [job_id for job_id, thread in commentary_job_threads.items() if thread.is_alive()]
+    if stuck_jobs:
+        print(f"Commentary job thread(s) still stopping after shutdown grace period: {', '.join(stuck_jobs)}")
+
+
 def commentary_job_is_cancelled(job_id: str) -> bool:
     event = commentary_job_cancel_events.get(job_id)
     return bool(event and event.is_set())
@@ -757,11 +851,10 @@ def update_commentary_stage(job_id: str, message: str) -> None:
     job = commentary_jobs.get(job_id)
     if not job:
         return
-    for stage, label, marker in COMMENTARY_STAGE_PATTERNS:
-        if marker in message:
-            job["stage"] = stage
-            job["stage_label"] = label
-            break
+    stage, label = resolve_commentary_stage(message, job.get("stage"))
+    if stage and label:
+        job["stage"] = stage
+        job["stage_label"] = label
     percent_match = re.search(r"(\d+)%", message)
     ratio_match = re.search(r"(\d+)\s*/\s*(\d+)", message)
     if percent_match:
@@ -795,7 +888,7 @@ class CommentaryRequest(BaseModel):
     language: str = "zh"
     style: str = "hustle"
     custom_style_prompt: Optional[str] = None
-    target_duration: str = "medium"
+    target_duration: str = "two_to_four"
     analysis_mode: str = DEFAULT_ANALYSIS_MODE
     gemini_model: Optional[str] = None
     openai_model: Optional[str] = None
@@ -881,7 +974,7 @@ def commentary_request_from_form(form) -> CommentaryRequest:
         language=str(form.get("language") or "zh"),
         style=str(form.get("style") or "hustle"),
         custom_style_prompt=str(form.get("custom_style_prompt") or "") or None,
-        target_duration=str(form.get("target_duration") or "medium"),
+        target_duration=str(form.get("target_duration") or "two_to_four"),
         analysis_mode=str(form.get("analysis_mode") or DEFAULT_ANALYSIS_MODE),
         gemini_model=str(form.get("gemini_model") or "") or None,
         openai_model=str(form.get("openai_model") or "") or None,
@@ -1424,7 +1517,7 @@ async def commentary_generate(
         finally:
             mark_commentary_job_inactive(job_id)
 
-    threading.Thread(target=run_job, daemon=True).start()
+    start_commentary_job_thread(job_id, run_job)
     return {"job_id": job_id, "status": "processing"}
 
 @app.get("/api/commentary/jobs")
@@ -1670,7 +1763,7 @@ async def commentary_retry(
         finally:
             mark_commentary_job_inactive(job_id)
 
-    threading.Thread(target=run_retry_job, daemon=True).start()
+    start_commentary_job_thread(job_id, run_retry_job)
     return {"job_id": job_id, "status": "processing"}
 
 

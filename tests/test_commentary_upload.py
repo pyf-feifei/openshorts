@@ -22,6 +22,55 @@ class ImmediateThread:
 
 
 class CommentaryUploadTests(unittest.TestCase):
+    def test_commentary_form_defaults_to_two_to_four_target_duration(self):
+        req = app.commentary_request_from_form({})
+
+        self.assertEqual("two_to_four", req.target_duration)
+
+    def test_openai_edit_first_stage_mapping_tracks_real_chain(self):
+        self.assertEqual(
+            ("openai_source_frames", "准备全片抽帧分析"),
+            app.resolve_commentary_stage(
+                "Generating OpenAI-compatible edit-first commentary: full-video analysis, intermediate visual cut, then final narration on the edited video...",
+                None,
+            ),
+        )
+        self.assertEqual(
+            ("openai_source_analysis", "全片多模态分析"),
+            app.resolve_commentary_stage(
+                "OpenAI-compatible multimodal visual analysis batch 1/3...",
+                "openai_source_frames",
+            ),
+        )
+        self.assertEqual(
+            ("openai_edit", "生成中间视觉剪辑"),
+            app.resolve_commentary_stage(
+                "OpenAI-compatible edit-first flow locked visual cut: 6 source ranges, 142.0s edited video.",
+                "openai_source_analysis",
+            ),
+        )
+        self.assertEqual(
+            ("openai_edited_frames", "抽取剪辑片视觉帧"),
+            app.resolve_commentary_stage(
+                "Extracted OpenAI-compatible analysis frames: 8/24",
+                "openai_edited_frames",
+            ),
+        )
+        self.assertEqual(
+            ("openai_edited_analysis", "剪辑片多模态分析"),
+            app.resolve_commentary_stage(
+                "OpenAI-compatible multimodal visual analysis batch 2/3 done (2/3)",
+                "openai_edited_frames",
+            ),
+        )
+        self.assertEqual(
+            ("openai_final_script", "基于剪辑片写最终解说"),
+            app.resolve_commentary_stage(
+                "OpenAI-compatible model is writing commentary script from transcript and visual timeline...",
+                "openai_edited_analysis",
+            ),
+        )
+
     def test_gemini_models_endpoint_requires_gemini_access(self):
         client = TestClient(app.app)
 

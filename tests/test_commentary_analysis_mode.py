@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import sys
 import tempfile
@@ -52,14 +52,141 @@ def beehive_visual_analysis():
             if start < 609
             else "bag secured final result packed completion",
             "importance": importance,
+            "interest_score": importance,
             "keep_candidate": True,
+            "edit_value": "must_keep" if importance >= 5 else "useful",
         })
     return {
+        "frames": [{"timestamp": (start + end) / 2} for start, end in segments],
         "observations": observations,
         "candidate_segments": [
-            {"start": start, "end": end, "reason": "useful beehive process moment"}
-            for start, end in segments
+            {
+                "start": start,
+                "end": end,
+                "reason": "useful beehive process moment",
+                "importance": 5 if index % 4 == 0 else 4,
+                "interest_score": 5 if index % 4 == 0 else 4,
+                "edit_value": "must_keep" if index % 4 == 0 else "useful",
+                "evidence_timestamps": [(start + end) / 2],
+            }
+            for index, (start, end) in enumerate(segments)
         ],
+    }
+
+
+def openai_value_scored_visual_analysis():
+    frames = [
+        {"timestamp": 5.0}, {"timestamp": 25.0}, {"timestamp": 45.0},
+        {"timestamp": 105.0}, {"timestamp": 225.0}, {"timestamp": 345.0},
+        {"timestamp": 465.0}, {"timestamp": 585.0},
+    ]
+    observations = [
+        {"timestamp": 5.0, "visual": "weak opening setup", "importance": 1, "interest_score": 1, "edit_value": "skippable"},
+        {"timestamp": 25.0, "visual": "clear skilled process action", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "keep_candidate": True},
+        {"timestamp": 45.0, "visual": "minor repeated adjustment", "importance": 2, "interest_score": 2, "edit_value": "skippable"},
+        {"timestamp": 105.0, "visual": "middle process reveal", "importance": 5, "interest_score": 4, "edit_value": "must_keep", "keep_candidate": True},
+        {"timestamp": 225.0, "visual": "middle result changes visibly", "importance": 4, "interest_score": 5, "edit_value": "useful", "keep_candidate": True},
+        {"timestamp": 345.0, "visual": "late payoff begins", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "keep_candidate": True},
+        {"timestamp": 465.0, "visual": "slow filler walk", "importance": 1, "interest_score": 1, "edit_value": "skippable"},
+        {"timestamp": 585.0, "visual": "final result reveal", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "keep_candidate": True},
+    ]
+    candidate_segments = [
+        {"start": 0, "end": 10, "reason": "weak setup", "importance": 1, "interest_score": 1, "edit_value": "skippable", "evidence_timestamps": [5.0]},
+        {"start": 20, "end": 30, "reason": "skilled important action", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "evidence_timestamps": [25.0]},
+        {"start": 40, "end": 50, "reason": "repeated adjustment filler", "importance": 1, "interest_score": 1, "edit_value": "skippable", "evidence_timestamps": [45.0]},
+        {"start": 100, "end": 110, "reason": "middle process reveal", "importance": 5, "interest_score": 4, "edit_value": "must_keep", "evidence_timestamps": [105.0]},
+        {"start": 220, "end": 230, "reason": "visible state change", "importance": 4, "interest_score": 5, "edit_value": "useful", "evidence_timestamps": [225.0]},
+        {"start": 340, "end": 350, "reason": "late payoff begins", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "evidence_timestamps": [345.0]},
+        {"start": 460, "end": 470, "reason": "slow filler walk", "importance": 1, "interest_score": 1, "edit_value": "skippable", "evidence_timestamps": [465.0]},
+        {"start": 580, "end": 590, "reason": "final result reveal", "importance": 5, "interest_score": 5, "edit_value": "must_keep", "evidence_timestamps": [585.0]},
+    ]
+    return {
+        "provider": "openai_compatible",
+        "frames": frames,
+        "observations": observations,
+        "candidate_segments": candidate_segments,
+    }
+
+
+def openai_candidate_limited_long_visual_analysis():
+    candidate_segments = []
+    observations = []
+    frames = []
+    start = 0.0
+    for index in range(20):
+        end = start + 10.0
+        timestamp = start + 5.0
+        candidate_segments.append({
+            "start": start,
+            "end": end,
+            "reason": f"early useful machine operation {index + 1}",
+            "importance": 4,
+            "interest_score": 4,
+            "edit_value": "must_keep" if index % 3 == 0 else "useful",
+            "evidence_timestamps": [timestamp],
+            "suggested_speed": 1.0,
+        })
+        observations.append({
+            "timestamp": timestamp,
+            "visual": f"early useful machine operation {index + 1}",
+            "importance": 4,
+            "interest_score": 4,
+            "edit_value": "must_keep" if index % 3 == 0 else "useful",
+            "keep_candidate": True,
+        })
+        frames.append({"timestamp": timestamp})
+        start += 12.0
+    for index in range(14):
+        seg_start = 480.0 + index * 14.0
+        seg_end = seg_start + 10.0
+        timestamp = seg_start + 5.0
+        candidate_segments.append({
+            "start": seg_start,
+            "end": seg_end,
+            "reason": f"middle useful process change {index + 1}",
+            "importance": 5 if index % 4 == 0 else 4,
+            "interest_score": 5,
+            "edit_value": "must_keep" if index % 4 == 0 else "useful",
+            "evidence_timestamps": [timestamp],
+            "suggested_speed": 1.0,
+        })
+        observations.append({
+            "timestamp": timestamp,
+            "visual": f"middle useful process change {index + 1}",
+            "importance": 5 if index % 4 == 0 else 4,
+            "interest_score": 5,
+            "edit_value": "must_keep" if index % 4 == 0 else "useful",
+            "keep_candidate": True,
+        })
+        frames.append({"timestamp": timestamp})
+    for index in range(6):
+        seg_start = 1040.0 + index * 18.0
+        seg_end = seg_start + 10.0
+        timestamp = seg_start + 5.0
+        candidate_segments.append({
+            "start": seg_start,
+            "end": seg_end,
+            "reason": f"late result and payoff {index + 1}",
+            "importance": 5,
+            "interest_score": 5,
+            "edit_value": "must_keep",
+            "evidence_timestamps": [timestamp],
+            "suggested_speed": 1.0,
+        })
+        observations.append({
+            "timestamp": timestamp,
+            "visual": f"late result and payoff {index + 1}",
+            "importance": 5,
+            "interest_score": 5,
+            "edit_value": "must_keep",
+            "keep_candidate": True,
+        })
+        frames.append({"timestamp": timestamp})
+    return {
+        "provider": "openai_compatible",
+        "frames": frames,
+        "observations": observations,
+        "candidate_segments": candidate_segments,
     }
 
 
@@ -88,6 +215,37 @@ def scene_matched_blocks(count=12, seconds=50.0, text=None):
         }
         for start in starts
     ]
+
+
+def openai_timestamped_script_payload():
+    narration = "工人把铜料摊开分拣，手边的碎料被拨到一侧，画面重点是回收前的整理动作。"
+    return {
+        "title": "Demo",
+        "summary": "summary",
+        "hook": "hook",
+        "narration": narration,
+        "narration_blocks": [
+            {
+                "start": 0,
+                "end": 3,
+                "visual": "worker sorts copper on the table",
+                "visual_facts": ["worker sorts copper"],
+                "evidence_timestamps": [1],
+                "narration": narration,
+                "pause": False,
+                "rate": "+0%",
+                "pitch": "+0Hz",
+                "video_speed": 1.0,
+                "speed_reason": "",
+            }
+        ],
+        "edit_segments": [{"start": 0, "end": 3, "reason": "timestamped sorting action"}],
+        "episode_plan": {"should_split": False, "reason": "not needed"},
+        "episodes": [],
+        "cut_strategy": [],
+        "chapters": [],
+        "hashtags": [],
+    }
 
 
 class CommentaryAnalysisModeTests(unittest.TestCase):
@@ -207,16 +365,16 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertNotIn("per-block density check", prompt)
         self.assertIn("There is no filler word-count target", prompt)
         self.assertIn("There is no total minimum word count", prompt)
-        self.assertIn("not too dense, but also not empty", prompt)
+        self.assertIn("do not intentionally under-explain visible action", prompt)
         self.assertIn("what is visible, what changes, and why that moment matters", prompt)
         self.assertIn("do not make narration sparse by writing one vague sentence over a long visual block", prompt)
         self.assertIn("do not pad it with meaningless words", prompt)
-        self.assertIn('Completion words such as "finished", "packed", "done", "收工"', prompt)
+        self.assertIn("Any concrete action, state change, result, object identity", prompt)
         self.assertIn("3-second retention rule", prompt)
         self.assertIn("curiosity, contrast, stakes, surprise, or payoff expectation", prompt)
         self.assertIn("matching the first visible action", prompt)
 
-    def test_full_mode_repairs_under_explained_block_without_shortening_visual_target(self):
+    def test_full_mode_rejects_under_explained_block_instead_of_hiding_visual_mismatch(self):
         data = {
             "narration": "工人在处理材料。",
             "narration_blocks": [
@@ -241,15 +399,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "edit_segments": [{"start": 0, "end": 24}, {"start": 24, "end": 360}],
         }
 
-        commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
-
-        self.assertAlmostEqual(
-            400.0,
-            sum(commentary._block_visual_duration(block) for block in data["narration_blocks"]),
-            places=2,
-        )
-        self.assertIn("工人在处理材料", data["narration_blocks"][0]["narration"])
-        self.assertTrue(any(block.get("pause") for block in data["narration_blocks"]))
+        with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
+            commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
 
     def test_full_mode_rejects_long_visual_range_with_sparse_narration(self):
         data = {
@@ -495,8 +646,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         block = {
             "start": 0,
             "end": 40.0,
-            "visual": "worker hands on tree trunk while bees swarm around hive and bag rope stay nearby",
-            "visual_facts": ["gloved worker handles beehive on tree trunk as bees move around honeycomb"],
+            "visual": "手套贴着树干处理蜂巢，蜂群围着蜂巢飞动，袋子和绳子在旁边",
+            "visual_facts": ["手套贴着树干处理蜂巢，蜂群围着蜂巢飞动，袋子和绳子在旁边"],
             "narration": "手套贴着树干处理蜂巢，蜂群围着树干飞动，工人一点点把蜂巢位置稳住，袋子和绳子还在旁边跟着继续调整变化",
             "pause": False,
             "video_speed": 1.0,
@@ -512,6 +663,26 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             commentary._expected_narration_chars_for_visual_duration(40.0, "zh"),
         )
         self.assertIn("蜂群", repaired_text)
+
+    def test_short_zh_narration_with_only_english_visual_facts_splits_tail_not_labels(self):
+        block = {
+            "start": 0.0,
+            "end": 13.0,
+            "visual": "worker carries honeycomb bag across tree trunk",
+            "visual_facts": ["worker carries honeycomb bag across tree trunk"],
+            "evidence_timestamps": [4.0],
+            "narration": "他把蜂袋稳住继续往上走。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+
+        repaired = commentary._repair_short_narration_visual_ranges([block], "zh")
+
+        self.assertEqual(2, len(repaired))
+        self.assertFalse(repaired[0]["pause"])
+        self.assertTrue(repaired[1]["pause"])
+        self.assertNotRegex(repaired[0]["narration"], r"[A-Za-z]{3,}")
+        self.assertEqual([4.0], repaired[0]["evidence_timestamps"])
 
     def test_full_mode_allows_only_brief_auto_silence_tail(self):
         block = {
@@ -712,6 +883,41 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             min_visual_seconds - commentary._full_mode_visual_budget_tolerance_seconds(target),
         )
 
+    def test_full_mode_accepts_blocks_inside_reported_visual_budget_window(self):
+        duration = 239.9
+        target = commentary._target_visual_duration_seconds(duration, "full")
+        self.assertAlmostEqual(239.9, target, places=1)
+        self.assertAlmostEqual(215.91, commentary._full_mode_min_playable_visual_seconds(duration, target), places=2)
+
+        blocks = []
+        start = 0.0
+        for index in range(17):
+            block_duration = 13.5 if index < 16 else 13.8
+            narration = joined_scene_text(
+                f"第{index + 1}段画面里设备继续压制材料，工人检查模具和成品状态",
+                2,
+            )
+            blocks.append({
+                "start": start,
+                "end": start + block_duration,
+                "visual": f"第{index + 1}段设备压制材料并展示成品状态",
+                "visual_facts": [f"第{index + 1}段设备压制材料并展示成品状态"],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+            start += block_duration
+        self.assertAlmostEqual(229.8, sum(commentary._block_visual_duration(block) for block in blocks), places=1)
+        data = {
+            "narration": "\n\n".join(block["narration"] for block in blocks),
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_commentary_script_for_target(data, duration, "full", "zh")
+
+        playable = sum(commentary._block_visual_duration(block) for block in data["narration_blocks"])
+        self.assertGreaterEqual(playable, commentary._full_mode_min_playable_visual_seconds(duration, target))
+
     def test_full_mode_repairs_small_underselected_budget_by_extending_trailing_pause(self):
         blocks = []
         for index in range(20):
@@ -810,25 +1016,25 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertFalse(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
 
-    def test_full_mode_rewrites_unsupported_completion_claim_instead_of_rejecting(self):
+    def test_full_mode_does_not_rewrite_claims_with_keyword_rules(self):
         data = {
-            "narration": "工人继续处理蜂巢，袋子还在旁边。蜂巢装好收工。",
+            "narration": "工人继续处理材料，镜头里材料和工具还在移动。",
             "narration_blocks": [
                 {
                     "start": 0,
                     "end": 230,
-                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
-                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
-                    "narration": joined_scene_text("工人继续处理蜂巢，袋子和绳子还在旁边调整", 46),
+                    "visual": "工人继续处理材料，工具和容器还在旁边调整",
+                    "visual_facts": ["工人继续处理材料，工具和容器还在旁边调整"],
+                    "narration": joined_scene_text("工人继续处理材料，工具和容器还在旁边调整", 46),
                     "pause": False,
                     "video_speed": 1.0,
                 },
                 {
                     "start": 1540,
                     "end": 1770,
-                    "visual": "工人继续沿树干移动，蜂群仍在周围活动",
-                    "visual_facts": ["工人继续沿树干移动，蜂群仍在周围活动"],
-                    "narration": joined_scene_text("工人继续沿树干移动，蜂群仍在周围活动，蜂巢装好收工", 39),
+                    "visual": "工人继续沿工作区移动，材料仍在画面中",
+                    "visual_facts": ["工人继续沿工作区移动，材料仍在画面中"],
+                    "narration": joined_scene_text("工人继续沿工作区移动，材料仍在画面中", 39),
                     "pause": False,
                     "video_speed": 1.0,
                 },
@@ -837,93 +1043,84 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         commentary._validate_commentary_script_for_target(data, 1800.0, "full", "zh")
 
-        self.assertNotIn("收工", data["narration"])
-        self.assertNotIn("装好", data["narration"])
-        self.assertNotIn("收工", data["narration_blocks"][1]["narration"])
-        self.assertIn("继续处理", data["narration_blocks"][1]["narration"])
+        self.assertIn("工人继续处理材料", data["narration"])
+        self.assertIn("工人继续沿工作区移动", data["narration_blocks"][1]["narration"])
 
-    def test_medium_mode_rewrites_unsupported_completion_claim_instead_of_rejecting(self):
+    def test_medium_mode_does_not_rewrite_claims_with_keyword_rules(self):
         data = {
-            "title": "蜂巢处理",
+            "title": "材料处理",
             "summary": "summary",
             "hook": "hook",
-            "narration": "工人继续处理蜂巢，蜂群还在周围。蜂巢装好收工。",
+            "narration": "工人继续处理材料，当前只是在整理这一批物料。",
             "narration_blocks": [
                 {
                     "start": 0,
                     "end": 20,
-                    "visual": "工人继续处理蜂巢，蜂群还在周围飞动",
-                    "visual_facts": ["工人继续处理蜂巢，蜂群还在周围飞动"],
-                    "narration": "工人继续处理蜂巢，蜂群还在周围飞动，蜂巢装好收工。",
+                    "visual": "工人继续处理材料，当前只是在整理这一批物料",
+                    "visual_facts": ["工人继续处理材料，当前只是在整理这一批物料"],
+                    "narration": "工人继续处理材料，当前只是在整理这一批物料。",
                     "pause": False,
                 },
             ],
-            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "材料处理"}],
             "chapters": [],
             "hashtags": [],
         }
 
         commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
 
-        self.assertNotIn("收工", data["narration"])
-        self.assertNotIn("装好", data["narration"])
-        self.assertNotIn("收工", data["narration_blocks"][0]["narration"])
-        self.assertIn("继续处理", data["narration_blocks"][0]["narration"])
+        self.assertEqual("工人继续处理材料，当前只是在整理这一批物料。", data["narration_blocks"][0]["narration"])
 
-    def test_medium_mode_rewrites_unsupported_container_loading_claim_instead_of_rejecting(self):
+    def test_medium_mode_keeps_generic_visible_claims_without_domain_rewrite(self):
         data = {
-            "title": "蜂巢处理",
+            "title": "材料整理",
             "summary": "summary",
             "hook": "hook",
-            "narration": "工人继续处理蜂巢，蜂巢块被放进袋子里。",
+            "narration": "工人继续把材料放进容器旁边整理。",
             "narration_blocks": [
                 {
                     "start": 0,
                     "end": 20,
-                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
-                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
-                    "narration": "工人继续处理蜂巢，手套贴着树干往下动，蜂巢块被放进袋子里。",
+                    "visual": "工人继续把材料放进容器旁边整理",
+                    "visual_facts": ["工人继续把材料放进容器旁边整理"],
+                    "narration": "工人继续把材料放进容器旁边整理。",
                     "pause": False,
                 },
             ],
-            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "材料整理"}],
             "chapters": [],
             "hashtags": [],
         }
 
         commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
 
-        self.assertNotIn("放进袋", data["narration"])
-        self.assertNotIn("放进袋", data["narration_blocks"][0]["narration"])
-        self.assertIn("继续处理", data["narration_blocks"][0]["narration"])
+        self.assertIn("放进容器旁边整理", data["narration_blocks"][0]["narration"])
 
-    def test_medium_mode_rewrites_unsupported_bag_mouth_claim_instead_of_rejecting(self):
+    def test_medium_mode_preserves_supported_container_claim_text(self):
         data = {
-            "title": "蜂巢处理",
+            "title": "材料整理",
             "summary": "summary",
             "hook": "hook",
-            "narration": "蜂巢被放入袋中，袋口被拧紧。",
+            "narration": "材料被放入容器中，容器口被拧紧。",
             "narration_blocks": [
                 {
                     "start": 0,
                     "end": 20,
-                    "visual": "工人继续处理蜂巢，袋子和绳子还在旁边调整",
-                    "visual_facts": ["工人继续处理蜂巢，袋子和绳子还在旁边调整"],
-                    "narration": "工人继续处理蜂巢，蜂巢被放入袋中，袋口被拧紧。",
+                    "visual": "工人把材料放入容器中并拧紧容器口",
+                    "visual_facts": ["工人把材料放入容器中并拧紧容器口"],
+                    "narration": "材料被放入容器中，容器口被拧紧。",
                     "pause": False,
                 },
             ],
-            "edit_segments": [{"start": 0, "end": 20, "reason": "蜂巢处理"}],
+            "edit_segments": [{"start": 0, "end": 20, "reason": "材料整理"}],
             "chapters": [],
             "hashtags": [],
         }
 
         commentary._validate_commentary_script_for_target(data, 120.0, "medium", "zh")
 
-        self.assertNotIn("放入袋", data["narration"])
-        self.assertNotIn("袋口被拧紧", data["narration"])
-        self.assertNotIn("放入袋", data["narration_blocks"][0]["narration"])
-        self.assertNotIn("袋口被拧紧", data["narration_blocks"][0]["narration"])
+        self.assertIn("材料被放入容器中", data["narration"])
+        self.assertIn("容器口被拧紧", data["narration_blocks"][0]["narration"])
 
     def test_auto_filled_blocks_do_not_expose_placeholder_visuals(self):
         blocks = [
@@ -1095,7 +1292,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual("工人把材料送进机器，呈现最终结果。", sentence)
 
-    def test_full_mode_drops_trailing_pause_for_complete_commentary(self):
+    def test_full_mode_keeps_trailing_pause_without_keyword_based_completion_trim(self):
         data = {
             "narration": "工人把材料处理完成。",
             "narration_blocks": [
@@ -1121,9 +1318,15 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         commentary._finalize_full_mode_narration_blocks_for_render(data, 32.0, "full", "zh")
 
-        self.assertEqual(1, len(data["narration_blocks"]))
-        self.assertFalse(data["narration_blocks"][-1]["pause"])
-        self.assertEqual([{"start": 0.0, "end": 18.0, "reason": "工人把材料处理完成"}], data["edit_segments"])
+        self.assertEqual(2, len(data["narration_blocks"]))
+        self.assertTrue(data["narration_blocks"][-1]["pause"])
+        self.assertEqual(
+            [
+                {"start": 0.0, "end": 18.0, "reason": "工人把材料处理完成"},
+                {"start": 18.0, "end": 30.0, "reason": "普通空镜等待"},
+            ],
+            data["edit_segments"],
+        )
 
     def test_full_mode_does_not_append_editorial_closing_to_narration(self):
         data = {
@@ -1220,7 +1423,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "zh",
         )
 
-    def test_full_mode_accepts_concise_scene_matched_long_narrated_block(self):
+    def test_full_mode_rejects_concise_text_over_long_visual_block(self):
         data = {
             "narration": "工人先把材料摊开检查，能看到不同碎料被分到两侧，方便后面继续挑出有价值的部分。",
             "narration_blocks": [
@@ -1247,7 +1450,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "edit_segments": [{"start": 0, "end": 24}, {"start": 24, "end": 360}],
         }
 
-        commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
+        with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
+            commentary._validate_commentary_script_for_target(data, 400.0, "full", "zh")
 
     def test_narration_rejects_camera_meta_phrasing(self):
         data = {
@@ -1312,25 +1516,25 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertNotIn("54 chars", note)
         self.assertNotIn("expected at least 98", note)
 
-    def test_medium_retry_includes_previous_completion_claim_error_note(self):
+    def test_medium_retry_includes_previous_unsupported_claim_error_note(self):
         transcript = {
-            "text": "beekeeper process",
+            "text": "factory process",
             "language": "en",
-            "segments": [{"start": 0, "end": 10, "text": "beekeeper process"}],
+            "segments": [{"start": 0, "end": 10, "text": "factory process"}],
         }
         payload = {
             "title": "Medium",
             "summary": "summary",
             "hook": "hook",
-            "narration": "手套贴着树干继续操作，蜂群还在旁边飞，镜头只看到当前处理动作。" * 12,
+            "narration": "工人把材料送到设备旁边，镜头只看到当前整理动作。" * 12,
             "narration_blocks": [
                 {
                     "start": 0,
                     "end": 30,
-                    "visual": "beekeeper handles hive on tree with bees still active",
-                    "visual_facts": ["beekeeper handles hive on tree"],
+                    "visual": "worker moves material beside a machine",
+                    "visual_facts": ["worker moves material beside a machine"],
                     "evidence_timestamps": [10],
-                    "narration": "手套贴着树干继续操作，蜂群还在旁边飞，镜头只看到当前处理动作。",
+                    "narration": "工人把材料送到设备旁边，镜头只看到当前整理动作。",
                     "pause": False,
                 }
             ],
@@ -1350,8 +1554,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         fake_models = CapturingModels()
         fake_client = pytypes.SimpleNamespace(models=fake_models)
         previous_error = (
-            "AI narration block claims a completed packing/ending action that is not supported by its selected visual range. "
-            "Block 13 says the work is finished, completed, or 收工, but the block visual description does not show a final result."
+            "AI narration block has a concrete claim that is not supported by its selected visual range. "
+            "Block 3 says the machine ejects finished copper, but the timestamped frame only shows material being moved beside the machine."
         )
 
         with patch.object(commentary, "create_gemini_client", return_value=fake_client):
@@ -1368,7 +1572,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         prompt = fake_models.calls[0]["contents"][0]
         self.assertIn("Retry correction note", prompt)
-        self.assertIn("completed packing/ending action", prompt)
+        self.assertIn("claimed an action, state, result", prompt)
+        self.assertIn("timestamped keyframes", prompt)
         self.assertIn("describe only what is visible", prompt)
         self.assertNotIn("full-mode target duration", prompt)
 
@@ -1740,6 +1945,34 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("scene_index", prompt)
         self.assertIn("scene_start", prompt)
         self.assertIn("sample_role", prompt)
+        self.assertIn("For every image, return one observation", prompt)
+        self.assertIn("Carefully inspect every keyframe and its timestamp", prompt)
+        self.assertIn("importance 1-5", prompt)
+        self.assertIn("interest_score 1-5", prompt)
+        self.assertIn("Do not mark random filler", prompt)
+        self.assertIn("evidence_timestamps copied from the frame labels", prompt)
+        self.assertIn("不允许造假，不允许说谎", prompt)
+
+    def test_openai_visual_batch_result_normalizes_observations_to_frame_timestamps(self):
+        parsed = {
+            "observations": [
+                {"image": 2, "timestamp": 999, "visual": "worker pulls wire"},
+                {"visual": "worker sorts copper"},
+            ],
+            "candidate_segments": [{"timestamp": 4.9, "reason": "useful action", "evidence_timestamps": [999]}],
+        }
+        batch = [
+            {"timestamp": 1.0, "scene_start": 0.0, "scene_end": 2.0, "sample_role": "middle"},
+            {"timestamp": 5.0, "scene_start": 4.0, "scene_end": 7.0, "sample_role": "late"},
+        ]
+
+        normalized = commentary._normalize_openai_visual_batch_result(parsed, batch)
+
+        self.assertEqual(5.0, normalized["observations"][0]["timestamp"])
+        self.assertEqual(1.0, normalized["observations"][1]["timestamp"])
+        self.assertEqual([5.0], normalized["candidate_segments"][0]["evidence_timestamps"])
+        self.assertEqual(4.0, normalized["candidate_segments"][0]["start"])
+        self.assertEqual(7.0, normalized["candidate_segments"][0]["end"])
 
     def test_openai_visual_analysis_prompt_omits_raw_batches(self):
         visual_analysis = {
@@ -1747,7 +1980,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "model": "demo-model",
             "frame_count": 128,
             "batch_count": 4,
-            "observations": [{"timestamp": 1, "visual": "worker sorts copper"}],
+            "frames": [{"timestamp": 1}, {"timestamp": 9}],
+            "observations": [{"timestamp": 1, "visual": "worker sorts copper", "importance": 5, "interest_score": 4, "edit_value": "must_keep"}],
             "candidate_segments": [{"start": 0, "end": 10, "reason": "clear process stage"}],
             "batches": [{"raw_analysis": "x" * 100000}],
         }
@@ -1759,6 +1993,31 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertNotIn("raw_analysis", text)
         self.assertNotIn("batches", text)
         self.assertLessEqual(len(text), commentary.OPENAI_VISUAL_PROMPT_MAX_CHARS)
+
+    def test_openai_prompt_requires_timestamped_frame_evidence(self):
+        prompt = commentary._build_commentary_prompt(
+            transcript={"text": "factory process", "language": "en", "segments": []},
+            video_title="Demo",
+            duration=12.0,
+            language="zh",
+            style="hustle",
+            target_duration="short",
+            analysis_mode="openai",
+            visual_analysis={
+                "provider": "openai_compatible",
+                "frames": [{"timestamp": 1.0}, {"timestamp": 5.0}],
+                "observations": [{"timestamp": 1.0, "visual": "worker sorts copper"}],
+            },
+        )
+
+        self.assertIn("TIMESTAMPED VISUAL FRAME TABLE", prompt)
+        self.assertIn('"timestamp": 1.0', prompt)
+        self.assertIn("evidence_timestamps are mandatory", prompt)
+        self.assertIn("carefully review every keyframe and timestamp", prompt)
+        self.assertIn("Do not fabricate, do not lie", prompt)
+        self.assertIn("important, watchable source content", prompt)
+        self.assertIn("do not select random-looking filler", prompt)
+        self.assertIn("不允许造假，不允许说谎", prompt)
 
     def test_openai_visual_analysis_compaction_preserves_full_timeline_coverage(self):
         visual_analysis = {
@@ -2176,6 +2435,21 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             units = sum(commentary._subtitle_char_units(char) for char in line)
             self.assertLessEqual(units, commentary.ASS_SUBTITLE_MAX_LINE_UNITS)
 
+    def test_block_timed_subtitles_preserve_subsecond_pause_tail_alignment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subtitle_path = os.path.join(tmpdir, "commentary.ass")
+            blocks = [
+                {"start": 0.0, "end": 15.0, "narration": "第一段解说。", "pause": False},
+                {"start": 15.0, "end": 29.313, "narration": "第二段解说。", "pause": False},
+                {"start": 29.313, "end": 30.0, "narration": "", "pause": True, "rendered_duration": 0.687},
+                {"start": 30.0, "end": 45.0, "narration": "第三段解说。", "pause": False},
+                {"start": 45.0, "end": 59.742, "narration": "最后一段解说。", "pause": False},
+            ]
+            durations = [15.0, 14.313, 0.687, 15.0, 14.742]
+
+            commentary._write_block_timed_ass(blocks, subtitle_path, durations)
+            self.assertAlmostEqual(59.74, commentary._ass_last_dialogue_end_seconds(subtitle_path), places=2)
+
     def test_downloader_quality_settings_cap_high_default_at_1080p_and_keep_low_suffix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             high = main._youtube_download_settings("My Video", tmpdir)
@@ -2518,7 +2792,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 patch.object(commentary, "generate_commentary_voiceover") as voiceover, \
                 patch.object(commentary, "_create_visual_edit") as create_visual, \
                 patch.object(commentary, "_fit_video_to_voiceover") as fit_video, \
-                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [4.0, 5.0, 4.5])) as create_synced, \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [60.0, 60.0, 60.0])) as create_synced, \
                 patch.object(commentary, "_create_ambient_audio_bed") as create_ambient, \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video:
 
@@ -2540,8 +2814,207 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         create_synced.assert_called_once()
         self.assertEqual(commentary._narration_blocks_to_edit_segments(blocks), result["edit_segments"])
         self.assertEqual(result["edited_visual"], result["timed_visual"])
-        self.assertEqual([4.0, 5.0, 4.5], result["subtitle_block_durations"])
+        self.assertEqual([60.0, 60.0, 60.0], result["subtitle_block_durations"])
         mix_video.assert_called_once()
+
+    def test_source_spoken_commentary_mutes_original_audio_in_block_synced_render(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            transcript = {
+                "text": " ".join(["original narrator explains the scene"] * 30),
+                "segments": [
+                    {"start": 0, "end": 6, "text": "The original narrator explains the first step."},
+                    {"start": 8, "end": 14, "text": "The original narrator explains the tool choice."},
+                    {"start": 16, "end": 22, "text": "The original narrator explains the process."},
+                    {"start": 24, "end": 30, "text": "The original narrator explains the result."},
+                    {"start": 32, "end": 38, "text": "The original narrator explains the lesson."},
+                ],
+                "language": "en",
+            }
+            blocks = [
+                {
+                    "start": 0,
+                    "end": 10,
+                    "visual": "worker starts the process",
+                    "narration": "先说明画面里的操作起点，以及这个动作为什么要放在第一步。",
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 20,
+                    "end": 30,
+                    "visual": "worker shows the result",
+                    "narration": "接着解释结果的变化，让新解说替代原视频里的旧旁白。",
+                    "video_speed": 1.0,
+                },
+            ]
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 60, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "transcribe_video", return_value=transcript), \
+                patch.object(commentary, "_extract_keyframes", return_value=[]), \
+                patch.object(commentary, "generate_commentary_script", return_value={
+                    "title": "Remix",
+                    "summary": "summary",
+                    "hook": "hook",
+                    "narration": "\n\n".join(block["narration"] for block in blocks),
+                    "narration_blocks": blocks,
+                    "edit_segments": commentary._narration_blocks_to_edit_segments(blocks),
+                    "chapters": [],
+                    "hashtags": [],
+                }), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [30.0, 30.0])) as create_synced, \
+                patch.object(commentary, "_create_ambient_audio_bed") as create_ambient, \
+                patch.object(commentary, "_mix_voiceover_with_video") as mix_video, \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}):
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="current",
+                    target_duration="medium",
+                    original_audio_volume=0.3,
+                    pause_original_audio_volume=0.6,
+                )
+
+        create_synced.assert_called_once()
+        self.assertEqual(0.0, create_synced.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.0, create_synced.call_args.kwargs["pause_original_audio_volume"])
+        create_ambient.assert_not_called()
+        self.assertEqual(0.0, mix_video.call_args.kwargs["original_audio_volume"])
+        self.assertIsNone(mix_video.call_args.kwargs["ambient_audio_path"])
+        self.assertTrue(result["source_has_spoken_commentary"])
+        self.assertEqual(0.0, result["original_audio_volume"])
+        self.assertEqual(0.0, result["pause_original_audio_volume"])
+        self.assertEqual(0.3, result["requested_original_audio_volume"])
+        self.assertEqual(0.6, result["requested_pause_original_audio_volume"])
+
+    def test_openai_edit_first_renders_final_commentary_from_intermediate_cut(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            intermediate_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            open(intermediate_path, "wb").close()
+            transcript = {
+                "text": " ".join(["original narrator explains action"] * 30),
+                "segments": [
+                    {"start": 0, "end": 6, "text": "The original narrator explains the opening."},
+                    {"start": 20, "end": 26, "text": "The original narrator explains the middle."},
+                    {"start": 40, "end": 46, "text": "The original narrator explains the ending."},
+                    {"start": 55, "end": 62, "text": "The original narrator explains the result."},
+                    {"start": 70, "end": 78, "text": "The original narrator explains the final point."},
+                ],
+                "language": "en",
+            }
+            final_script = {
+                "title": "Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "先讲中间片开头的动作。\n\n再讲中间片结尾的结果。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 10,
+                        "visual": "edited opening action",
+                        "visual_facts": ["edited opening action"],
+                        "evidence_timestamps": [5.0],
+                        "narration": "先讲中间片开头的动作。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                    {
+                        "start": 10,
+                        "end": 20,
+                        "visual": "edited ending result",
+                        "visual_facts": ["edited ending result"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "再讲中间片结尾的结果。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                ],
+                "edit_segments": [
+                    {"start": 0, "end": 10, "reason": "edited opening action", "video_speed": 1.0},
+                    {"start": 10, "end": 20, "reason": "edited ending result", "video_speed": 1.0},
+                ],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 10, "source_start": 20, "source_end": 30, "video_speed": 1.0},
+                        {"output_start": 10, "output_end": 20, "source_start": 60, "source_end": 70, "video_speed": 1.0},
+                    ],
+                },
+            }
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 90, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "transcribe_video", return_value=transcript), \
+                patch.object(commentary, "_has_audio_stream", return_value=True), \
+                patch.object(commentary, "_probe_openai_audio_analysis_support", return_value={"supported": False, "reason": "unsupported"}), \
+                patch.object(commentary, "_prepare_analysis_video_for_openai_frames", return_value=source_path), \
+                patch.object(commentary, "_extract_openai_analysis_frames", return_value=[{"path": os.path.join(tmpdir, "frame.jpg"), "timestamp": 5.0, "source_video_path": source_path}]), \
+                patch.object(commentary, "_openai_generate_edit_first_commentary_script", return_value=(
+                    final_script,
+                    {"provider": "openai_compatible", "frame_count": 1, "batch_count": 1},
+                    {
+                        "provider": "openai_compatible",
+                        "analysis_stage": "edited_video_commentary",
+                        "frames": [{"timestamp": 5.0}, {"timestamp": 15.0}],
+                        "observations": [
+                            {"timestamp": 5.0, "visual": "edited opening action", "importance": 5, "interest_score": 5},
+                            {"timestamp": 15.0, "visual": "edited ending result", "importance": 5, "interest_score": 5},
+                        ],
+                        "candidate_segments": [],
+                    },
+                    intermediate_path,
+                    final_script["_openai_edit_first"]["source_edit_timeline"],
+                    20.0,
+                )) as generate_edit_first, \
+                patch.object(commentary, "_get_video_duration", side_effect=lambda path: 20.0 if path == intermediate_path else 90.0), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [10.0, 10.0])) as create_synced, \
+                patch.object(commentary, "_create_ambient_audio_bed") as create_ambient, \
+                patch.object(commentary, "_mix_voiceover_with_video") as mix_video, \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}):
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="openai",
+                    openai_key="openai-key",
+                    openai_base_url="http://openai-compatible.test/v1",
+                    openai_model="test-model",
+                    target_duration="two_to_four",
+                    original_audio_volume=0.3,
+                    pause_original_audio_volume=0.6,
+                )
+
+        generate_edit_first.assert_called_once()
+        create_synced.assert_called_once()
+        self.assertEqual(intermediate_path, create_synced.call_args.kwargs["video_path"])
+        self.assertEqual(0.0, create_synced.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.0, create_synced.call_args.kwargs["pause_original_audio_volume"])
+        create_ambient.assert_not_called()
+        self.assertEqual("openai_selected_visual_edit.mp4", result["openai_intermediate_edit"])
+        self.assertEqual("openai_selected_visual_edit.mp4", result["render_source_video"])
+        self.assertEqual(20.0, result["render_source_duration"])
+        self.assertEqual("two_to_four", result["openai_edit_first"]["source_target_duration"])
+        self.assertEqual("full", result["openai_edit_first"]["render_target_duration"])
+        self.assertTrue(result["source_has_spoken_commentary"])
+        self.assertEqual(0.0, mix_video.call_args.kwargs["original_audio_volume"])
 
     def test_full_duration_renders_ai_planned_commentary_episodes_from_final_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2784,6 +3257,12 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "will not invent fallback edit_segments"):
             commentary._require_ai_selected_edit_segments({"edit_segments": []}, 3935, "full")
 
+    def test_two_to_four_duration_targets_two_to_four_minute_window(self):
+        self.assertEqual(240.0, commentary._target_visual_duration_seconds(3935, "two_to_four"))
+        self.assertEqual((120.0, 240.0), commentary._target_duration_window_seconds(3935, "two_to_four"))
+        self.assertEqual((75.0, 75.0), commentary._target_duration_window_seconds(75, "two_to_four"))
+        self.assertIn("2-4 minute commentary", commentary._target_duration_hint("two_to_four", 3935))
+
     def test_full_duration_compacts_medium_complete_process_sources(self):
         self.assertEqual(
             284,
@@ -2809,6 +3288,143 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertLess(target, 360)
         self.assertGreater(target, commentary._visual_candidate_duration_seconds(visual_analysis, 678.4))
         self.assertLess(target, 678.4 * 0.5)
+
+    def test_openai_candidate_edit_plan_prioritizes_important_watchable_segments(self):
+        visual_analysis = openai_value_scored_visual_analysis()
+
+        with patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.20), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 0.45), \
+             patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 300.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 45.0), \
+             patch.object(commentary, "FULL_MODE_SOURCE_FRACTION", 0.075), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 30.0):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=600.0,
+                target_duration="full",
+                language="zh",
+            )
+
+        self.assertIsNotNone(plan)
+        starts = [block["start"] for block in plan["blocks"]]
+        self.assertIn(20, starts)
+        self.assertIn(100, starts)
+        self.assertIn(340, starts)
+        self.assertIn(580, starts)
+        self.assertNotIn(0, starts)
+        self.assertNotIn(40, starts)
+        self.assertTrue(all(block["evidence_timestamps"] for block in plan["blocks"]))
+
+    def test_openai_full_target_is_limited_by_candidate_playable_evidence(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            candidate_playable = commentary._visual_candidate_playable_seconds(visual_analysis, 1201.7)
+            target = commentary._target_visual_duration_seconds_for_analysis(1201.7, "full", visual_analysis)
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+
+        self.assertAlmostEqual(400.0, candidate_playable, places=3)
+        self.assertLess(target, 480.0)
+        self.assertLessEqual(
+            commentary._full_mode_min_playable_visual_seconds(1201.7, target),
+            candidate_playable + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+        self.assertIsNotNone(plan)
+        self.assertGreaterEqual(plan["playable_seconds"], plan["min_seconds"] - commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS)
+        self.assertLessEqual(plan["playable_seconds"], plan["max_seconds"] + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS)
+        self.assertGreaterEqual(
+            max(block["end"] for block in plan["blocks"]),
+            1201.7 * commentary.FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION,
+        )
+
+    def test_openai_selected_ranges_reject_weak_random_looking_filler(self):
+        visual_analysis = openai_value_scored_visual_analysis()
+        weak_blocks = [
+            {"start": 0, "end": 10, "visual": "weak setup", "visual_facts": ["weak setup"], "evidence_timestamps": [5.0], "narration": "weak", "pause": False, "video_speed": 1.0},
+            {"start": 40, "end": 50, "visual": "repeated adjustment", "visual_facts": ["repeated adjustment"], "evidence_timestamps": [45.0], "narration": "weak", "pause": False, "video_speed": 1.0},
+            {"start": 460, "end": 470, "visual": "slow filler walk", "visual_facts": ["slow filler walk"], "evidence_timestamps": [465.0], "narration": "weak", "pause": False, "video_speed": 1.0},
+        ]
+
+        with self.assertRaisesRegex(Exception, "not grounded in important or watchable"):
+            commentary._validate_openai_selected_ranges_are_important(
+                weak_blocks,
+                visual_analysis,
+                duration=600.0,
+                target_seconds=120.0,
+            )
+
+        strong_blocks = [
+            {"start": 20, "end": 30, "visual": "skilled action", "visual_facts": ["skilled action"], "evidence_timestamps": [25.0], "narration": "strong", "pause": False, "video_speed": 1.0},
+            {"start": 100, "end": 110, "visual": "process reveal", "visual_facts": ["process reveal"], "evidence_timestamps": [105.0], "narration": "strong", "pause": False, "video_speed": 1.0},
+            {"start": 580, "end": 590, "visual": "final result", "visual_facts": ["final result"], "evidence_timestamps": [585.0], "narration": "strong", "pause": False, "video_speed": 1.0},
+        ]
+        commentary._validate_openai_selected_ranges_are_important(
+            strong_blocks,
+            visual_analysis,
+            duration=600.0,
+            target_seconds=120.0,
+        )
+
+    def test_openai_full_mode_does_not_backend_fill_underselected_visual_budget(self):
+        visual_analysis = openai_value_scored_visual_analysis()
+        narration = repeated_scene_text("worker keeps explaining the visible process with enough concrete detail", 4)
+        blocks = [
+            {
+                "start": 20,
+                "end": 30,
+                "visual": "skilled important action",
+                "visual_facts": ["skilled important action"],
+                "evidence_timestamps": [25.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 100,
+                "end": 110,
+                "visual": "middle process reveal",
+                "visual_facts": ["middle process reveal"],
+                "evidence_timestamps": [105.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 580,
+                "end": 590,
+                "visual": "final result reveal",
+                "visual_facts": ["final result reveal"],
+                "evidence_timestamps": [585.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+        data = {"narration": "\n".join(block["narration"] for block in blocks), "narration_blocks": blocks}
+
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 300.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 120.0), \
+             patch.object(commentary, "FULL_MODE_SOURCE_FRACTION", 0.20), \
+             self.assertRaisesRegex(Exception, "do not match the selected full-mode edit target"):
+            commentary._validate_commentary_script_for_target(
+                data,
+                duration=600.0,
+                target_duration="full",
+                language="en",
+                visual_analysis=visual_analysis,
+            )
+
+        self.assertFalse(any(block.get("auto_filled_visual_budget") for block in data["narration_blocks"]))
 
     def test_full_duration_rejects_ten_minute_result_when_visual_analysis_prefers_shorter_cut(self):
         narration = repeated_scene_text("工人继续处理蜂巢，蜂群围着树干飞动，袋子和工具跟着动作调整", 20)
@@ -2872,7 +3488,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 "end": 620,
                 "visual": "工人下到树干下方准备收尾",
                 "visual_facts": ["工人下到树干下方准备收尾"],
-                "narration": "人已经从树干上下来，蜂巢切开一大块，装好收工。",
+                "narration": "The worker is below the trunk, still organizing position, bag, and tools near the tree.",
                 "pause": False,
                 "video_speed": 1.0,
             },
@@ -3299,7 +3915,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             600,
         )
 
-    def test_full_duration_prompt_demands_breathable_scene_matched_narration(self):
+    def test_full_duration_prompt_demands_clear_scene_matched_narration(self):
         prompt = commentary._build_commentary_prompt(
             transcript={"text": "source transcript", "segments": [], "language": "en"},
             video_title="Demo",
@@ -3315,8 +3931,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("Do not preserve the entire source", prompt)
         self.assertIn("Treat narration_blocks as the production timeline", prompt)
         self.assertIn("do not put 2 minutes of words into a 20-second visual range", prompt)
-        self.assertIn("do not narrate every second like a robot", prompt)
-        self.assertIn("do not talk over every second", prompt)
+        self.assertIn("explain the selected timestamp ranges clearly", prompt)
+        self.assertIn("clearly explain the selected visuals", prompt)
         self.assertIn("25% of selected visual time", prompt)
         self.assertIn("pause=true blocks", prompt)
         self.assertIn("original source audio", prompt)
@@ -3395,6 +4011,46 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn("国际工厂/海外回收流程与中国工厂/中国回收效率的对比", prompt)
         self.assertIn("必须围绕当前画面", prompt)
         self.assertIn("不要写脱离画面的国际形势", prompt)
+
+    def test_builtin_commentary_styles_have_distinct_prompt_instructions(self):
+        expected = {
+            "documentary": "纪录片解说风格要求",
+            "news": "新闻播读风格要求",
+            "storytelling": "故事化旁白风格要求",
+            "educational": "知识科普风格要求",
+            "first_person_hustle": "整活第一视角风格要求",
+            "hustle": "整活解说风格要求",
+            "funny": "轻松吐槽风格要求",
+        }
+
+        for style, marker in expected.items():
+            with self.subTest(style=style):
+                prompt = commentary._build_commentary_prompt(
+                    transcript={"text": "source transcript", "segments": [], "language": "en"},
+                    video_title="Demo",
+                    duration=60,
+                    language="zh",
+                    style=style,
+                    target_duration="short",
+                    analysis_mode="openai",
+                    visual_analysis={"frames": [{"timestamp": 3.0, "visual": "worker handles material"}]},
+                )
+
+                self.assertIn(marker, prompt)
+                self.assertNotIn("- Keep the selected style grounded in the visible action of each timestamped range.", prompt)
+
+    def test_builtin_style_prompt_accepts_chinese_label_aliases(self):
+        aliases = {
+            "纪录片解说": "纪录片解说风格要求",
+            "新闻播读": "新闻播读风格要求",
+            "故事化旁白": "故事化旁白风格要求",
+            "知识科普": "知识科普风格要求",
+        }
+
+        for style, marker in aliases.items():
+            with self.subTest(style=style):
+                instruction = commentary._style_grounding_instruction(style, "zh")
+                self.assertIn(marker, instruction)
 
     def test_full_duration_rejects_blocks_that_stop_before_late_timeline(self):
         block_text = repeated_scene_text(WORKER_MATERIAL_NARRATION, 2)
@@ -3578,100 +4234,30 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             language="zh",
         )
 
-    def test_openai_visual_timeline_rejects_post_harvest_climbing_regression(self):
-        blocks = [
-            {
-                "start": 741.104,
-                "end": 785.0,
-                "visual": "smoking leafy torch held while tying green bag straps to limb",
-                "visual_facts": ["green bag is secured to a tree limb while smoke drifts"],
-                "narration": repeated_scene_text("火把继续冒烟，我把袋子和绳子绑在树枝上固定住蜂巢", 8),
-                "pause": False,
-            },
-            {
-                "start": 809.0,
-                "end": 855.0,
-                "visual": "climber feet and hands gripping trunk with beehive and swarm visible lower right",
-                "visual_facts": ["climber uses trunk and pegs while bees swarm near the hive"],
-                "narration": repeated_scene_text("袋子已经绑好，我继续拉紧绳子把蜂蜜固定在树枝上", 8),
-                "pause": False,
-            },
-        ]
-        visual_analysis = {
-            "observations": [
-                {"timestamp": 751.143, "process_stage": "securing equipment", "visual": "Both pink-gloved hands tie and secure straps of green bag to tree limb"},
-                {"timestamp": 809.928, "process_stage": "climbing ascent", "visual": "POV looking up tall trunk, boots on bark, metal pegs visible, distant beehive with bees"},
-                {"timestamp": 811.783, "process_stage": "climbing toward hive", "visual": "Climber's feet and hands gripping trunk, beehive and bee swarm visible lower right"},
-            ]
-        }
-
-        with self.assertRaisesRegex(Exception, "regress to an earlier source action"):
-            commentary._validate_commentary_script_for_target(
-                {"narration": "\n".join(block["narration"] for block in blocks), "narration_blocks": blocks},
-                duration=1026.0,
-                target_duration="full",
-                language="zh",
-                visual_analysis=visual_analysis,
-            )
-
-    def test_openai_visual_timeline_rejects_unsupported_completion_claim(self):
+    def test_openai_visual_timeline_allows_generic_claims_when_scene_is_grounded(self):
         block = {
-            "start": 609.2,
-            "end": 635.0,
-            "visual": "gloved hands prying bark, removing hive material while bees approach",
-            "visual_facts": ["gloved hands prying at trunk edge", "bees flying near boots"],
-            "narration": "蜂巢切开一大块，装好收工",
-            "pause": False,
-            "video_speed": 1.5,
-            "speed_reason": "repeated hive material removal remains understandable at mild acceleration",
-        }
-        visual_analysis = {
-            "observations": [
-                {
-                    "timestamp": 609.227,
-                    "visual": "Bee flies directly past gloved hand on trunk; motion blur on insect",
-                    "process_stage": "bee activity",
-                },
-                {
-                    "timestamp": 623.04,
-                    "visual": "Gloved hand pulls small dark object from trunk base while second hand holds tool",
-                    "process_stage": "hive material removal",
-                },
-                {
-                    "timestamp": 634.88,
-                    "visual": "Multiple bees flying near boots and lower trunk; active swarm close to worker",
-                    "process_stage": "bee defense",
-                },
-            ]
-        }
-
-        with self.assertRaisesRegex(Exception, "completed packing/ending action"):
-            commentary._validate_scene_matched_narration_blocks(
-                {"narration": block["narration"], "narration_blocks": [block]},
-                visual_analysis=visual_analysis,
-            )
-
-    def test_openai_visual_timeline_allows_visible_completion_claim(self):
-        block = {
-            "start": 418.5,
-            "end": 445.0,
-            "visual": "knife cutting more comb then placing pieces into bag on leg",
-            "visual_facts": ["yellow comb in bag", "bees swarming"],
-            "narration": "蜂巢切下来塞进袋子，袋口扎紧这才算装好",
+            "start": 92.0,
+            "end": 118.0,
+            "visual": "worker holds material beside a sorting machine",
+            "visual_facts": ["worker grips material while standing beside the machine"],
+            "evidence_timestamps": [96.2, 112.4],
+            "narration": "工人把材料稳在机器旁边，手上的动作还在继续整理当前这批物料。",
             "pause": False,
             "video_speed": 1.0,
         }
         visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 96.2}, {"timestamp": 112.4}],
             "observations": [
                 {
-                    "timestamp": 430.383,
-                    "visual": "Large yellow honeycomb pieces are placed into a plastic bag on worker's leg",
-                    "process_stage": "bagging honeycomb",
+                    "timestamp": 96.2,
+                    "visual": "Worker grips material beside a sorting machine; a reflective highlight is visible on the surface",
+                    "process_stage": "material sorting",
                 },
                 {
-                    "timestamp": 442.437,
-                    "visual": "Bag is held close while bees swarm around the packed honeycomb",
-                    "process_stage": "packing",
+                    "timestamp": 112.4,
+                    "visual": "Worker keeps the material near the machine intake while the surrounding bins remain visible",
+                    "process_stage": "material sorting",
                 },
             ]
         }
@@ -3681,34 +4267,216 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             visual_analysis=visual_analysis,
         )
 
-    def test_openai_visual_timeline_allows_noisy_concept_labels_when_scene_is_grounded(self):
+    def test_openai_visual_timeline_requires_evidence_timestamps_from_extracted_frames(self):
         block = {
-            "start": 92.0,
-            "end": 118.0,
-            "visual": "worker climbing on tree trunk while bees swarm near hive",
-            "visual_facts": ["worker hands stay on the trunk while bees move around the hive"],
-            "narration": "工人抱住树干继续往上爬，手套贴着树皮一点点靠近蜂巢。",
+            "start": 0.0,
+            "end": 3.0,
+            "visual": "worker sorts copper",
+            "visual_facts": ["worker sorts copper"],
+            "narration": "工人正在把铜料分开，手边的碎料被拨到一侧。",
             "pause": False,
             "video_speed": 1.0,
         }
         visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 1.0}],
+            "observations": [{"timestamp": 1.0, "visual": "worker sorts copper"}],
+        }
+
+        with self.assertRaisesRegex(Exception, "missing timestamp evidence"):
+            commentary._validate_scene_matched_narration_blocks(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                visual_analysis=visual_analysis,
+            )
+
+        block["evidence_timestamps"] = [5.0]
+        with self.assertRaisesRegex(Exception, "does not match its visual range"):
+            commentary._validate_scene_matched_narration_blocks(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                visual_analysis=visual_analysis,
+            )
+
+        block["evidence_timestamps"] = [1.0]
+        commentary._validate_scene_matched_narration_blocks(
+            {"narration": block["narration"], "narration_blocks": [block]},
+            visual_analysis=visual_analysis,
+        )
+
+    def test_openai_uniform_frame_cache_rejects_large_scene_aware_gaps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frames_dir = os.path.join(tmpdir, "openai_analysis_frames")
+            os.makedirs(frames_dir)
+            frame_paths = []
+            for index, timestamp in enumerate([1.0, 3.0, 80.0, 110.0], start=1):
+                path = os.path.join(frames_dir, f"frame_{index:04d}_{int(timestamp * 1000):09d}.jpg")
+                open(path, "wb").close()
+                frame_paths.append(path)
+            options = commentary.resolve_openai_sampling_options(frame_interval_seconds=3.0, max_frames=80)
+            commentary._save_openai_analysis_frames(
+                tmpdir,
+                [{"path": path, "timestamp": timestamp} for path, timestamp in zip(frame_paths, [1.0, 3.0, 80.0, 110.0])],
+                sampling_options=options,
+                source_video_path="edited.mp4",
+                sampling_mode="scene_aware",
+            )
+
+            loaded = commentary._load_openai_analysis_frames(
+                tmpdir,
+                sampling_options=options,
+                source_video_path="edited.mp4",
+                require_uniform_coverage=True,
+                duration=120.0,
+            )
+
+        self.assertEqual([], loaded)
+
+    def test_full_script_validation_fills_missing_openai_evidence_from_frame_table(self):
+        blocks = [
+            {
+                "start": 0.0,
+                "end": 6.0,
+                "visual": "工人固定蜂巢袋，树干旁边还有绳子和蜂群",
+                "visual_facts": ["工人固定蜂巢袋，树干旁边还有绳子和蜂群"],
+                "narration": "工人先把蜂巢袋贴着树干固定好，绳子和手套一起稳住重量。",
+                "pause": False,
+                "video_speed": 1.0,
+            },
+            {
+                "start": 6.0,
+                "end": 13.0,
+                "visual": "蜂群围着袋子飞动，工人继续收紧固定位置",
+                "visual_facts": ["蜂群围着袋子飞动，工人继续收紧固定位置"],
+                "narration": "蜂群还在旁边乱飞，袋口继续收紧，这一步是为了让后面取蜜不至于整袋滑落。",
+                "pause": False,
+                "video_speed": 1.0,
+            },
+        ]
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 2.0}, {"timestamp": 8.0}, {"timestamp": 20.0}],
+            "observations": [
+                {"timestamp": 2.0, "visual": "worker fixes a honeycomb bag to tree trunk"},
+                {"timestamp": 8.0, "visual": "rope and bees visible around the bag"},
+            ],
+        }
+        data = {
+            "narration": "\n\n".join(block["narration"] for block in blocks),
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_commentary_script_for_target(
+            data,
+            duration=13.0,
+            target_duration="full",
+            language="zh",
+            visual_analysis=visual_analysis,
+        )
+
+        self.assertEqual([2.0], data["narration_blocks"][0]["evidence_timestamps"])
+        self.assertEqual([8.0], data["narration_blocks"][1]["evidence_timestamps"])
+
+    def test_openai_visual_timeline_rejects_non_extracted_evidence_timestamp(self):
+        block = {
+            "start": 100.0,
+            "end": 110.0,
+            "visual": "worker feeds cable into machine",
+            "visual_facts": ["worker feeds cable into machine"],
+            "evidence_timestamps": [106.0],
+            "narration": "工人把线缆送进机器入口，画面重点是当前进料动作。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 105.0}],
             "observations": [
                 {
-                    "timestamp": 96.2,
-                    "visual": "Worker hands grip tree trunk while bees swarm around hive; bright metal-looking artifact is visible from lighting",
-                    "process_stage": "climbing near hive with possible copper/metal highlight",
-                },
-                {
-                    "timestamp": 112.4,
-                    "visual": "Person in gloves stays on branch and trunk as honeycomb and bees remain close",
-                    "process_stage": "approaching hive",
+                    "timestamp": 105.0,
+                    "visual": "Worker feeds cable into the machine intake",
+                    "process_stage": "machine feeding",
                 },
             ]
+        }
+
+        with self.assertRaisesRegex(Exception, "one of the extracted frame timestamps"):
+            commentary._validate_scene_matched_narration_blocks(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                visual_analysis=visual_analysis,
+            )
+
+    def test_openai_visual_timeline_rejects_evidence_timestamp_outside_block_in_full_mode(self):
+        block = {
+            "start": 100.0,
+            "end": 110.0,
+            "visual": "worker feeds cable into machine",
+            "visual_facts": ["worker feeds cable into machine"],
+            "evidence_timestamps": [95.0],
+            "narration": repeated_scene_text("工人把线缆送进机器入口，画面重点是当前进料动作", 8),
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 95.0}, {"timestamp": 105.0}],
+            "observations": [
+                {
+                    "timestamp": 95.0,
+                    "visual": "Worker is still standing away from the machine intake",
+                    "process_stage": "setup",
+                },
+                {
+                    "timestamp": 105.0,
+                    "visual": "Worker feeds cable into the machine intake",
+                    "process_stage": "machine feeding",
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(Exception, "does not match its visual range"):
+            commentary._validate_commentary_script_for_target(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                duration=160.0,
+                target_duration="full",
+                language="zh",
+                visual_analysis=visual_analysis,
+            )
+
+    def test_openai_visual_timeline_uses_exact_frame_table_over_broader_candidates(self):
+        block = {
+            "start": 100.0,
+            "end": 110.0,
+            "visual": "worker feeds cable into machine",
+            "visual_facts": ["worker feeds cable into machine"],
+            "evidence_timestamps": [105.0],
+            "narration": "工人把线缆送进机器入口，画面重点是当前进料动作。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 105.0}],
+            "observations": [
+                {
+                    "timestamp": 105.0,
+                    "visual": "Worker feeds cable into the machine intake",
+                    "process_stage": "machine feeding",
+                }
+            ],
+            "candidate_segments": [
+                {
+                    "start": 92.0,
+                    "end": 118.0,
+                    "visual": "Broader candidate includes setup before feeding and machine output after feeding",
+                    "process_stage": "machine work",
+                    "reason": "wide context around the selected area",
+                }
+            ],
         }
 
         commentary._validate_scene_matched_narration_blocks(
             {"narration": block["narration"], "narration_blocks": [block]},
             visual_analysis=visual_analysis,
+            strict_scene_actions=True,
         )
 
     def test_full_mode_output_alignment_rejects_final_longer_than_source(self):
@@ -4464,6 +5232,151 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertFalse(blocks[0]["pause"])
         self.assertAlmostEqual(120 + expected_duration, blocks[0]["end"], places=2)
 
+    def test_block_synced_render_refuses_to_trim_away_evidence_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "source.mp4")
+            open(video_path, "wb").close()
+            timed_video_path = os.path.join(tmpdir, "timed.mp4")
+            voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
+            ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
+            commands = []
+
+            def fake_voiceover(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"voice")
+
+            def fake_fit_audio(_input_audio_path, output_audio_path, _target_duration):
+                with open(output_audio_path, "wb") as f:
+                    f.write(b"fit")
+
+            def fake_original_audio(_video_path, _start, _duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                with open(output_path, "wb") as f:
+                    f.write(b"original")
+
+            def fake_run_command(cmd, cwd=None):
+                commands.append(cmd)
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"media")
+
+            blocks = [{
+                "start": 120,
+                "end": 140,
+                "visual": "worker picks material into a bucket, with the key pickup happening late in the range",
+                "visual_facts": ["key pickup happens near 137s"],
+                "evidence_timestamps": [137.0],
+                "narration": "她把材料一块块捡进桶里。",
+                "video_speed": 1.0,
+            }]
+            with patch.object(commentary, "_get_video_duration", return_value=3600.0), \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+                patch.object(commentary, "_get_audio_duration", return_value=3.0), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
+                patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command), \
+                self.assertRaisesRegex(Exception, "cannot be trimmed without losing its visual evidence"):
+                commentary._create_block_synced_visuals_and_audio(
+                    video_path=video_path,
+                    narration_blocks=blocks,
+                    timed_video_path=timed_video_path,
+                    voiceover_path=voiceover_path,
+                    ambient_audio_path=ambient_audio_path,
+                    aspect_mode="16:9",
+                    work_dir=tmpdir,
+                    tts_provider="edge",
+                    language="zh",
+                    elevenlabs_key=None,
+                    voice_id="voice",
+                    edge_voice="zh-CN-YunjianNeural",
+                    original_audio_volume=0.08,
+                    preserve_source_resolution=True,
+                    trim_short_tts_tails=True,
+                )
+
+        self.assertEqual([], commands)
+
+    def test_block_synced_render_splits_short_tts_evidence_timestamps_by_tail_pause(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "source.mp4")
+            open(video_path, "wb").close()
+            timed_video_path = os.path.join(tmpdir, "timed.mp4")
+            voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
+            ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
+
+            def fake_voiceover(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"voice")
+
+            def fake_fit_audio(_input_audio_path, output_audio_path, _target_duration):
+                with open(output_audio_path, "wb") as f:
+                    f.write(b"fit")
+
+            def fake_original_audio(_video_path, _start, _duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                with open(output_path, "wb") as f:
+                    f.write(b"original")
+
+            def fake_run_command(cmd, cwd=None):
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"media")
+
+            blocks = [{
+                "start": 29.0,
+                "end": 44.0,
+                "visual": "steel wire bundle is sheared and then drops into chute",
+                "visual_facts": ["shearing first, chute drop at the tail"],
+                "evidence_timestamps": [36.4, 41.4, 43.946],
+                "narration": "钢丝束被液压剪断，成捆金属落入料斗。",
+                "video_speed": 1.0,
+            }]
+            with patch.object(commentary, "_get_video_duration", return_value=3600.0), \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+                patch.object(commentary, "_get_audio_duration", return_value=7.0), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
+                patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
+                    video_path=video_path,
+                    narration_blocks=blocks,
+                    timed_video_path=timed_video_path,
+                    voiceover_path=voiceover_path,
+                    ambient_audio_path=ambient_audio_path,
+                    aspect_mode="16:9",
+                    work_dir=tmpdir,
+                    tts_provider="edge",
+                    language="zh",
+                    elevenlabs_key=None,
+                    voice_id="voice",
+                    edge_voice="zh-CN-YunjianNeural",
+                    original_audio_volume=0.0,
+                    pause_original_audio_volume=0.6,
+                    preserve_source_resolution=True,
+                    trim_short_tts_tails=False,
+                )
+
+        self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual(2, len(blocks))
+        self.assertFalse(blocks[0]["pause"])
+        self.assertTrue(blocks[1]["pause"])
+        self.assertAlmostEqual(41.727, blocks[0]["end"], places=2)
+        self.assertEqual([36.4, 41.4], blocks[0]["evidence_timestamps"])
+        self.assertEqual([43.946], blocks[1]["evidence_timestamps"])
+        self.assertAlmostEqual(15.0, sum(block_durations), places=2)
+
+    def test_non_full_output_duration_rejects_medium_render_shortfall(self):
+        with self.assertRaisesRegex(Exception, "expected at least 180.0s"):
+            commentary._assert_non_full_output_duration_target(
+                [92.2],
+                source_duration=1233.3,
+                target_duration="medium",
+            )
+
+    def test_non_full_output_duration_rejects_two_to_four_render_shortfall(self):
+        with self.assertRaisesRegex(Exception, "requested 2-4 minute target duration"):
+            commentary._assert_non_full_output_duration_target(
+                [92.2],
+                source_duration=1233.3,
+                target_duration="two_to_four",
+            )
+
     def test_full_duration_rejects_missing_narration_blocks(self):
         with self.assertRaisesRegex(Exception, "narration_blocks are required"):
             commentary._validate_commentary_script_for_target(
@@ -4515,6 +5428,647 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 target_duration="full",
                 language="zh",
             )
+
+    def test_locked_openai_plan_trims_overlong_narration_without_retiming_blocks(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            model_blocks = [
+                {
+                    "narration": "工人操作设备，材料位置不断变化，当前画面里的工具和部件都在推进这个步骤，继续说明可见动作和结果。",
+                    "rate": "+0%",
+                    "pitch": "+0Hz",
+                }
+                for _block in plan["blocks"]
+            ]
+            data = {
+                "narration": "",
+                "narration_blocks": model_blocks,
+            }
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+            original_ranges = [(block["start"], block["end"], tuple(block["evidence_timestamps"])) for block in data["narration_blocks"]]
+            max_chars = commentary._maximum_narration_chars_for_target_seconds(plan["target_seconds"], "full", "zh")
+
+            self.assertGreater(
+                len(commentary.re.sub(r"\s+", "", commentary._narration_from_blocks(data))),
+                max_chars,
+            )
+            commentary._validate_commentary_script_for_target(
+                data,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+                visual_analysis=visual_analysis,
+            )
+
+        self.assertLessEqual(
+            len(commentary.re.sub(r"\s+", "", commentary._narration_from_blocks(data))),
+            max_chars,
+        )
+        self.assertEqual(
+            original_ranges,
+            [(block["start"], block["end"], tuple(block["evidence_timestamps"])) for block in data["narration_blocks"]],
+        )
+
+    def test_locked_openai_plan_minimum_narration_budget_is_feasible(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            min_chars = sum(block["min_narration_chars"] for block in plan["blocks"])
+            max_chars = commentary._maximum_narration_chars_for_target_seconds(
+                plan["target_seconds"],
+                "full",
+                "zh",
+            )
+
+        self.assertLessEqual(min_chars, max_chars)
+
+    def test_locked_openai_plan_trims_each_block_narration_to_visual_duration(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            long_block_text = "工人操作设备，材料和部件的位置不断变化，当前画面里的工具动作还在继续推进这个步骤。" * 12
+            data = {
+                "narration_blocks": [
+                    {"narration": long_block_text}
+                    for _block in plan["blocks"]
+                ],
+            }
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+            original_ranges = [(block["start"], block["end"]) for block in data["narration_blocks"]]
+            commentary._fit_locked_plan_narration_to_budget(
+                data,
+                commentary._maximum_narration_chars_for_target_seconds(plan["target_seconds"], "full", "zh"),
+                "zh",
+            )
+
+        self.assertEqual(original_ranges, [(block["start"], block["end"]) for block in data["narration_blocks"]])
+        for block in data["narration_blocks"]:
+            estimated = commentary._estimated_voiceover_seconds_for_text(block["narration"], "zh")
+            self.assertLessEqual(
+                estimated,
+                commentary._block_visual_duration(block) * commentary.FULL_MODE_MAX_VOICEOVER_DURATION_RATIO
+                + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+            )
+
+    def test_locked_openai_plan_trims_overlong_block_when_plan_is_applied(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            long_block_text = "工人操作设备，材料和部件的位置不断变化，当前画面里的工具动作还在继续推进这个步骤。" * 20
+            data = {
+                "narration_blocks": [
+                    {"narration": long_block_text}
+                    for _block in plan["blocks"]
+                ],
+            }
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+
+        for block in data["narration_blocks"]:
+            estimated = commentary._estimated_voiceover_seconds_for_text(block["narration"], "zh")
+            self.assertLessEqual(
+                estimated,
+                commentary._block_visual_duration(block) * commentary.FULL_MODE_MAX_VOICEOVER_DURATION_RATIO
+                + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+            )
+
+    def test_locked_openai_plan_retrims_before_speed_validation(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            data = {
+                "narration_blocks": [
+                    {"narration": "工人操作设备，材料位置变化，画面里的工具和部件都在推进这个步骤。"}
+                    for _block in plan["blocks"]
+                ],
+            }
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+            data["narration_blocks"][18]["narration"] = (
+                "工人继续处理材料，设备不断运转，筛分出来的颗粒沿着输送带移动，"
+                "旁边还有粉尘和支架，整个流程还在持续推进。"
+            ) * 30
+            commentary._validate_commentary_script_for_target(
+                data,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+                visual_analysis=visual_analysis,
+            )
+
+        estimated = commentary._estimated_voiceover_seconds_for_text(data["narration_blocks"][18]["narration"], "zh")
+        self.assertLessEqual(
+            estimated,
+            commentary._block_visual_duration(data["narration_blocks"][18]) * commentary.FULL_MODE_MAX_VOICEOVER_DURATION_RATIO
+            + commentary.FULL_MODE_VALIDATION_EPSILON_SECONDS,
+        )
+
+    def test_locked_openai_plan_keeps_empty_locked_blocks_for_validation(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            data = {
+                "narration_blocks": [
+                    {"narration": "工人操作设备，材料位置变化，画面里的工具和部件都在推进这个步骤。"}
+                    for _block in plan["blocks"]
+                ],
+            }
+            data["narration_blocks"][4]["narration"] = ""
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+            normalized = commentary._normalize_narration_blocks(data["narration_blocks"], 1201.7)
+
+        self.assertEqual(len(plan["blocks"]), len(normalized))
+        with self.assertRaisesRegex(Exception, "missing narration"):
+            commentary._validate_locked_plan_has_required_narration({"narration_blocks": normalized})
+
+    def test_locked_openai_plan_missing_narration_is_not_backend_filled_from_english_visual_labels(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            data = {
+                "narration_blocks": [
+                    {"narration": "工人操作设备，材料位置变化，画面里的工具和部件都在推进这个步骤。"}
+                    for _block in plan["blocks"][:16]
+                ],
+            }
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+            commentary._normalize_script_timeline(data, 1201.7, "full", "zh")
+
+        with self.assertRaisesRegex(Exception, "missing narration"):
+            commentary._validate_locked_plan_has_required_narration(data)
+        self.assertEqual("", data["narration_blocks"][16]["narration"])
+
+    def test_locked_openai_plan_can_fallback_from_clean_chinese_visual_evidence_only(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 6.0,
+                    "visual": "工人把钢丝束拉出轮胎侧边",
+                    "visual_facts": ["钢丝束被机器钩住并向外拉出"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "",
+                    "pause": False,
+                    "_locked_edit_plan": True,
+                }
+            ],
+        }
+
+        commentary._fill_missing_locked_plan_narration(data, "zh")
+
+        self.assertEqual("钢丝束被机器钩住并向外拉出。", data["narration_blocks"][0]["narration"])
+
+    def test_locked_openai_plan_rejects_raw_visual_analysis_labels_in_chinese_narration(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 6.0,
+                    "visual": "wire extraction / Close-up of steel wire bundle / useful / normal",
+                    "visual_facts": ["wire extraction / Close-up of steel wire bundle / useful / normal"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "钢丝束被钩子拉出。wireextraction/Close-up。",
+                    "pause": False,
+                    "_locked_edit_plan": True,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "raw visual-analysis labels"):
+            commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+    def test_chinese_narration_rejects_timestamped_visual_fact_labels(self):
+        polluted = "橙色蜂蜜块切下迅速装桶能量到手112.324s:Mencuttingandha"
+        self.assertTrue(commentary._contains_visual_analysis_label_artifact(polluted, "zh"))
+        self.assertEqual(
+            "橙色蜂蜜块切下迅速装桶能量到手",
+            commentary._strip_visual_analysis_label_artifact(polluted, "zh"),
+        )
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 108.0,
+                    "end": 118.0,
+                    "visual": "112.324s: Men cutting and handling bright orange honeycomb on log",
+                    "visual_facts": ["112.324s: Men cutting and handling bright orange honeycomb on log"],
+                    "evidence_timestamps": [112.324],
+                    "narration": polluted,
+                    "pause": False,
+                    "_locked_edit_plan": True,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "timestamped frame labels"):
+            commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+    def test_sanitize_chinese_narration_strips_trailing_english_visual_labels(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 8.0,
+                    "visual": "hydraulic columns press down, strong compression",
+                    "visual_facts": ["hydraulic columns press down, strong compression"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "绿色压头重重压下，材料被压得密实，力道爆表！hydraulic columns press down，strong compression。",
+                    "pause": False,
+                }
+            ],
+        }
+
+        commentary._sanitize_generated_commentary_script(data, "zh")
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+        self.assertEqual("绿色压头重重压下，材料被压得密实，力道爆表", data["narration_blocks"][0]["narration"])
+
+    def test_sanitize_chinese_narration_strips_attached_english_visual_labels(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 8.0,
+                    "visual": "Hydraulic press descending onto mold, press lowered onto yellow finished paver",
+                    "visual_facts": ["Hydraulic press descending onto mold, press lowered onto yellow finished paver"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "液压机猛压而下，彩色颗粒被压成坚实黄色地砖Hydraulic press descending onto mold，press lowered onto yellow finished paver。",
+                    "pause": False,
+                }
+            ],
+        }
+
+        commentary._sanitize_generated_commentary_script(data, "zh")
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+        self.assertEqual(
+            "液压机猛压而下，彩色颗粒被压成坚实黄色地砖",
+            data["narration_blocks"][0]["narration"],
+        )
+
+    def test_sanitize_chinese_narration_strips_short_english_visual_phrase_labels(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 8.0,
+                    "visual": "tire chunks enter crusher, rollers grind material",
+                    "visual_facts": ["tire chunks enter crusher, rollers grind material"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "高速辊轴碾碎碎片，钢丝和橡胶彻底分开tire chunks enter crusher，rollers grind material",
+                    "pause": False,
+                }
+            ],
+        }
+
+        commentary._sanitize_generated_commentary_script(data, "zh")
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+        self.assertEqual("高速辊轴碾碎碎片，钢丝和橡胶彻底分开", data["narration_blocks"][0]["narration"])
+
+    def test_sanitize_chinese_narration_strips_multi_clause_english_visual_phrase_labels(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 8.0,
+                    "visual": "crane hook lifts wire bundle, bundle drops and scatters into hopper",
+                    "visual_facts": ["crane hook lifts wire bundle, bundle drops and scatters into hopper"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "起重机甩下钢丝大捆，直接落进料斗散开，这动作够猛！crane hook lifts wire bundle，bundle drops and scatters into hopper。",
+                    "pause": False,
+                },
+                {
+                    "start": 8.0,
+                    "end": 16.0,
+                    "visual": "grapple closes on tire sidewall, arm carries tire left, press machine visible",
+                    "visual_facts": ["grapple closes on tire sidewall, arm carries tire left, press machine visible"],
+                    "evidence_timestamps": [12.0],
+                    "narration": "机械臂牢牢咬住侧壁，把轮胎拉向压机！钢丝马上要被处理掉了grapple closes on tire sidewall，arm carries tire left，press machine visible。",
+                    "pause": False,
+                },
+            ],
+        }
+
+        commentary._sanitize_generated_commentary_script(data, "zh")
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+        self.assertEqual("起重机甩下钢丝大捆，直接落进料斗散开，这动作够猛", data["narration_blocks"][0]["narration"])
+        self.assertEqual("机械臂牢牢咬住侧壁，把轮胎拉向压机！钢丝马上要被处理掉了", data["narration_blocks"][1]["narration"])
+
+    def test_full_script_validation_sanitizes_openai_visual_labels_before_final_check(self):
+        polluted = (
+            "机械臂猛地抓起满泥的巨轮胎，泥土碎石狂掉！"
+            "Large robotic arm with heavy claw gripping mud-covered truck tire，"
+            "Claw lifts and rotates the dirty tire"
+        )
+        blocks = []
+        for index in range(4):
+            narration = polluted if index == 0 else "设备继续推进处理，材料位置跟着变化。"
+            blocks.append({
+                "start": index * 10.0,
+                "end": index * 10.0 + 10.0,
+                "visual": "process visual",
+                "visual_facts": ["visible process fact"],
+                "evidence_timestamps": [index * 10.0 + 5.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {"narration": polluted, "narration_blocks": blocks}
+
+        commentary._validate_commentary_script_for_target(data, 40.0, "full", "zh")
+
+        self.assertEqual(
+            "机械臂猛地抓起满泥的巨轮胎，泥土碎石狂掉",
+            data["narration_blocks"][0]["narration"],
+        )
+        self.assertNotIn("Large robotic arm", data["narration"])
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+    def test_top_level_label_pollution_is_replaced_from_clean_blocks(self):
+        data = {
+            "narration": "steel wire extraction / useful / normal",
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 6.0,
+                    "visual": "工人把钢丝束拉出轮胎侧边",
+                    "visual_facts": ["钢丝束被机器钩住并向外拉出"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "钢丝束被机器钩住，顺着轮胎侧边往外拉。",
+                    "pause": False,
+                }
+            ],
+        }
+
+        commentary._validate_no_visual_analysis_label_artifacts(data, "zh")
+
+        self.assertEqual(
+            "钢丝束被机器钩住，顺着轮胎侧边往外拉。",
+            data["narration"],
+        )
+
+    def test_normalized_script_narration_prefers_blocks_over_polluted_top_level(self):
+        data = {
+            "narration": "wire extraction / Close-up / useful / normal",
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 6.0,
+                    "narration": "工人把钢丝束从轮胎侧边拉出来。",
+                }
+            ],
+        }
+
+        self.assertEqual("工人把钢丝束从轮胎侧边拉出来。", commentary._normalize_script_narration(data))
+
+    def test_openai_plan_observation_text_omits_editing_labels(self):
+        visual_analysis = {
+            "observations": [
+                {
+                    "timestamp": 3.0,
+                    "process_stage": "wire_extraction",
+                    "visual": "Close-up of steel wire bundle being pulled from tire sidewall",
+                    "edit_value": "useful",
+                    "pace": "normal",
+                }
+            ]
+        }
+
+        observations = commentary._visual_analysis_observation_text_for_range(visual_analysis, 0.0, 6.0)
+
+        self.assertEqual(["3.000s: Close-up of steel wire bundle being pulled from tire sidewall"], observations)
+        self.assertNotIn("useful", observations[0])
+        self.assertNotIn("normal", observations[0])
+        self.assertNotIn("wire_extraction", observations[0])
+
+    def test_openai_timestamped_frame_table_omits_editing_labels(self):
+        visual_analysis = {
+            "frames": [{"timestamp": 3.0, "sample_role": "uniform"}],
+            "observations": [
+                {
+                    "timestamp": 3.0,
+                    "process_stage": "wire_extraction",
+                    "visual": "Close-up of steel wire bundle being pulled from tire sidewall",
+                    "reason": "important removal action",
+                    "edit_value": "useful",
+                    "pace": "normal",
+                }
+            ],
+        }
+
+        table = commentary._openai_timestamped_frame_table(visual_analysis)
+
+        self.assertIn("Close-up of steel wire bundle", table)
+        self.assertIn("important removal action", table)
+        self.assertNotIn("wire_extraction", table)
+        self.assertNotIn("useful", table)
+        self.assertNotIn("normal", table)
+
+    def test_locked_openai_plan_matches_model_blocks_by_timestamp_not_position(self):
+        edit_plan = {
+            "blocks": [
+                {
+                    "start": 0.0,
+                    "end": 5.0,
+                    "visual": "opening tire feed",
+                    "visual_facts": ["opening tire feed"],
+                    "evidence_timestamps": [2.0],
+                    "video_speed": 1.0,
+                    "speed_reason": "",
+                    "min_narration_chars": 6,
+                },
+                {
+                    "start": 20.0,
+                    "end": 25.0,
+                    "visual": "steel wire extraction",
+                    "visual_facts": ["steel wire extraction"],
+                    "evidence_timestamps": [22.0],
+                    "video_speed": 1.0,
+                    "speed_reason": "",
+                    "min_narration_chars": 6,
+                },
+            ],
+        }
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 20.0,
+                    "end": 25.0,
+                    "narration": "钢丝被钩住以后向外拉出。",
+                }
+            ],
+        }
+
+        commentary._apply_openai_candidate_edit_plan(data, edit_plan, "zh")
+
+        self.assertEqual("", data["narration_blocks"][0]["narration"])
+        self.assertEqual("钢丝被钩住以后向外拉出。", data["narration_blocks"][1]["narration"])
+
+    def test_visual_label_repair_prompt_preserves_locked_timeline_and_rewrites_style(self):
+        invalid = {
+            "narration_blocks": [
+                {
+                    "start": 10.0,
+                    "end": 16.0,
+                    "visual": "wire extraction / Close-up of steel wire bundle / useful / normal",
+                    "visual_facts": ["wire extraction / Close-up of steel wire bundle / useful / normal"],
+                    "evidence_timestamps": [12.0],
+                    "narration": "钢丝束被钩子拉出。wireextraction/Close-up。",
+                    "pause": False,
+                    "_locked_edit_plan": True,
+                }
+            ],
+        }
+
+        prompt = commentary._focused_validation_repair_instruction(
+            Exception("AI narration contains raw visual-analysis labels instead of natural commentary."),
+            invalid,
+            "zh",
+            1,
+        )
+
+        self.assertIn("Keep exactly 1 narration_blocks", prompt)
+        self.assertIn("Rewrite the polluted narration fields", prompt)
+        self.assertIn("Do not include English category labels", prompt)
+
+    def test_locked_openai_plan_chinese_trim_keeps_text_not_only_punctuation(self):
+        text = "工人继续处理材料，设备不断运转，筛分出来的颗粒沿着输送带移动。"
+        shortened = commentary._shorten_narration_to_fit_visual(text * 4, 2.0, "zh")
+
+        self.assertGreater(len(shortened.strip("，,。！？!?")), 0)
+        self.assertGreater(len(shortened), 1)
+
+    def test_locked_openai_plan_uses_backend_evidence_when_model_omits_or_changes_it(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            data = {
+                "narration_blocks": [
+                    {
+                        "visual": "模型自己写的视觉描述",
+                        "visual_facts": ["模型自己写的事实"],
+                        "evidence_timestamps": [9999],
+                        "narration": "工人操作设备，材料位置变化，画面里的工具和部件都在推进这个步骤。",
+                    }
+                    for _block in plan["blocks"]
+                ],
+            }
+            data["narration_blocks"][1].pop("evidence_timestamps")
+
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+
+        self.assertEqual(plan["blocks"][0]["visual"], data["narration_blocks"][0]["visual"])
+        self.assertEqual(plan["blocks"][0]["visual_facts"], data["narration_blocks"][0]["visual_facts"])
+        self.assertEqual(plan["blocks"][0]["evidence_timestamps"], data["narration_blocks"][0]["evidence_timestamps"])
+        self.assertEqual(plan["blocks"][1]["evidence_timestamps"], data["narration_blocks"][1]["evidence_timestamps"])
+
+    def test_locked_openai_plan_ignores_model_pause_flags_for_narrated_plan_blocks(self):
+        visual_analysis = openai_candidate_limited_long_visual_analysis()
+        with patch.object(commentary, "FULL_MODE_FULL_SOURCE_UNDER_SECONDS", 600.0), \
+             patch.object(commentary, "FULL_MODE_COMPACT_SOURCE_UNDER_SECONDS", 1200.0), \
+             patch.object(commentary, "FULL_MODE_LONG_MIN_VISUAL_SECONDS", 480.0), \
+             patch.object(commentary, "FULL_MODE_MIN_PLAYABLE_TARGET_RATIO", 0.90), \
+             patch.object(commentary, "FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", 1.10), \
+             patch.object(commentary, "FULL_MODE_OPENAI_PLAN_MAX_BLOCK_PLAYABLE_SECONDS", 10.5):
+            plan = commentary._build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration=1201.7,
+                target_duration="full",
+                language="zh",
+            )
+            data = {
+                "narration_blocks": [
+                    {
+                        "pause": True,
+                        "narration": "",
+                    }
+                    for _block in plan["blocks"]
+                ],
+            }
+
+            commentary._apply_openai_candidate_edit_plan(data, plan, "zh")
+
+        self.assertTrue(all(not block["pause"] for block in data["narration_blocks"]))
 
     def test_full_duration_repairs_excessive_pause_ratio(self):
         opening_text = joined_scene_text("工人分拣材料，设备继续运转并把材料送到下一步", 33)
@@ -4941,17 +6495,10 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "frame_count": 1,
             "batch_count": 1,
             "sampling_options": commentary.resolve_openai_sampling_options(),
-            "observations": [{"timestamp": 1, "visual": "worker sorts copper"}],
+            "frames": [{"timestamp": 1}],
+            "observations": [{"timestamp": 1, "visual": "worker sorts copper", "importance": 5, "interest_score": 4, "edit_value": "must_keep"}],
         }
-        payload = {
-            "title": "Demo",
-            "summary": "summary",
-            "hook": "hook",
-            "narration": "这是一段足够长的解说内容。" * 80,
-            "edit_segments": [{"start": 0, "end": 60, "reason": "process"}],
-            "chapters": [],
-            "hashtags": [],
-        }
+        payload = openai_timestamped_script_payload()
         calls = []
 
         def fake_call(**kwargs):
@@ -4983,17 +6530,9 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "frame_count": 1,
             "batch_count": 41,
             "sampling_options": commentary.resolve_openai_sampling_options(),
-            "observations": [{"timestamp": 1, "visual": "worker sorts copper"}],
+            "observations": [{"timestamp": 1, "visual": "worker sorts copper", "importance": 5, "interest_score": 4, "edit_value": "must_keep"}],
         }
-        payload = {
-            "title": "Demo",
-            "summary": "summary",
-            "hook": "hook",
-            "narration": "这是一段足够长的解说内容。" * 80,
-            "edit_segments": [{"start": 0, "end": 60, "reason": "process"}],
-            "chapters": [],
-            "hashtags": [],
-        }
+        payload = openai_timestamped_script_payload()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             commentary._save_openai_visual_analysis(tmpdir, cached)
@@ -5013,6 +6552,28 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual("Demo", result["title"])
         analyze.assert_not_called()
+
+    def test_openai_visual_analysis_cache_without_edit_value_scores_is_stale(self):
+        cached = {
+            "provider": "openai_compatible",
+            "model": "demo-model",
+            "frame_count": 1,
+            "batch_count": 1,
+            "sampling_options": commentary.resolve_openai_sampling_options(),
+            "source_video_path": os.path.abspath("video.mp4"),
+            "observations": [{"timestamp": 1, "visual": "worker sorts copper"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            commentary._save_openai_visual_analysis(tmpdir, cached)
+            loaded = commentary._load_openai_visual_analysis(
+                tmpdir,
+                "demo-model",
+                [{"path": "frame.jpg", "timestamp": 1, "source_video_path": "video.mp4"}],
+                sampling_options=commentary.resolve_openai_sampling_options(),
+            )
+
+        self.assertIsNone(loaded)
 
     def test_openai_analysis_frames_manifest_reused_when_files_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:

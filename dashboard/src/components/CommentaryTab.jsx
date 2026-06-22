@@ -4,6 +4,15 @@ import { getApiUrl } from '../config'
 import { buildGeminiHeaders, getGeminiAccessMissingMessage, hasGeminiAccess as hasGeminiConfigAccess, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
 import { COMMENTARY_DEFAULTS, getDefaultEdgeVoiceForLanguage } from './commentaryDefaults'
+import {
+  createCustomStyleId,
+  CUSTOM_STYLE_STORAGE_KEY,
+  findCustomStyleOption,
+  getCustomStyleLabelKey,
+  normalizeCustomStyleOptions,
+  normalizeCustomStylePrompt,
+  resolveCommentaryStyleRequest,
+} from './commentaryCustomStyles'
 import { COMMENTARY_LOG_PANEL_BODY_CLASS, getCommentaryLogPanelState } from './commentaryLogPanel'
 
 const STYLE_OPTIONS = [
@@ -16,24 +25,6 @@ const STYLE_OPTIONS = [
   { id: 'educational', label: '知识科普' },
   { id: 'custom', label: '自定义提示词' },
 ]
-
-const CUSTOM_STYLE_STORAGE_KEY = 'openshorts.commentary.customStyleOptions'
-const CUSTOM_STYLE_PREFIX = 'custom:'
-
-const createCustomStyleId = () => `${CUSTOM_STYLE_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-
-const normalizeCustomStyleOptions = (items) => {
-  if (!Array.isArray(items)) return []
-  return items
-    .map((item) => ({
-      id: String(item?.id || '').trim(),
-      label: String(item?.label || '').trim(),
-      prompt: String(item?.prompt || '').trim(),
-      custom: true,
-    }))
-    .filter((item) => item.id.startsWith(CUSTOM_STYLE_PREFIX) && item.label && item.prompt)
-    .slice(0, 50)
-}
 
 const loadCustomStyleOptions = () => {
   if (typeof window === 'undefined') return []
@@ -50,9 +41,10 @@ const saveCustomStyleOptions = (items) => {
 }
 
 const DURATION_OPTIONS = [
+  { id: 'two_to_four', label: '2-4 分钟' },
   { id: 'medium', label: '3-5 分钟' },
   { id: 'short', label: '60-90 秒' },
-  { id: 'full', label: '尽量完整（自动精简）' },
+  { id: 'full', label: '尽量完整（按时间戳解说）' },
 ]
 
 const FALLBACK_BACKGROUND_MUSIC_TRACKS = [
@@ -252,6 +244,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const audioUrlRef = useRef(null)
   const statusPollFailuresRef = useRef(0)
   const eventsMergedRef = useRef(null)
+  const customStyleOptionsRef = useRef(customStyleOptions)
   const hasGeminiAccess = hasGeminiConfigAccess(geminiConfig || geminiApiKey)
   const geminiAccessMissingMessage = getGeminiAccessMissingMessage(geminiConfig || geminiApiKey)
   const hasSelectedAnalysisAccess = (mode = analysisMode) => (
@@ -265,14 +258,13 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const styleOptions = [...STYLE_OPTIONS, ...customStyleOptions]
   const selectedCustomStyle = customStyleOptions.find((item) => item.id === style)
   const isCustomStyleEditorVisible = style === 'custom' || Boolean(selectedCustomStyle)
-  const effectiveStyle = selectedCustomStyle ? selectedCustomStyle.label : style
-  const effectiveCustomStylePrompt = isCustomStyleEditorVisible ? customStylePrompt : ''
 
   useEffect(() => {
     setEdgeVoice(getDefaultEdgeVoiceForLanguage(language))
   }, [language])
 
   useEffect(() => {
+    customStyleOptionsRef.current = normalizeCustomStyleOptions(customStyleOptions)
     saveCustomStyleOptions(customStyleOptions)
   }, [customStyleOptions])
 
@@ -434,20 +426,24 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     if (request.url !== undefined) setUrl(request.url || '')
     if (request.language) setLanguage(request.language)
     if (request.style) {
-      const savedCustomStyle = customStyleOptions.find((item) => item.id === request.style)
-      if (savedCustomStyle) {
-        setStyle(savedCustomStyle.id)
-        setCustomStyleName(savedCustomStyle.label)
-      } else if (request.custom_style_prompt) {
-        const recoveredOption = {
+      const customPrompt = normalizeCustomStylePrompt(request.custom_style_prompt)
+      if (customPrompt && request.style !== 'custom') {
+        const savedCustomStyle = findCustomStyleOption(customStyleOptionsRef.current, request.style, customPrompt)
+        const recoveredOption = savedCustomStyle || {
           id: createCustomStyleId(),
           label: request.style,
-          prompt: request.custom_style_prompt,
+          prompt: customPrompt,
           custom: true,
         }
-        setCustomStyleOptions((items) => [...items, recoveredOption])
+        if (!savedCustomStyle) {
+          setCustomStyleOptions((items) => normalizeCustomStyleOptions([...items, recoveredOption]))
+          customStyleOptionsRef.current = normalizeCustomStyleOptions([...customStyleOptionsRef.current, recoveredOption])
+        }
         setStyle(recoveredOption.id)
         setCustomStyleName(recoveredOption.label)
+      } else if (request.style === 'custom') {
+        setStyle('custom')
+        setCustomStyleName('')
       } else {
         setStyle(request.style)
       }
@@ -496,14 +492,15 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       return
     }
     const nextOption = {
-      id: selectedCustomStyle?.id || createCustomStyleId(),
+      id: selectedCustomStyle?.id || findCustomStyleOption(customStyleOptions, label, prompt)?.id || createCustomStyleId(),
       label,
       prompt,
       custom: true,
     }
     setCustomStyleOptions((items) => {
-      const withoutCurrent = items.filter((item) => item.id !== nextOption.id)
-      return [...withoutCurrent, nextOption]
+      const nextLabelKey = getCustomStyleLabelKey(nextOption.label)
+      const withoutCurrent = items.filter((item) => item.id !== nextOption.id && getCustomStyleLabelKey(item.label) !== nextLabelKey)
+      return normalizeCustomStyleOptions([...withoutCurrent, nextOption])
     })
     setStyle(nextOption.id)
     setError('')
@@ -724,6 +721,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
 
   const handleGenerate = async () => {
     const usingFile = sourceMode === 'file'
+    const selectedGeminiModel = geminiModel.trim()
     if (!usingFile && !url.trim()) {
       setError('请输入 YouTube URL')
       return
@@ -736,8 +734,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       setError(analysisMode === 'openai' ? '请先在 Settings 配置 OpenAI 兼容 API URL、Key 和模型' : geminiAccessMissingMessage)
       return
     }
-    if (analysisMode === 'video' && geminiModels.length === 0) {
-      setError('Gemini 视频输入模式请先点击“获取模型”，确认当前 Key/Base URL 可用后再生成。')
+    if (analysisMode !== 'openai' && !selectedGeminiModel) {
+      setError('请先选择 Gemini 模型，或手动填写当前 Key/Base URL 支持的模型名。')
       return
     }
     if (ttsProvider === 'elevenlabs' && !elevenLabsKey) {
@@ -758,6 +756,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     statusPollFailuresRef.current = 0
 
     try {
+      const styleRequest = resolveCommentaryStyleRequest(style, customStylePrompt, customStyleOptions)
       const headers = {
         ...buildAnalysisHeaders(analysisMode),
         ...(elevenLabsKey ? { 'X-ElevenLabs-Key': elevenLabsKey } : {}),
@@ -767,8 +766,8 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         const formData = new FormData()
         formData.append('file', videoFile)
         formData.append('language', language)
-        formData.append('style', effectiveStyle)
-        formData.append('custom_style_prompt', effectiveCustomStylePrompt)
+        formData.append('style', styleRequest.style)
+        formData.append('custom_style_prompt', styleRequest.customStylePrompt)
         formData.append('target_duration', targetDuration)
         formData.append('analysis_mode', analysisMode)
         if (analysisMode === 'openai') {
@@ -777,7 +776,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
             formData.append(key, String(value))
           })
         } else {
-          formData.append('gemini_model', geminiModel.trim())
+          formData.append('gemini_model', selectedGeminiModel)
         }
         if (analysisMode !== 'openai' && geminiConfig?.mode === 'official_pool') formData.append('gemini_pool', JSON.stringify(geminiConfig))
         formData.append('tts_provider', ttsProvider)
@@ -798,11 +797,11 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
         requestBody = JSON.stringify({
           url: url.trim(),
           language,
-          style: effectiveStyle,
-          custom_style_prompt: effectiveCustomStylePrompt,
+          style: styleRequest.style,
+          custom_style_prompt: styleRequest.customStylePrompt,
           target_duration: targetDuration,
           analysis_mode: analysisMode,
-          gemini_model: analysisMode === 'openai' ? undefined : geminiModel.trim(),
+          gemini_model: analysisMode === 'openai' ? undefined : selectedGeminiModel,
           openai_model: analysisMode === 'openai' ? openAICompatibleConfig?.model : undefined,
           ...(analysisMode === 'openai' ? buildOpenAISamplingPayload() : {}),
           tts_provider: ttsProvider,
@@ -898,35 +897,113 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const openAIFramePercent = openAIFrameMatch ? Math.round((Number(openAIFrameMatch[1]) / Number(openAIFrameMatch[2])) * 100) : null
   const voiceStarted = backendStage?.stage === 'voice' || hasLogMatching(/Generating synced commentary block|Adding original-audio pause block|Generating \d+ timestamp-synced commentary blocks|Mixing new voiceover/i)
   const renderStarted = backendStage?.stage === 'render' || status === 'completed' || hasLogMatching(/Mixing new voiceover|Generating text-timed subtitles|Burning subtitles/i)
-  const openAIScriptStarted = hasLogMatching(/OpenAI-compatible model is writing|script validation failed|returned a corrected commentary script/i)
-  const openAIVisualStarted = backendStage?.stage === 'openai' || hasLogMatching(/OpenAI-compatible multimodal visual analysis batch/i)
-  const openAIFrameStarted = hasLogMatching(/Extracting dense timestamped frames|Extracted OpenAI-compatible analysis frames/i)
-  const openAITranscriptDone = openAIFrameStarted || openAIVisualStarted || openAIScriptStarted || voiceStarted || renderStarted
-  const openAIFrameDone = openAIVisualStarted || openAIScriptStarted || voiceStarted || renderStarted
-  const openAIVisualDone = openAIScriptStarted || voiceStarted || renderStarted
-  const openAIScriptDone = voiceStarted || renderStarted
+  const normalizedOpenAIStage = backendStage?.stage === 'openai_frames'
+    ? 'openai_source_frames'
+    : backendStage?.stage === 'openai'
+      ? 'openai_source_analysis'
+      : backendStage?.stage
+  const openAIStageOrder = [
+    'transcribe',
+    'openai_audio',
+    'openai_source_frames',
+    'openai_source_analysis',
+    'openai_edit',
+    'openai_edited_frames',
+    'openai_edited_analysis',
+    'openai_final_script',
+    'voice',
+    'render',
+    'done',
+  ]
+  const openAIStageRank = (stageName) => openAIStageOrder.indexOf(stageName)
+  const openAIHasReachedStage = (stageName) => {
+    if (status === 'completed') return true
+    const currentRank = openAIStageRank(normalizedOpenAIStage)
+    const targetRank = openAIStageRank(stageName)
+    return currentRank >= targetRank && targetRank >= 0
+  }
+  const openAIIsAfterStage = (stageName) => {
+    if (status === 'completed') return true
+    const currentRank = openAIStageRank(normalizedOpenAIStage)
+    const targetRank = openAIStageRank(stageName)
+    return currentRank > targetRank && targetRank >= 0
+  }
+  const openAIStepState = (stageName, started, done) => {
+    if (done || openAIIsAfterStage(stageName)) return 'done'
+    if (normalizedOpenAIStage === stageName || started) return 'active'
+    return 'pending'
+  }
+
+  const openAITranscriptStarted = backendStage?.stage === 'transcribe' || hasLogMatching(/Transcribing full video|Transcribing video with Faster-Whisper|Reusing cached Faster-Whisper transcript/i)
+  const openAIAudioStarted = openAIHasReachedStage('openai_audio') || hasLogMatching(/Testing whether the configured OpenAI-compatible model can inspect source audio|OpenAI-compatible source audio analysis is supported|Configured OpenAI-compatible model did not confirm source audio support|OpenAI-compatible audio analysis failed|OpenAI-compatible audio probe/i)
+  const openAISourceFrameStarted = openAIHasReachedStage('openai_source_frames') || hasLogMatching(/Extracting dense timestamped frames|Extracted OpenAI-compatible analysis frames|Detecting scenes for OpenAI-compatible scene-aware/i)
+  const openAIEditStarted = openAIHasReachedStage('openai_edit') || hasLogMatching(/OpenAI-compatible edit-first flow locked visual cut/i)
+  const openAIEditedFrameStarted = openAIHasReachedStage('openai_edited_frames') || hasLogMatching(/Extracting frames from the intermediate edited video/i)
+  const openAIEditedAnalysisStarted = openAIHasReachedStage('openai_edited_analysis') || hasLogMatching(/Analyzing the intermediate edited video with OpenAI-compatible multimodal model/i)
+  const openAIFinalScriptStarted = openAIHasReachedStage('openai_final_script') || hasLogMatching(/Writing final commentary from the edited-video analysis|OpenAI-compatible model is writing|script validation failed|returned a corrected commentary script|returned a repaired commentary script|OpenAI-compatible model returned/i)
+  const openAISourceAnalysisStarted = openAIHasReachedStage('openai_source_analysis') || (
+    !openAIEditedAnalysisStarted && hasLogMatching(/OpenAI-compatible multimodal visual analysis|Reusing cached full-source OpenAI-compatible multimodal visual analysis/i)
+  )
+  const openAITranscriptDone = openAIAudioStarted || openAISourceFrameStarted || openAISourceAnalysisStarted || openAIEditStarted || voiceStarted || renderStarted
+  const openAIAudioDone = openAISourceFrameStarted || openAISourceAnalysisStarted || openAIEditStarted || voiceStarted || renderStarted
+  const openAISourceFrameDone = openAISourceAnalysisStarted || openAIEditStarted || voiceStarted || renderStarted
+  const openAISourceAnalysisDone = openAIEditStarted || openAIEditedFrameStarted || voiceStarted || renderStarted
+  const openAIEditDone = openAIEditedFrameStarted || openAIEditedAnalysisStarted || openAIFinalScriptStarted || voiceStarted || renderStarted
+  const openAIEditedFrameDone = openAIEditedAnalysisStarted || openAIFinalScriptStarted || voiceStarted || renderStarted
+  const openAIEditedAnalysisDone = openAIFinalScriptStarted || voiceStarted || renderStarted
+  const openAIFinalScriptDone = voiceStarted || renderStarted
+  const openAIAudioDetail = openAIAudioDone
+    ? hasLogMatching(/OpenAI-compatible source audio analysis is supported/i)
+      ? 'API 音频分析已完成'
+      : hasLogMatching(/Configured OpenAI-compatible model did not confirm source audio support|OpenAI-compatible audio analysis failed/i)
+        ? 'API 不支持音频，已用转录兜底'
+        : '音频检查完成'
+    : openAIAudioStarted
+      ? backendStage?.stage === 'openai_audio' ? (backendStage.label || latestLog) : latestLog
+      : '等待中'
 
   const openAIAnalysisSteps = [
     {
       label: '转录完整视频',
       detail: openAITranscriptDone ? '转录完成' : /Transcribing full video|Transcribing video with Faster-Whisper/i.test(latestLog) ? latestLog : '等待中',
-      state: openAITranscriptDone ? 'done' : /Transcribing full video|Transcribing video with Faster-Whisper/i.test(latestLog) ? 'active' : 'pending',
+      state: openAIStepState('transcribe', openAITranscriptStarted, openAITranscriptDone),
     },
     {
-      label: '抽取时间线画面帧',
-      detail: openAIFrameDone ? '抽帧完成' : openAIFrameMatch ? `正在抽帧 ${openAIFrameMatch[1]}/${openAIFrameMatch[2]}` : /Extracting dense timestamped frames/i.test(latestLog) ? latestLog : '等待中',
-      state: openAIFrameDone ? 'done' : openAIFrameStarted ? 'active' : 'pending',
-      percent: openAIFrameDone ? 100 : openAIFramePercent,
+      label: '检查原片解说音频',
+      detail: openAIAudioDetail,
+      state: openAIStepState('openai_audio', openAIAudioStarted, openAIAudioDone),
     },
     {
-      label: 'OpenAI 多模态分析',
-      detail: openAIVisualDone ? '视觉分析完成' : /OpenAI-compatible multimodal visual analysis batch/i.test(latestLog) ? latestLog : backendStage?.stage === 'openai' ? (backendStage.label || latestLog) : '等待中',
-      state: openAIVisualDone ? 'done' : openAIVisualStarted ? 'active' : 'pending',
+      label: '全片抽帧',
+      detail: openAISourceFrameDone ? '全片抽帧完成' : openAIFrameMatch ? `正在抽帧 ${openAIFrameMatch[1]}/${openAIFrameMatch[2]}` : /Extracting dense timestamped frames|Detecting scenes for OpenAI-compatible scene-aware/i.test(latestLog) ? latestLog : backendStage?.stage === 'openai_source_frames' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIStepState('openai_source_frames', openAISourceFrameStarted, openAISourceFrameDone),
+      percent: openAISourceFrameDone ? 100 : openAIFramePercent,
     },
     {
-      label: 'OpenAI 写解说脚本',
-      detail: openAIScriptDone ? '脚本已通过校验' : openAIScriptStarted ? latestLog : '等待中',
-      state: openAIScriptDone ? 'done' : openAIScriptStarted ? 'active' : 'pending',
+      label: '全片多模态分析',
+      detail: openAISourceAnalysisDone ? '全片视觉分析完成' : /OpenAI-compatible multimodal visual analysis|Reusing cached full-source OpenAI-compatible multimodal visual analysis/i.test(latestLog) && !openAIEditedAnalysisStarted ? latestLog : backendStage?.stage === 'openai_source_analysis' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIStepState('openai_source_analysis', openAISourceAnalysisStarted, openAISourceAnalysisDone),
+    },
+    {
+      label: '生成中间剪辑',
+      detail: openAIEditDone ? '中间剪辑已生成' : /OpenAI-compatible edit-first flow locked visual cut/i.test(latestLog) ? latestLog : backendStage?.stage === 'openai_edit' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIStepState('openai_edit', openAIEditStarted, openAIEditDone),
+    },
+    {
+      label: '剪辑片抽帧',
+      detail: openAIEditedFrameDone ? '剪辑片抽帧完成' : openAIEditedFrameStarted && openAIFrameMatch ? `正在抽帧 ${openAIFrameMatch[1]}/${openAIFrameMatch[2]}` : /Extracting frames from the intermediate edited video|Detecting scenes for OpenAI-compatible scene-aware/i.test(latestLog) && openAIEditedFrameStarted ? latestLog : backendStage?.stage === 'openai_edited_frames' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIStepState('openai_edited_frames', openAIEditedFrameStarted, openAIEditedFrameDone),
+      percent: openAIEditedFrameDone ? 100 : openAIEditedFrameStarted ? openAIFramePercent : null,
+    },
+    {
+      label: '剪辑片多模态分析',
+      detail: openAIEditedAnalysisDone ? '剪辑片视觉分析完成' : openAIEditedAnalysisStarted && /Analyzing the intermediate edited video|OpenAI-compatible multimodal visual analysis/i.test(latestLog) ? latestLog : backendStage?.stage === 'openai_edited_analysis' ? (backendStage.label || latestLog) : '等待中',
+      state: openAIStepState('openai_edited_analysis', openAIEditedAnalysisStarted, openAIEditedAnalysisDone),
+    },
+    {
+      label: '基于剪辑片写解说',
+      detail: openAIFinalScriptDone ? '最终解说脚本已通过校验' : openAIFinalScriptStarted ? latestLog : '等待中',
+      state: openAIStepState('openai_final_script', openAIFinalScriptStarted, openAIFinalScriptDone),
     },
   ]
 
@@ -1197,9 +1274,9 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                 <select value={analysisMode} onChange={(e) => setAnalysisMode(e.target.value)} className="input-field">
                   <option value="current">当前模式：转录文本 + 关键帧</option>
                   <option value="video">Gemini 视频输入：完整视频分析</option>
-                  <option value="openai">OpenAI 兼容多模态：抽帧全片分析</option>
+                  <option value="openai">OpenAI 兼容多模态：先剪辑再解说</option>
                 </select>
-                <p className="text-xs text-zinc-500 mt-1">Gemini 视频模式会上传 360p 分析副本；OpenAI 兼容模式会转录全片并按时间线密集抽帧，分批发送到 Settings 里配置的多模态接口。最终剪辑仍使用高清源视频。</p>
+                <p className="text-xs text-zinc-500 mt-1">Gemini 视频模式会上传 360p 分析副本；OpenAI 兼容模式会先转录并抽帧分析全片，生成中间剪辑后再分析剪辑片，最后按剪辑片画面写解说。最终剪辑仍使用高清源视频。</p>
               </div>
               {analysisMode !== 'openai' && (
                 <div className="sm:col-span-2 rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-4">
