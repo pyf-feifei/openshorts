@@ -24,6 +24,7 @@ import {
   RotateCcw,
   Calendar,
   Mic2,
+  Wand2,
 } from 'lucide-react'
 import KeyInput from './components/KeyInput'
 import MediaInput from './components/MediaInput'
@@ -33,6 +34,7 @@ import ProcessingAnimation from './components/ProcessingAnimation'
 import ThumbnailStudio from './components/ThumbnailStudio'
 import SaaShortsTab from './components/SaaShortsTab'
 import CommentaryTab from './components/CommentaryTab'
+import CommentaryStyleLearner from './components/CommentaryStyleLearner'
 import UGCGallery from './components/UGCGallery'
 import ScheduleWeekModal from './components/ScheduleWeekModal'
 import { getApiUrl } from './config'
@@ -664,7 +666,19 @@ function App() {
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'commentary' ? 'bg-cyan-500/10 text-cyan-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <Mic2 size={20} />
-          <span className="font-medium hidden lg:block">二创解说</span>
+          <span className="font-medium hidden lg:block">
+            {t('nav.commentaryRemix')}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('style-learning')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'style-learning' ? 'bg-emerald-500/10 text-emerald-400' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+        >
+          <Wand2 size={20} />
+          <span className="font-medium hidden lg:block">
+            {t('nav.commentaryStyleLearner')}
+          </span>
         </button>
 
         <button
@@ -1178,6 +1192,17 @@ function App() {
               }}
               elevenLabsKey={elevenLabsKey}
               setGeminiKeyPoolStats={setGeminiKeyPoolStats}
+            />
+          )}
+
+          {/* View: Commentary Style Learner */}
+          {activeTab === 'style-learning' && (
+            <CommentaryStyleLearner
+              openAICompatibleConfig={{
+                apiKey: openAICompatibleKey,
+                baseUrl: openAICompatibleBaseUrl,
+                model: openAICompatibleModel,
+              }}
             />
           )}
 

@@ -15,5 +15,6 @@ fastapi
 uvicorn
 python-multipart
 httpx
+websockets
 Pillow
 beautifulsoup4

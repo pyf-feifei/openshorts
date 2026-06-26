@@ -128,7 +128,13 @@ concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 def is_active_commentary_output_dir(job_id: str) -> bool:
     job = commentary_jobs.get(job_id)
-    return bool(job and job.get("status") == "processing") or commentary_job_is_active(job_id)
+    if bool(job and job.get("status") == "processing") or commentary_job_is_active(job_id):
+        return True
+    if str(job_id or "").startswith("style_learning_"):
+        style_job_id = str(job_id).replace("style_learning_", "", 1)
+        style_job = style_learning_jobs.get(style_job_id)
+        return bool(style_job and style_job.get("status") == "processing")
+    return False
 
 
 def touch_output_dir(path: str) -> None:
@@ -140,7 +146,8 @@ def touch_output_dir(path: str) -> None:
 
 def is_commentary_output_dir_path(path: str) -> bool:
     task_file = globals().get("COMMENTARY_TASK_FILE", "commentary_task.json")
-    return os.path.exists(os.path.join(path, task_file))
+    style_task_file = globals().get("STYLE_LEARNING_TASK_FILE", "style_learning_task.json")
+    return os.path.exists(os.path.join(path, task_file)) or os.path.exists(os.path.join(path, style_task_file))
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -274,6 +281,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await shutdown_commentary_jobs()
+        await shutdown_style_learning_jobs()
         for task in (worker_task, cleanup_task):
             task.cancel()
         for task in (worker_task, cleanup_task):
@@ -521,6 +529,16 @@ from commentary import (
     resolve_openai_sampling_options,
     terminate_commentary_job_processes,
 )
+from commentary_style_learning import (
+    COMMENTARY_STYLES_PATH,
+    DOUYIN_COOKIES_PATH,
+    StyleLearningCancelled,
+    delete_commentary_style,
+    inspect_douyin_cookies,
+    list_commentary_styles,
+    normalize_douyin_cookies,
+    run_commentary_style_learning,
+)
 
 commentary_jobs: Dict[str, Dict] = {}
 active_commentary_job_ids = set()
@@ -529,7 +547,12 @@ commentary_job_threads: Dict[str, threading.Thread] = {}
 commentary_job_threads_guard = threading.Lock()
 commentary_task_locks: Dict[str, threading.RLock] = {}
 commentary_task_locks_guard = threading.Lock()
+style_learning_jobs: Dict[str, Dict] = {}
+style_learning_job_cancel_events: Dict[str, threading.Event] = {}
+style_learning_job_threads: Dict[str, threading.Thread] = {}
+style_learning_job_threads_guard = threading.Lock()
 COMMENTARY_TASK_FILE = "commentary_task.json"
+STYLE_LEARNING_TASK_FILE = "style_learning_task.json"
 COMMENTARY_TASK_SAVE_RETRIES = 8
 COMMENTARY_TASK_SAVE_RETRY_DELAY_SECONDS = 0.05
 COMMENTARY_PERSISTED_FIELDS = {
@@ -557,6 +580,30 @@ COMMENTARY_PERSISTED_FIELDS = {
     "result",
     "error",
     "gemini_events",
+}
+STYLE_LEARNING_PERSISTED_FIELDS = {
+    "job_id",
+    "status",
+    "stage",
+    "stage_label",
+    "stage_progress",
+    "logs",
+    "created_at",
+    "updated_at",
+    "request",
+    "profile_url",
+    "style_name",
+    "total_videos",
+    "selected_count",
+    "downloaded_count",
+    "transcript_count",
+    "style_summary_count",
+    "selected_videos",
+    "selected_videos_path",
+    "failed_videos",
+    "style",
+    "result",
+    "error",
 }
 
 COMMENTARY_STAGE_PATTERNS = [
@@ -642,6 +689,10 @@ def commentary_job_dir(job_id: str) -> str:
     return os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
 
 
+def style_learning_job_dir(job_id: str) -> str:
+    return os.path.abspath(os.path.join(OUTPUT_DIR, f"style_learning_{job_id}"))
+
+
 def validate_commentary_job_id(job_id: str) -> str:
     value = str(job_id or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
@@ -656,8 +707,19 @@ def commentary_job_dir_is_safe(job_id: str, path: str) -> bool:
     return target == expected and os.path.dirname(target) == output_root
 
 
+def style_learning_job_dir_is_safe(job_id: str, path: str) -> bool:
+    output_root = os.path.abspath(OUTPUT_DIR)
+    target = os.path.abspath(path)
+    expected = os.path.abspath(os.path.join(output_root, f"style_learning_{job_id}"))
+    return target == expected and os.path.dirname(target) == output_root
+
+
 def commentary_task_path(job_id: str) -> str:
     return os.path.join(commentary_job_dir(job_id), COMMENTARY_TASK_FILE)
+
+
+def style_learning_task_path(job_id: str) -> str:
+    return os.path.join(style_learning_job_dir(job_id), STYLE_LEARNING_TASK_FILE)
 
 
 def commentary_task_lock(job_id: str) -> threading.RLock:
@@ -681,6 +743,10 @@ def commentary_request_to_dict(req) -> Dict:
 
 def persistable_commentary_task(job: Dict) -> Dict:
     return {key: job.get(key) for key in COMMENTARY_PERSISTED_FIELDS if key in job}
+
+
+def persistable_style_learning_task(job: Dict) -> Dict:
+    return {key: job.get(key) for key in STYLE_LEARNING_PERSISTED_FIELDS if key in job}
 
 
 def save_commentary_task(job_id: str) -> None:
@@ -714,6 +780,36 @@ def save_commentary_task(job_id: str) -> None:
         touch_output_dir(job_dir)
 
 
+def save_style_learning_task(job_id: str) -> None:
+    job = style_learning_jobs.get(job_id)
+    if not job:
+        return
+    job_dir = style_learning_job_dir(job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    touch_output_dir(job_dir)
+    task_path = style_learning_task_path(job_id)
+    tmp_path = f"{task_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    job["updated_at"] = now_iso()
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(persistable_style_learning_task(job), f, ensure_ascii=False, indent=2)
+        for attempt in range(COMMENTARY_TASK_SAVE_RETRIES):
+            try:
+                os.replace(tmp_path, task_path)
+                break
+            except PermissionError:
+                if attempt == COMMENTARY_TASK_SAVE_RETRIES - 1:
+                    raise
+                time.sleep(COMMENTARY_TASK_SAVE_RETRY_DELAY_SECONDS * (attempt + 1))
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    touch_output_dir(job_dir)
+
+
 def load_commentary_task(job_id: str) -> Optional[Dict]:
     task_path = commentary_task_path(job_id)
     if not os.path.exists(task_path):
@@ -730,6 +826,89 @@ def load_commentary_task(job_id: str) -> Optional[Dict]:
     data.setdefault("logs", [])
     commentary_jobs[job_id] = data
     return data
+
+
+def load_style_learning_task(job_id: str) -> Optional[Dict]:
+    task_path = style_learning_task_path(job_id)
+    if not os.path.exists(task_path):
+        return None
+    try:
+        with open(task_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("job_id", job_id)
+    data.setdefault("logs", [])
+    if data.get("status") == "processing":
+        data["status"] = "failed"
+        data["stage"] = "failed"
+        data["stage_label"] = "任务中断"
+        data["stage_progress"] = None
+        data["error"] = "Previous style learning job was interrupted by backend restart."
+    style_learning_jobs[job_id] = data
+    return data
+
+
+def list_style_learning_tasks(limit: int = 30) -> List[Dict]:
+    tasks = []
+    pattern = os.path.join(os.path.abspath(OUTPUT_DIR), "style_learning_*", STYLE_LEARNING_TASK_FILE)
+    for task_path in glob.glob(pattern):
+        try:
+            job_id = os.path.basename(os.path.dirname(task_path)).replace("style_learning_", "", 1)
+            with open(task_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data.setdefault("job_id", job_id)
+                if data.get("status") == "processing" and job_id not in style_learning_job_threads:
+                    data["status"] = "failed"
+                    data["stage"] = "failed"
+                    data["stage_label"] = "任务中断"
+                    data["stage_progress"] = None
+                    data["error"] = "Previous style learning job was interrupted by backend restart."
+                tasks.append(data)
+        except Exception:
+            continue
+    tasks.extend(
+        job for job_id, job in style_learning_jobs.items()
+        if not any(item.get("job_id") == job_id for item in tasks)
+    )
+    tasks.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return tasks[:limit]
+
+
+def style_learning_job_is_cancelled(job_id: str) -> bool:
+    event = style_learning_job_cancel_events.get(job_id)
+    return bool(event and event.is_set())
+
+
+def create_style_learning_cancel_event(job_id: str) -> threading.Event:
+    event = style_learning_job_cancel_events.get(job_id)
+    if event is None:
+        event = threading.Event()
+        style_learning_job_cancel_events[job_id] = event
+    return event
+
+
+def cancel_style_learning_job_runtime(job_id: str) -> None:
+    event = create_style_learning_cancel_event(job_id)
+    event.set()
+
+
+def start_style_learning_job_thread(job_id: str, target) -> None:
+    def wrapped_target():
+        try:
+            target()
+        finally:
+            with style_learning_job_threads_guard:
+                style_learning_job_threads.pop(job_id, None)
+            style_learning_job_cancel_events.pop(job_id, None)
+
+    thread = threading.Thread(target=wrapped_target, daemon=False)
+    with style_learning_job_threads_guard:
+        style_learning_job_threads[job_id] = thread
+    thread.start()
 
 
 def commentary_job_is_active(job_id: str) -> bool:
@@ -781,6 +960,32 @@ async def shutdown_commentary_jobs(timeout_seconds: float = 10.0) -> None:
         print(f"Commentary job thread(s) still stopping after shutdown grace period: {', '.join(stuck_jobs)}")
 
 
+async def shutdown_style_learning_jobs(timeout_seconds: float = 10.0) -> None:
+    active_job_ids = [
+        job_id for job_id, job in list(style_learning_jobs.items())
+        if job.get("status") == "processing"
+    ]
+    if active_job_ids:
+        print(f"Cancelling {len(active_job_ids)} style learning job(s) before backend shutdown.")
+    for job_id in active_job_ids:
+        event = style_learning_job_cancel_events.get(job_id)
+        if event is None:
+            event = threading.Event()
+            style_learning_job_cancel_events[job_id] = event
+        event.set()
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        with style_learning_job_threads_guard:
+            live_threads = [thread for thread in style_learning_job_threads.values() if thread.is_alive()]
+        if not live_threads:
+            break
+        await asyncio.sleep(0.2)
+    with style_learning_job_threads_guard:
+        stuck_jobs = [job_id for job_id, thread in style_learning_job_threads.items() if thread.is_alive()]
+    if stuck_jobs:
+        print(f"Style learning job thread(s) still stopping after shutdown grace period: {', '.join(stuck_jobs)}")
+
+
 def commentary_job_is_cancelled(job_id: str) -> bool:
     event = commentary_job_cancel_events.get(job_id)
     return bool(event and event.is_set())
@@ -815,6 +1020,25 @@ def delete_commentary_task(job_id: str) -> Dict:
     if os.path.isdir(job_dir):
         if not commentary_job_dir_is_safe(job_id, job_dir):
             raise HTTPException(status_code=500, detail="Refusing to delete unsafe commentary job directory")
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    return {"job_id": job_id, "deleted": existed}
+
+
+def delete_style_learning_task(job_id: str) -> Dict:
+    job_id = validate_commentary_job_id(job_id)
+    job_dir = style_learning_job_dir(job_id)
+    existed = bool(style_learning_jobs.get(job_id) or os.path.exists(style_learning_task_path(job_id)) or os.path.isdir(job_dir))
+    cancel_style_learning_job_runtime(job_id)
+    style_learning_jobs.pop(job_id, None)
+    with style_learning_job_threads_guard:
+        has_thread = job_id in style_learning_job_threads
+    if not has_thread:
+        style_learning_job_cancel_events.pop(job_id, None)
+
+    if os.path.isdir(job_dir):
+        if not style_learning_job_dir_is_safe(job_id, job_dir):
+            raise HTTPException(status_code=500, detail="Refusing to delete unsafe style learning job directory")
         shutil.rmtree(job_dir, ignore_errors=True)
 
     return {"job_id": job_id, "deleted": existed}
@@ -874,6 +1098,17 @@ class CommentaryVoicePreviewRequest(BaseModel):
 
 class CommentaryBulkDeleteRequest(BaseModel):
     job_ids: List[str]
+
+
+class DouyinCookiesRequest(BaseModel):
+    cookies: str
+
+
+class StyleLearningRequest(BaseModel):
+    profile_url: str
+    style_name: Optional[str] = None
+    max_videos: Optional[int] = 100
+    language: str = "zh"
 
 
 COMMENTARY_VOICE_PREVIEW_TEXT = {
@@ -1252,6 +1487,27 @@ async def verify_youtube_cookies(req: YouTubeCookiesVerifyRequest):
         raise HTTPException(status_code=status_code, detail=result)
     return result
 
+
+@app.get("/api/settings/douyin-cookies")
+async def get_douyin_cookies_status():
+    if not os.path.exists(DOUYIN_COOKIES_PATH):
+        return {"configured": False, "size": 0}
+    cookies = read_cookie_file(DOUYIN_COOKIES_PATH)
+    info = inspect_douyin_cookies(cookies)
+    return {"configured": True, "size": os.path.getsize(DOUYIN_COOKIES_PATH), **info}
+
+
+@app.post("/api/settings/douyin-cookies")
+async def save_douyin_cookies(req: DouyinCookiesRequest):
+    cookies = normalize_douyin_cookies(req.cookies or "")
+    if not cookies:
+        raise HTTPException(status_code=400, detail="Missing valid Douyin cookies in Netscape format")
+    info = inspect_douyin_cookies(cookies)
+    if info.get("rows", 0) <= 0:
+        raise HTTPException(status_code=400, detail="Invalid Douyin cookies format")
+    write_cookie_file(DOUYIN_COOKIES_PATH, cookies)
+    return {"configured": True, "size": os.path.getsize(DOUYIN_COOKIES_PATH), **info}
+
 @app.get("/api/settings/gemini-models")
 async def get_gemini_models(
     request: Request,
@@ -1551,6 +1807,242 @@ async def commentary_jobs_delete(req: CommentaryBulkDeleteRequest):
 @app.get("/api/commentary/background-music")
 async def commentary_background_music_list():
     return {"tracks": get_background_music_tracks()}
+
+
+@app.get("/api/commentary/styles")
+async def commentary_style_list():
+    return {"styles": list_commentary_styles(COMMENTARY_STYLES_PATH)}
+
+
+@app.delete("/api/commentary/styles/{style_id:path}")
+async def commentary_style_delete(style_id: str):
+    return delete_commentary_style(style_id, COMMENTARY_STYLES_PATH)
+
+
+@app.post("/api/commentary/style-learning/jobs")
+async def commentary_style_learning_create(
+    req: StyleLearningRequest,
+    x_openai_compatible_key: Optional[str] = Header(None, alias=OPENAI_COMPAT_KEY_HEADER),
+    x_openai_compatible_base_url: Optional[str] = Header(None, alias=OPENAI_COMPAT_BASE_URL_HEADER),
+    x_openai_compatible_model: Optional[str] = Header(None, alias=OPENAI_COMPAT_MODEL_HEADER),
+):
+    profile_url = (req.profile_url or "").strip()
+    if not profile_url:
+        raise HTTPException(status_code=400, detail="Missing Douyin profile URL")
+    openai_config = resolve_openai_compat_config(
+        header_key=x_openai_compatible_key,
+        header_base_url=x_openai_compatible_base_url,
+        header_model=x_openai_compatible_model,
+    )
+    if not openai_config["api_key"]:
+        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible API Key")
+    if not openai_config["base_url"]:
+        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible Base URL")
+    if not openai_config["model"]:
+        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible model")
+
+    job_id = uuid.uuid4().hex
+    job_dir = style_learning_job_dir(job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    max_videos = max(1, min(int(req.max_videos or 100), 100))
+    style_name = (req.style_name or "").strip()
+    language = (req.language or "zh").strip() or "zh"
+    style_learning_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "processing",
+        "stage": "queued",
+        "stage_label": "准备获取风格",
+        "stage_progress": None,
+        "logs": ["Queued commentary style learning job..."],
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "request": {
+            "profile_url": profile_url,
+            "style_name": style_name,
+            "max_videos": max_videos,
+            "language": language,
+            "provider": "openai_compatible",
+            "model": openai_config["model"],
+        },
+        "profile_url": profile_url,
+        "style_name": style_name,
+        "selected_videos": [],
+        "failed_videos": [],
+        "error": None,
+    }
+    save_style_learning_task(job_id)
+
+    def log(message: str):
+        if style_learning_job_is_cancelled(job_id) or job_id not in style_learning_jobs:
+            raise StyleLearningCancelled("Commentary style learning job was cancelled.")
+        job = style_learning_jobs[job_id]
+        job.setdefault("logs", []).append(message)
+        lower = str(message or "").lower()
+        if "media url" in lower or "media metadata" in lower:
+            job["stage"] = "media"
+            job["stage_label"] = "解析公开视频地址"
+            total = int(job.get("selected_count") or 0)
+            done = int(job.get("media_resolved_count") or 0)
+            job["stage_progress"] = int(done * 100 / total) if total else None
+        elif "fetch" in lower or "douyin video list" in lower:
+            job["stage"] = "fetch"
+            job["stage_label"] = "获取作品列表"
+        elif "selected" in lower:
+            job["stage"] = "rank"
+            job["stage_label"] = "按点赞收藏排序"
+        elif "download" in lower:
+            job["stage"] = "download"
+            job["stage_label"] = "下载视频音频"
+            total = int(job.get("selected_count") or 0)
+            done = int(job.get("downloaded_count") or 0)
+            job["stage_progress"] = int(done * 100 / total) if total else None
+        elif "transcrib" in lower:
+            job["stage"] = "transcribe"
+            job["stage_label"] = "转写完整解说"
+            total = int(job.get("downloaded_count") or job.get("selected_count") or 0)
+            done = int(job.get("transcript_count") or 0)
+            job["stage_progress"] = int(done * 100 / total) if total else None
+        elif "analyz" in lower or "style summary" in lower:
+            job["stage"] = "analyze"
+            job["stage_label"] = "分析解说风格"
+            total = int(job.get("transcript_count") or 0)
+            done = int(job.get("style_summary_count") or 0)
+            job["stage_progress"] = int(done * 100 / total) if total else None
+        elif "aggregating" in lower:
+            job["stage"] = "aggregate"
+            job["stage_label"] = "生成通用风格"
+            job["stage_progress"] = None
+        save_style_learning_task(job_id)
+
+    def checkpoint(fields: Dict):
+        if style_learning_job_is_cancelled(job_id) or job_id not in style_learning_jobs:
+            raise StyleLearningCancelled("Commentary style learning job was cancelled.")
+        job = style_learning_jobs[job_id]
+        job.update(fields or {})
+        if fields and fields.get("selected_videos") and fields.get("selected_count"):
+            job["stage"] = "rank"
+            job["stage_label"] = "按点赞收藏排序"
+            job["stage_progress"] = None
+        if fields and fields.get("media_resolved_count") is not None:
+            total = int(job.get("selected_count") or 0)
+            done = int(job.get("media_resolved_count") or 0)
+            job["stage"] = "media"
+            job["stage_label"] = "解析公开视频地址"
+            job["stage_progress"] = int(done * 100 / total) if total else None
+        save_style_learning_task(job_id)
+
+    def run_job():
+        cancel_event = create_style_learning_cancel_event(job_id)
+        try:
+            result = run_commentary_style_learning(
+                profile_url=profile_url,
+                output_dir=job_dir,
+                openai_config=openai_config,
+                cookie_path=DOUYIN_COOKIES_PATH,
+                style_name=style_name,
+                max_videos=max_videos,
+                language=language,
+                progress=log,
+                checkpoint=checkpoint,
+                cancel_event=cancel_event,
+            )
+            if style_learning_job_is_cancelled(job_id) or job_id not in style_learning_jobs:
+                return
+            style_learning_jobs[job_id].update({
+                "status": "completed",
+                "stage": "done",
+                "stage_label": "风格获取完成",
+                "stage_progress": 100,
+                "result": result,
+                "style": result.get("style"),
+                "error": None,
+            })
+            style_learning_jobs[job_id].setdefault("logs", []).append("Commentary style learning completed.")
+            save_style_learning_task(job_id)
+        except StyleLearningCancelled:
+            if job_id in style_learning_jobs:
+                style_learning_jobs[job_id].update({
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "stage_label": "已取消",
+                    "stage_progress": None,
+                    "error": "Commentary style learning job was cancelled.",
+                })
+                style_learning_jobs[job_id].setdefault("logs", []).append("Commentary style learning job was cancelled.")
+                save_style_learning_task(job_id)
+        except Exception as exc:
+            if style_learning_job_is_cancelled(job_id) or job_id not in style_learning_jobs:
+                return
+            error_text = str(exc)
+            style_learning_jobs[job_id].update({
+                "status": "failed",
+                "stage": "failed",
+                "stage_label": "获取失败",
+                "stage_progress": None,
+                "error": error_text,
+            })
+            style_learning_jobs[job_id].setdefault("logs", []).append(f"Error: {error_text}")
+            save_style_learning_task(job_id)
+
+    start_style_learning_job_thread(job_id, run_job)
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/commentary/style-learning/jobs")
+async def commentary_style_learning_jobs():
+    return {"jobs": list_style_learning_tasks()}
+
+
+@app.post("/api/commentary/style-learning/jobs/delete")
+async def commentary_style_learning_jobs_delete(req: CommentaryBulkDeleteRequest):
+    job_ids = list(dict.fromkeys(str(job_id or "").strip() for job_id in (req.job_ids or []) if str(job_id or "").strip()))
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="No style learning job ids provided")
+    results = []
+    errors = []
+    for job_id in job_ids:
+        try:
+            results.append(delete_style_learning_task(job_id))
+        except HTTPException as exc:
+            errors.append({"job_id": job_id, "error": exc.detail})
+        except Exception as exc:
+            errors.append({"job_id": job_id, "error": str(exc)})
+    return {"deleted": results, "errors": errors}
+
+
+@app.get("/api/commentary/style-learning/jobs/{job_id}")
+async def commentary_style_learning_status(job_id: str):
+    job_id = validate_commentary_job_id(job_id)
+    job = style_learning_jobs.get(job_id) or load_style_learning_task(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Style learning job not found")
+    return job
+
+
+@app.delete("/api/commentary/style-learning/jobs/{job_id}")
+async def commentary_style_learning_delete(job_id: str):
+    return delete_style_learning_task(job_id)
+
+
+@app.post("/api/commentary/style-learning/jobs/{job_id}/cancel")
+async def commentary_style_learning_cancel(job_id: str):
+    job_id = validate_commentary_job_id(job_id)
+    job = style_learning_jobs.get(job_id) or load_style_learning_task(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Style learning job not found")
+    event = create_style_learning_cancel_event(job_id)
+    event.set()
+    if job.get("status") == "processing":
+        job.update({
+            "status": "cancelled",
+            "stage": "cancelled",
+            "stage_label": "已取消",
+            "stage_progress": None,
+            "error": "Commentary style learning job was cancelled.",
+        })
+        job.setdefault("logs", []).append("Commentary style learning job was cancelled.")
+        save_style_learning_task(job_id)
+    return {"job_id": job_id, "status": job.get("status")}
 
 
 @app.post("/api/commentary/jobs/{job_id}/retry")

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, CheckCircle, CheckSquare, ChevronDown, ChevronUp, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Play, RefreshCcw, Square, Trash2, Upload, Volume2, X, Youtube } from 'lucide-react'
+import { Activity, CheckCircle, CheckSquare, ChevronDown, ChevronUp, Copy, Download, FileText, FileVideo, Film, History, Loader2, Mic2, Music2, Pencil, Play, Plus, RefreshCcw, Square, Trash2, Upload, Volume2, X, Youtube } from 'lucide-react'
 import { getApiUrl } from '../config'
 import { buildGeminiHeaders, getGeminiAccessMissingMessage, hasGeminiAccess as hasGeminiConfigAccess, mergeGeminiEvents } from '../lib/geminiHeaders'
 import { buildOpenAICompatibleHeaders, hasOpenAICompatibleAccess } from '../lib/openaiCompatibleHeaders'
@@ -23,7 +23,6 @@ const STYLE_OPTIONS = [
   { id: 'storytelling', label: '故事化旁白' },
   { id: 'funny', label: '轻松吐槽' },
   { id: 'educational', label: '知识科普' },
-  { id: 'custom', label: '自定义提示词' },
 ]
 
 const loadCustomStyleOptions = () => {
@@ -52,6 +51,7 @@ const FALLBACK_BACKGROUND_MUSIC_TRACKS = [
 ]
 
 const DEFAULT_GEMINI_MODEL = 'Qwen3.7-Plus-thinking'
+const TERMINAL_COMMENTARY_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
 const VOICE_PREVIEW_TEXT = {
   zh: '你好，这是当前选择的中文解说声音试听。',
@@ -198,7 +198,11 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const [style, setStyle] = useState(COMMENTARY_DEFAULTS.style)
   const [customStylePrompt, setCustomStylePrompt] = useState(COMMENTARY_DEFAULTS.customStylePrompt)
   const [customStyleName, setCustomStyleName] = useState('')
+  const [customStyleDraftPrompt, setCustomStyleDraftPrompt] = useState('')
   const [customStyleOptions, setCustomStyleOptions] = useState(loadCustomStyleOptions)
+  const [styleMenuOpen, setStyleMenuOpen] = useState(false)
+  const [customStyleDialogOpen, setCustomStyleDialogOpen] = useState(false)
+  const [editingCustomStyleId, setEditingCustomStyleId] = useState(null)
   const [targetDuration, setTargetDuration] = useState(COMMENTARY_DEFAULTS.targetDuration)
   const [analysisMode, setAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
   const [activeAnalysisMode, setActiveAnalysisMode] = useState(COMMENTARY_DEFAULTS.analysisMode)
@@ -245,6 +249,7 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const statusPollFailuresRef = useRef(0)
   const eventsMergedRef = useRef(null)
   const customStyleOptionsRef = useRef(customStyleOptions)
+  const styleMenuRef = useRef(null)
   const hasGeminiAccess = hasGeminiConfigAccess(geminiConfig || geminiApiKey)
   const geminiAccessMissingMessage = getGeminiAccessMissingMessage(geminiConfig || geminiApiKey)
   const hasSelectedAnalysisAccess = (mode = analysisMode) => (
@@ -257,7 +262,9 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   )
   const styleOptions = [...STYLE_OPTIONS, ...customStyleOptions]
   const selectedCustomStyle = customStyleOptions.find((item) => item.id === style)
-  const isCustomStyleEditorVisible = style === 'custom' || Boolean(selectedCustomStyle)
+  const selectedStyleOption = styleOptions.find((item) => item.id === style)
+  const selectedStyleLabel = selectedStyleOption?.label || (style === 'custom' ? '自定义风格（未保存）' : style)
+  const editingCustomStyle = customStyleOptions.find((item) => item.id === editingCustomStyleId)
 
   useEffect(() => {
     setEdgeVoice(getDefaultEdgeVoiceForLanguage(language))
@@ -267,6 +274,39 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     customStyleOptionsRef.current = normalizeCustomStyleOptions(customStyleOptions)
     saveCustomStyleOptions(customStyleOptions)
   }, [customStyleOptions])
+
+  useEffect(() => {
+    let cancelled = false
+    const mergeStyles = (styles) => {
+      const normalized = normalizeCustomStyleOptions(styles)
+      if (!normalized.length) return
+      setCustomStyleOptions((items) => normalizeCustomStyleOptions([...items, ...normalized]))
+    }
+
+    const handleStyleUpdate = (event) => mergeStyles(event.detail?.styles || [])
+    window.addEventListener('openshorts:commentary-styles-updated', handleStyleUpdate)
+
+    fetch(getApiUrl('/api/commentary/styles'))
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.styles) mergeStyles(data.styles)
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('openshorts:commentary-styles-updated', handleStyleUpdate)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!styleMenuOpen) return undefined
+    const handlePointerDown = (event) => {
+      if (!styleMenuRef.current?.contains(event.target)) setStyleMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [styleMenuOpen])
 
   useEffect(() => {
     return () => {
@@ -474,25 +514,52 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
   const handleStyleChange = (nextStyle) => {
     setAttachedTaskRequest(null)
     setStyle(nextStyle)
+    setStyleMenuOpen(false)
     const customOption = customStyleOptions.find((item) => item.id === nextStyle)
     if (customOption) {
-      setCustomStyleName(customOption.label)
       setCustomStylePrompt(customOption.prompt)
-    } else if (nextStyle === 'custom') {
-      setCustomStyleName('')
+    } else if (nextStyle !== 'custom') {
       setCustomStylePrompt('')
     }
   }
 
+  const handleCreateCustomStyleOption = () => {
+    setAttachedTaskRequest(null)
+    setStyleMenuOpen(false)
+    setEditingCustomStyleId(null)
+    setCustomStyleName('')
+    setCustomStyleDraftPrompt('')
+    setCustomStyleDialogOpen(true)
+    setError('')
+  }
+
+  const handleEditCustomStyleOption = (option = selectedCustomStyle) => {
+    if (!option) return
+    setAttachedTaskRequest(null)
+    setStyleMenuOpen(false)
+    setEditingCustomStyleId(option.id)
+    setCustomStyleName(option.label)
+    setCustomStyleDraftPrompt(option.prompt)
+    setCustomStyleDialogOpen(true)
+    setError('')
+  }
+
+  const closeCustomStyleDialog = () => {
+    setCustomStyleDialogOpen(false)
+    setEditingCustomStyleId(null)
+    setCustomStyleName('')
+    setCustomStyleDraftPrompt('')
+  }
+
   const handleSaveCustomStyleOption = () => {
     const label = customStyleName.trim()
-    const prompt = customStylePrompt.trim()
+    const prompt = customStyleDraftPrompt.trim()
     if (!label || !prompt) {
       setError('请填写自定义风格名称和提示词')
       return
     }
     const nextOption = {
-      id: selectedCustomStyle?.id || findCustomStyleOption(customStyleOptions, label, prompt)?.id || createCustomStyleId(),
+      id: editingCustomStyle?.id || findCustomStyleOption(customStyleOptions, label, prompt)?.id || createCustomStyleId(),
       label,
       prompt,
       custom: true,
@@ -503,6 +570,32 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
       return normalizeCustomStyleOptions([...withoutCurrent, nextOption])
     })
     setStyle(nextOption.id)
+    setCustomStylePrompt(nextOption.prompt)
+    setCustomStyleDialogOpen(false)
+    setEditingCustomStyleId(null)
+    setCustomStyleName('')
+    setCustomStyleDraftPrompt('')
+    setError('')
+  }
+
+  const handleDeleteCustomStyleOption = (option = selectedCustomStyle) => {
+    if (!option) return
+    const confirmed = typeof window === 'undefined' || window.confirm(`确定删除“${option.label}”这个解说风格吗？`)
+    if (!confirmed) return
+
+    setCustomStyleOptions((items) => normalizeCustomStyleOptions(items.filter((item) => item.id !== option.id)))
+    if (style === option.id) {
+      setStyle(COMMENTARY_DEFAULTS.style)
+      setCustomStylePrompt('')
+    }
+    if (editingCustomStyleId === option.id) {
+      setCustomStyleDialogOpen(false)
+      setEditingCustomStyleId(null)
+      setCustomStyleName('')
+      setCustomStyleDraftPrompt('')
+    }
+    fetch(getApiUrl(`/api/commentary/styles/${encodeURIComponent(option.id)}`), { method: 'DELETE' }).catch(() => {})
+    setAttachedTaskRequest(null)
     setError('')
   }
 
@@ -852,6 +945,27 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
     } catch {
       return value
     }
+  }
+
+  const formatTaskDuration = (milliseconds) => {
+    const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000))
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
+    if (hours > 0) return `${hours}小时${minutes}分`
+    if (minutes > 0) return `${minutes}分${seconds}秒`
+    return `${seconds}秒`
+  }
+
+  const taskElapsedLabel = (task) => {
+    if (!task?.created_at) return ''
+    const startedAt = new Date(task.created_at).getTime()
+    if (!Number.isFinite(startedAt)) return ''
+    const isTerminal = TERMINAL_COMMENTARY_TASK_STATUSES.has(task.status)
+    const endValue = isTerminal ? task.updated_at : null
+    const endedAt = endValue ? new Date(endValue).getTime() : Date.now()
+    if (!Number.isFinite(endedAt) || endedAt < startedAt) return ''
+    return `${isTerminal ? '用时' : '已用时'} ${formatTaskDuration(endedAt - startedAt)}`
   }
 
   const taskTitle = (task) => task.result?.title || task.source_filename || task.source_value || task.job_id
@@ -1227,42 +1341,79 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
               </div>
               <div>
                 <label className="block text-sm text-zinc-300 mb-2">解说风格</label>
-                <select value={style} onChange={(e) => handleStyleChange(e.target.value)} className="input-field">
-                  {styleOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                </select>
-              </div>
-              {isCustomStyleEditorVisible && (
-                <div className="md:col-span-2">
-                  <label className="block text-sm text-zinc-300 mb-2">自定义风格名称</label>
-                  <input
-                    value={customStyleName}
-                    onChange={(e) => {
-                      setAttachedTaskRequest(null)
-                      setCustomStyleName(e.target.value)
-                    }}
-                    className="input-field mb-3"
-                    maxLength={40}
-                    placeholder="例如：第一人称紧张整活"
-                  />
-                  <label className="block text-sm text-zinc-300 mb-2">自定义风格提示词</label>
-                  <textarea
-                    value={customStylePrompt}
-                    onChange={(e) => {
-                      setAttachedTaskRequest(null)
-                      setCustomStylePrompt(e.target.value)
-                    }}
-                    className="input-field min-h-[120px] resize-y"
-                    maxLength={2000}
-                    placeholder="例如：用第一人称紧张整活口吻，句子短一点，先说画面动作，再加反差吐槽；不要脱离画面编剧情。"
-                  />
-                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-3">
-                    <button type="button" onClick={handleSaveCustomStyleOption} className="btn-secondary text-sm px-4 py-2">
-                      {selectedCustomStyle ? '更新下拉框选项' : '添加到下拉框'}
+                <div ref={styleMenuRef} className="relative">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStyleMenuOpen((open) => !open)}
+                      className="input-field flex min-w-0 items-center justify-between gap-3 text-left"
+                      aria-haspopup="listbox"
+                      aria-expanded={styleMenuOpen}
+                    >
+                      <span className="truncate">{selectedStyleLabel}</span>
+                      <ChevronDown size={16} className={`shrink-0 text-zinc-400 transition-transform ${styleMenuOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    <p className="text-xs text-zinc-500">保存后会出现在“解说风格”下拉框里，并自动使用这段提示词。</p>
+                    <button
+                      type="button"
+                      onClick={handleCreateCustomStyleOption}
+                      className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-3 text-zinc-300 hover:bg-white/10 hover:text-white transition-all"
+                      aria-label="新建自定义解说风格"
+                      title="新建自定义风格"
+                    >
+                      <Plus size={16} />
+                    </button>
                   </div>
+                  {styleMenuOpen && (
+                    <div className="absolute z-30 mt-2 max-h-80 w-full overflow-y-auto rounded-xl border border-white/10 bg-zinc-950 py-1 shadow-2xl shadow-black/40" role="listbox">
+                      {styleOptions.map((item) => {
+                        const isSelected = item.id === style
+                        const isCustomOption = Boolean(item.custom)
+                        return (
+                          <div key={item.id} className={`group flex items-center gap-1 px-1 ${isSelected ? 'bg-blue-600' : 'hover:bg-white/10'}`}>
+                            <button
+                              type="button"
+                              onClick={() => handleStyleChange(item.id)}
+                              className="min-w-0 flex-1 px-3 py-2 text-left text-sm text-white"
+                              role="option"
+                              aria-selected={isSelected}
+                            >
+                              <span className="block truncate">{item.label}</span>
+                            </button>
+                            {isCustomOption && (
+                              <div className="flex shrink-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    handleEditCustomStyleOption(item)
+                                  }}
+                                  className={`rounded-lg p-2 transition-all ${isSelected ? 'text-white/80 hover:bg-white/15 hover:text-white' : 'text-zinc-500 hover:bg-white/10 hover:text-zinc-100'}`}
+                                  aria-label={`编辑${item.label}`}
+                                  title="编辑这个自定义风格"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    handleDeleteCustomStyleOption(item)
+                                  }}
+                                  className={`rounded-lg p-2 transition-all ${isSelected ? 'text-white/80 hover:bg-white/15 hover:text-white' : 'text-zinc-500 hover:bg-red-500/15 hover:text-red-200'}`}
+                                  aria-label={`删除${item.label}`}
+                                  title="删除这个自定义风格"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
               <div>
                 <label className="block text-sm text-zinc-300 mb-2">目标长度</label>
                 <select value={targetDuration} onChange={(e) => setTargetDuration(e.target.value)} className="input-field">
@@ -1765,65 +1916,149 @@ export default function CommentaryTab({ geminiApiKey, geminiBaseUrl, geminiConfi
                   暂无历史任务
                 </div>
               )}
-              {commentaryTasks.map((task) => (
-                <div key={task.job_id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex min-w-0 items-start gap-2">
+              {commentaryTasks.map((task) => {
+                const elapsedLabel = taskElapsedLabel(task)
+                return (
+                  <div key={task.job_id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-start gap-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleCommentaryTaskSelection(task.job_id)}
+                          disabled={isDeletingTasks}
+                          className="mt-0.5 shrink-0 text-zinc-400 hover:text-cyan-300 disabled:opacity-40"
+                          aria-label={selectedTaskIds.includes(task.job_id) ? '取消选择任务' : '选择任务'}
+                        >
+                          {selectedTaskIds.includes(task.job_id) ? <CheckSquare size={16} /> : <Square size={16} />}
+                        </button>
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-zinc-200">{taskTitle(task)}</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+                            <span>{task.stage_label || task.status}</span>
+                            <span>创建 {formatTaskTime(task.created_at)}</span>
+                            {elapsedLabel && <span>{elapsedLabel}</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] ${task.status === 'completed' ? 'bg-green-500/10 text-green-300' : task.status === 'failed' ? 'bg-red-500/10 text-red-300' : 'bg-cyan-500/10 text-cyan-300'}`}>
+                        {task.status || 'unknown'}
+                      </span>
+                    </div>
+                    {task.error && <div className="line-clamp-2 text-xs text-red-300">{task.error}</div>}
+                    <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+                      <button type="button" onClick={() => attachCommentaryTask(task)} className="btn-secondary text-xs py-2">
+                        查看状态
+                      </button>
                       <button
                         type="button"
-                        onClick={() => toggleCommentaryTaskSelection(task.job_id)}
-                        disabled={isDeletingTasks}
-                        className="mt-0.5 shrink-0 text-zinc-400 hover:text-cyan-300 disabled:opacity-40"
-                        aria-label={selectedTaskIds.includes(task.job_id) ? '取消选择任务' : '选择任务'}
+                        onClick={() => retryCommentaryTask(task)}
+                        disabled={status === 'processing' || task.status === 'processing' || retryingJobId === task.job_id}
+                        className="btn-secondary text-xs py-2 disabled:opacity-50"
                       >
-                        {selectedTaskIds.includes(task.job_id) ? <CheckSquare size={16} /> : <Square size={16} />}
+                        {retryingJobId === task.job_id ? '重试中...' : '重试'}
                       </button>
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-zinc-200">{taskTitle(task)}</div>
-                        <div className="mt-1 text-xs text-zinc-500">{task.stage_label || task.status} · {formatTaskTime(task.updated_at || task.created_at)}</div>
-                      </div>
+                      {task.result?.video_url ? (
+                        <a href={getApiUrl(task.result.video_url)} download className="btn-primary text-xs py-2 text-center">
+                          下载结果
+                        </a>
+                      ) : (
+                        <button type="button" disabled className="btn-secondary text-xs py-2 opacity-40">下载结果</button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => deleteCommentaryTasks([task.job_id])}
+                        disabled={isDeletingTasks}
+                        className="btn-secondary inline-flex items-center justify-center gap-1 text-xs py-2 text-red-200 hover:border-red-500/40 hover:bg-red-500/10 disabled:opacity-40"
+                      >
+                        {deletingTaskIds.includes(task.job_id) ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                        删除
+                      </button>
                     </div>
-                    <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] ${task.status === 'completed' ? 'bg-green-500/10 text-green-300' : task.status === 'failed' ? 'bg-red-500/10 text-red-300' : 'bg-cyan-500/10 text-cyan-300'}`}>
-                      {task.status || 'unknown'}
-                    </span>
                   </div>
-                  {task.error && <div className="line-clamp-2 text-xs text-red-300">{task.error}</div>}
-                  <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
-                    <button type="button" onClick={() => attachCommentaryTask(task)} className="btn-secondary text-xs py-2">
-                      查看状态
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => retryCommentaryTask(task)}
-                      disabled={status === 'processing' || task.status === 'processing' || retryingJobId === task.job_id}
-                      className="btn-secondary text-xs py-2 disabled:opacity-50"
-                    >
-                      {retryingJobId === task.job_id ? '重试中...' : '重试'}
-                    </button>
-                    {task.result?.video_url ? (
-                      <a href={getApiUrl(task.result.video_url)} download className="btn-primary text-xs py-2 text-center">
-                        下载结果
-                      </a>
-                    ) : (
-                      <button type="button" disabled className="btn-secondary text-xs py-2 opacity-40">下载结果</button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => deleteCommentaryTasks([task.job_id])}
-                      disabled={isDeletingTasks}
-                      className="btn-secondary inline-flex items-center justify-center gap-1 text-xs py-2 text-red-200 hover:border-red-500/40 hover:bg-red-500/10 disabled:opacity-40"
-                    >
-                      {deletingTaskIds.includes(task.job_id) ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                      删除
-                    </button>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
           </div>
         </div>
       </div>
+      {customStyleDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="custom-style-dialog-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeCustomStyleDialog()
+          }}
+        >
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              handleSaveCustomStyleOption()
+            }}
+            className="w-full max-w-2xl rounded-xl border border-white/10 bg-zinc-950 p-5 shadow-2xl shadow-black/50"
+          >
+            <div className="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <h2 id="custom-style-dialog-title" className="text-lg font-semibold text-zinc-100">
+                  {editingCustomStyle ? '编辑自定义解说风格' : '新建自定义解说风格'}
+                </h2>
+                <p className="mt-1 text-xs text-zinc-500">保存后会出现在“解说风格”下拉框里，并自动选中使用这段提示词。</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeCustomStyleDialog}
+                className="shrink-0 rounded-lg p-2 text-zinc-400 transition-all hover:bg-white/10 hover:text-white"
+                aria-label="关闭自定义风格弹窗"
+                title="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">自定义风格名称</label>
+                <input
+                  value={customStyleName}
+                  onChange={(e) => {
+                    setAttachedTaskRequest(null)
+                    setCustomStyleName(e.target.value)
+                  }}
+                  className="input-field"
+                  maxLength={40}
+                  autoFocus
+                  placeholder="例如：第一人称紧张整活"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-300 mb-2">自定义风格提示词</label>
+                <textarea
+                  value={customStyleDraftPrompt}
+                  onChange={(e) => {
+                    setAttachedTaskRequest(null)
+                    setCustomStyleDraftPrompt(e.target.value)
+                  }}
+                  className="input-field min-h-[160px] resize-y"
+                  maxLength={2000}
+                  placeholder="例如：用第一人称紧张整活口吻，句子短一点，先说画面动作，再加反差吐槽；不要脱离画面编剧情。"
+                />
+              </div>
+              {error && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
+            </div>
+
+            <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button type="button" onClick={closeCustomStyleDialog} className="btn-secondary px-4 py-2 text-sm">
+                取消
+              </button>
+              <button type="submit" className="btn-primary px-4 py-2 text-sm">
+                {editingCustomStyle ? '更新下拉框选项' : '添加到下拉框'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }

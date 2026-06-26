@@ -108,6 +108,50 @@ def openai_value_scored_visual_analysis():
     }
 
 
+def openai_visual_analysis_with_late_packaging_ending():
+    segments = [
+        (88.0, 136.0, "furnace melting and stirring sequence", 5, 5, "must_keep"),
+        (193.0, 229.0, "sand molding and demolding sequence", 5, 4, "must_keep"),
+        (367.0, 412.0, "second furnace stirring with smoke and sparks", 5, 5, "must_keep"),
+        (846.0, 883.0, "lathe machining and part removal sequence", 5, 5, "must_keep"),
+        (1578.0, 1611.0, "precise insertion fitting and hammering on chrome faucet parts", 5, 5, "must_keep"),
+        (1635.0, 1653.0, "polishing chrome parts with blue cloth before packaging", 4, 4, "must_keep"),
+        (1809.0, 1833.0, "packaging close-up shows wrapped part inserted into checkered box, closing flaps, and finishing package", 5, 5, "must_keep"),
+    ]
+    frames = []
+    observations = []
+    candidate_segments = []
+    for start, end, reason, importance, interest, edit_value in segments:
+        timestamps = [round(start + (end - start) * ratio, 3) for ratio in (0.2, 0.5, 0.8)]
+        frames.extend({"timestamp": timestamp} for timestamp in timestamps)
+        for timestamp in timestamps:
+            observations.append({
+                "timestamp": timestamp,
+                "visual": reason,
+                "process_stage": reason,
+                "importance": importance,
+                "interest_score": interest,
+                "edit_value": edit_value,
+                "keep_candidate": True,
+            })
+        candidate_segments.append({
+            "start": start,
+            "end": end,
+            "reason": reason,
+            "importance": importance,
+            "interest_score": interest,
+            "edit_value": edit_value,
+            "evidence_timestamps": timestamps,
+            "suggested_speed": 1.0,
+        })
+    return {
+        "provider": "openai_compatible",
+        "frames": frames,
+        "observations": observations,
+        "candidate_segments": candidate_segments,
+    }
+
+
 def openai_candidate_limited_long_visual_analysis():
     candidate_segments = []
     observations = []
@@ -264,6 +308,11 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "https://provider.example.com/v1/chat/completions",
             commentary._openai_chat_completions_url("https://provider.example.com/v1/chat/completions"),
         )
+
+    def test_openai_localhost_disables_environment_proxy(self):
+        self.assertFalse(commentary._openai_httpx_trust_env("http://127.0.0.1:18081/v1"))
+        self.assertFalse(commentary._openai_httpx_trust_env("http://localhost:18081/v1"))
+        self.assertTrue(commentary._openai_httpx_trust_env("https://provider.example.com/v1"))
 
     def test_openai_script_max_tokens_defaults_to_64000(self):
         self.assertEqual(64000, commentary.OPENAI_SCRIPT_MAX_TOKENS)
@@ -642,13 +691,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "too short for its selected visual range"):
             commentary._validate_narration_density_matches_visual_duration(block, 3, "zh")
 
-    def test_full_mode_expands_sparse_zh_narration_from_english_visual_concepts(self):
+    def test_short_zh_narration_splits_tail_instead_of_padding_with_visual_sentence(self):
         block = {
             "start": 0,
-            "end": 40.0,
+            "end": 13.0,
             "visual": "手套贴着树干处理蜂巢，蜂群围着蜂巢飞动，袋子和绳子在旁边",
             "visual_facts": ["手套贴着树干处理蜂巢，蜂群围着蜂巢飞动，袋子和绳子在旁边"],
-            "narration": "手套贴着树干处理蜂巢，蜂群围着树干飞动，工人一点点把蜂巢位置稳住，袋子和绳子还在旁边跟着继续调整变化",
+            "evidence_timestamps": [4.0],
+            "narration": "手套贴着树干处理蜂巢。",
             "pause": False,
             "video_speed": 1.0,
         }
@@ -656,13 +706,43 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         repaired = commentary._repair_short_narration_visual_ranges([block], "zh")
         repaired_text = repaired[0]["narration"]
 
-        self.assertEqual(1, len(repaired))
+        self.assertEqual(2, len(repaired))
         self.assertFalse(repaired[0]["pause"])
-        self.assertGreaterEqual(
-            len(re.sub(r"\s+", "", repaired_text)),
-            commentary._expected_narration_chars_for_visual_duration(40.0, "zh"),
-        )
-        self.assertIn("蜂群", repaired_text)
+        self.assertTrue(repaired[1]["pause"])
+        self.assertEqual(block["narration"], repaired_text)
+        self.assertNotIn(block["visual"], repaired_text)
+        self.assertNotIn("蜂群围着蜂巢飞动", repaired_text)
+
+    def test_sanitize_chinese_narration_removes_repeated_visual_sentence_artifacts(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 117.0,
+                    "end": 130.0,
+                    "visual": "双手持刀反复切割分离蜂巢，蜜蜂密集围攻",
+                    "visual_facts": ["双手持刀反复切割分离蜂巢，蜜蜂密集围攻"],
+                    "evidence_timestamps": [123.0],
+                    "narration": "刀锋反复切割，收获直接到手双手持刀反复切割分离蜂巢，蜜蜂密集围攻。双手持刀反复切割分离蜂巢，蜜蜂密集围攻",
+                    "pause": False,
+                },
+                {
+                    "start": 130.0,
+                    "end": 143.0,
+                    "visual": "近距离刀子切透蜂蜡分离大块，蜜蜂环绕双手",
+                    "visual_facts": ["近距离刀子切透蜂蜡分离大块，蜜蜂环绕双手"],
+                    "evidence_timestamps": [136.0],
+                    "narration": "蜜蜂围攻下完成切割，动作精准近距离刀子切透蜂蜡分离大块，蜜蜂环绕双手。近距离刀子切透蜂蜡分离大块，蜜蜂环绕双手",
+                    "pause": False,
+                },
+            ],
+        }
+
+        commentary._sanitize_generated_commentary_script(data, "zh")
+
+        self.assertEqual("刀锋反复切割，收获直接到手", data["narration_blocks"][0]["narration"])
+        self.assertEqual("蜜蜂围攻下完成切割，动作精准", data["narration_blocks"][1]["narration"])
+        self.assertNotIn("双手持刀反复切割分离蜂巢", data["narration"])
+        self.assertNotIn("近距离刀子切透蜂蜡", data["narration"])
 
     def test_short_zh_narration_with_only_english_visual_facts_splits_tail_not_labels(self):
         block = {
@@ -1423,6 +1503,116 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             "zh",
         )
 
+    def test_whole_video_commentary_rejects_repeated_formulaic_wording(self):
+        blocks = []
+        narrations = [
+            "长撬棍压进轮胎边缘，橡胶层先被撬松，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+            "刀子贴着边沿切开内衬，黑色胶皮一点点翻出来，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+            "钉子沿着边缘敲进去，轮胎外圈被重新固定，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+            "机器把细丝拉进水槽里，蒸汽从出口冒起来，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+            "刮刀把糊料送到托盘上，鼓面只剩薄薄残渣，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+            "绿色箱子接住落下颗粒，碎片和成品混在一起，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+        ]
+        for index, narration in enumerate(narrations):
+            blocks.append({
+                "start": index * 10.0,
+                "end": index * 10.0 + 10.0,
+                "visual": f"轮胎回收流程第{index + 1}步",
+                "visual_facts": [f"轮胎回收流程第{index + 1}步"],
+                "evidence_timestamps": [index * 10.0 + 5.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {
+            "narration": "\n\n".join(narrations),
+            "narration_blocks": blocks,
+        }
+
+        with self.assertRaisesRegex(Exception, "whole-video repetitive wording"):
+            commentary._validate_commentary_script_for_target(
+                data,
+                70.0,
+                "short",
+                "zh",
+                validate_global_repetition=True,
+            )
+
+    def test_whole_video_commentary_allows_repeated_visible_subject_with_varied_wording(self):
+        narrations = [
+            "长撬棍压住轮胎边缘，硬橡胶先松开一圈，后面才有空间抽出内衬。",
+            "刀口顺着轮胎侧边推进，黑色胶皮被挑起来，分层位置变得更清楚。",
+            "几颗钉子沿轮胎边缘固定住外圈，松散的边线重新贴回工作位。",
+            "机器滚筒把轮胎里的细丝拉进水槽，热气冒出时，材料开始冷却定型。",
+            "刮刀贴着鼓面走一圈，黏糊料被带到托盘上，机器里面只剩残渣。",
+            "绿色箱子接住最后的颗粒，轮胎碎片和胶粒集中在一起，成品状态直接摆出来。",
+        ]
+        data = {
+            "narration": "\n\n".join(narrations),
+            "narration_blocks": [
+                {
+                    "start": index * 10.0,
+                    "end": index * 10.0 + 10.0,
+                    "visual": f"轮胎回收流程第{index + 1}步",
+                    "visual_facts": [f"轮胎回收流程第{index + 1}步"],
+                    "evidence_timestamps": [index * 10.0 + 5.0],
+                    "narration": narration,
+                    "pause": False,
+                    "video_speed": 1.0,
+                }
+                for index, narration in enumerate(narrations)
+            ],
+        }
+
+        commentary._validate_commentary_script_for_target(
+            data,
+            70.0,
+            "short",
+            "zh",
+            validate_global_repetition=True,
+        )
+
+    def test_repeated_wording_retry_note_requires_global_rewrite(self):
+        note = commentary._retry_correction_note(
+            "AI commentary narration has whole-video repetitive wording. Details: repeated templates."
+        )
+
+        self.assertIn("global script rewrite", note)
+        self.assertIn("not a banned-word replacement", note)
+        self.assertIn("Repeated visible object names are fine", note)
+
+    def test_openai_repetition_repair_prompt_is_global_not_word_ban(self):
+        invalid_script = {
+            "narration_blocks": [
+                {
+                    "start": index * 10.0,
+                    "end": index * 10.0 + 10.0,
+                    "visual": f"machine step {index + 1}",
+                    "visual_facts": [f"machine step {index + 1}"],
+                    "evidence_timestamps": [index * 10.0 + 5.0],
+                    "narration": f"材料进入设备第{index + 1}步，这段处理让后续操作更顺，结尾收益感又被拉出来。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                }
+                for index in range(6)
+            ],
+        }
+
+        prompt = commentary._build_openai_regeneration_prompt(
+            "ORIGINAL PROMPT",
+            invalid_script,
+            Exception("AI commentary narration has whole-video repetitive wording."),
+            duration=120.0,
+            target_duration="full",
+            language="zh",
+            attempt=2,
+        )
+
+        self.assertIn("failed whole-video narration variety validation", prompt)
+        self.assertIn("global script quality failure", prompt)
+        self.assertIn("not as a banned-word replacement", prompt)
+        self.assertIn("Adjacent blocks must not sound like the same sentence", prompt)
+
     def test_full_mode_rejects_concise_text_over_long_visual_block(self):
         data = {
             "narration": "工人先把材料摊开检查，能看到不同碎料被分到两侧，方便后面继续挑出有价值的部分。",
@@ -1469,6 +1659,39 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         }
 
         commentary._validate_commentary_script_for_target(data, 60.0, "short", "zh")
+
+    def test_chinese_narration_trim_prefers_clause_boundary_over_mid_clause_fragment(self):
+        text = "前段材料推进很快，中段设备继续运转，尾部说明还没有讲完"
+
+        trimmed = commentary._trim_chinese_narration_to_chars(text, 21)
+
+        self.assertEqual("前段材料推进很快，中段设备继续运转。", trimmed)
+        self.assertLessEqual(len(re.sub(r"\s+", "", trimmed)), 21)
+
+    def test_locked_plan_budget_trim_does_not_leave_mid_clause_tail_fragment(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0,
+                    "end": 10,
+                    "visual": "材料倒入容器并继续处理",
+                    "visual_facts": ["材料倒入容器并继续处理"],
+                    "evidence_timestamps": [2.0],
+                    "narration": "前段材料推进很快，中段设备继续运转，尾部说明还没有讲完",
+                    "pause": False,
+                    "video_speed": 1.0,
+                    "_locked_edit_plan": True,
+                    "_min_narration_chars": 1,
+                },
+            ],
+        }
+
+        commentary._fit_locked_plan_narration_to_budget(data, 21, "zh")
+
+        self.assertEqual(
+            "前段材料推进很快，中段设备继续运转。",
+            data["narration_blocks"][0]["narration"],
+        )
 
     def test_openai_regeneration_prompt_handles_historical_density_error_without_padding(self):
         invalid_script = {
@@ -1590,6 +1813,77 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertTrue(commentary._previous_error_invalidates_cached_script(
             "Gemini returned invalid JSON for the commentary script."
         ))
+        self.assertTrue(commentary._previous_error_invalidates_cached_script(
+            "Custom style narration quality validation failed. The custom_style_prompt asks for compact action-first technical narration."
+        ))
+
+    def test_custom_style_compact_action_diction_rejects_generic_worker_repetition(self):
+        custom_prompt = "动词开头，短句密集，技术白描，工具+动作+对象，精准命名，结果导向。"
+        bad_blocks = []
+        for index in range(1, 13):
+            bad_blocks.append({
+                "start": (index - 1) * 8.0,
+                "end": index * 8.0,
+                "visual": "工人用手和工具修整陶瓷模具",
+                "visual_facts": ["工人用手和工具修整陶瓷模具"],
+                "evidence_timestamps": [(index - 1) * 8.0 + 4.0],
+                "narration": (
+                    "工人用工具修整碗沿。"
+                    "手指压住接缝。"
+                    "工人继续调整模具。"
+                    "手把泥浆抹平，防止边缘变形。"
+                ),
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {
+            "narration": "\n\n".join(block["narration"] for block in bad_blocks),
+            "narration_blocks": bad_blocks,
+        }
+
+        with self.assertRaisesRegex(Exception, "Custom style narration quality validation failed"):
+            commentary._validate_custom_style_compact_action_diction(data, "zh", custom_prompt, 120.0)
+
+    def test_custom_style_compact_action_diction_allows_evidence_based_action_writing(self):
+        custom_prompt = "动词开头，短句密集，技术白描，工具+动作+对象，精准命名，结果导向。"
+        lines = [
+            "泥浆灌满水箱腔体。刮板压平表面，多余泥浆顺边流下。厚薄先拉齐，后面脱模才稳。",
+            "桶口贴住碗沿继续浇注。泥浆旋成光面，排水孔位置保留下来。内壁吃满浆料，成型更完整。",
+            "刮刀贴着碗沿走一圈。圆孔边泥被压实，孔口保持通畅。接缝收平以后，后面安装不容易漏。",
+            "支撑条卡住两半模具。底座位置重新对齐，湿坯不再晃动。模具稳住，碗体形状才能保持。",
+            "黄管冲掉水箱浮尘。水流沿表面带走泥粉，白陶瓷露出干净边线。清洗完成后再进装配位。",
+            "窑车推到橙红窑口。高温开始烧结陶瓷坯体，表面强度逐步拉起来。烧成后才进入五金安装。",
+            "冲水阀卡进水箱。白色管件插到位，绿色卡扣压紧。水路固定后，注水测试才能看密封。",
+            "水管注入测试水。中心喷口开始冲洗，水流路线直接暴露出来。密封没乱跑，冲水结构才算过关。",
+        ]
+        blocks = []
+        for index, narration in enumerate(lines, start=1):
+            blocks.append({
+                "start": (index - 1) * 10.0,
+                "end": index * 10.0,
+                "visual": "陶瓷马桶生产步骤",
+                "visual_facts": ["陶瓷马桶生产步骤"],
+                "evidence_timestamps": [(index - 1) * 10.0 + 5.0],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            })
+        data = {
+            "narration": "\n\n".join(lines),
+            "narration_blocks": blocks,
+        }
+
+        commentary._validate_custom_style_compact_action_diction(data, "zh", custom_prompt, 90.0)
+
+    def test_retry_note_handles_custom_style_quality_failure(self):
+        note = commentary._retry_correction_note(
+            "Custom style narration quality validation failed. The custom_style_prompt asks for compact action-first technical narration."
+        )
+
+        self.assertIn("Retry correction note", note)
+        self.assertIn("wording level", note)
+        self.assertIn("generic subjects", note)
+        self.assertIn("tool/material/action/result", note)
 
     def test_medium_gemini_invalid_json_is_repaired_before_failing(self):
         transcript = {
@@ -2354,6 +2648,40 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("copy", first_cmd[first_cmd.index("-c:v") + 1])
         self.assertIn("-an", first_cmd)
 
+    def test_visual_edit_can_keep_source_audio_for_openai_intermediate_cut(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            output_path = os.path.join(tmpdir, "out.mp4")
+            work_dir = os.path.join(tmpdir, "work")
+            os.makedirs(work_dir)
+            open(source_path, "wb").close()
+            commands = []
+
+            def fake_run_command(cmd, **_kwargs):
+                commands.append(cmd)
+                if cmd[0] == "ffmpeg" and "-f" not in cmd:
+                    with open(cmd[-1], "wb") as f:
+                        f.write(b"part")
+
+            with patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                commentary._create_visual_edit(
+                    source_path,
+                    [{"start": 0.0, "end": 12.0, "reason": "keep", "video_speed": 2.0}],
+                    output_path,
+                    "16:9",
+                    work_dir,
+                    include_audio=True,
+                )
+
+        first_cmd = commands[0]
+        self.assertNotIn("-an", first_cmd)
+        self.assertIn("-map", first_cmd)
+        self.assertEqual("0:v:0", first_cmd[first_cmd.index("-map") + 1])
+        self.assertIn("0:a?", first_cmd)
+        self.assertIn("-af", first_cmd)
+        self.assertIn("atempo=2.000000", first_cmd[first_cmd.index("-af") + 1])
+        self.assertIn("-c:a", first_cmd)
+
     def test_visual_edit_requires_ai_selected_segments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = os.path.join(tmpdir, "source.mp4")
@@ -2378,6 +2706,36 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertIn(str(commentary.FFMPEG_THREADS), limited)
         self.assertLess(limited.index("-threads"), limited.index("-i"))
 
+    def test_commentary_libx264_commands_limit_encoder_threads(self):
+        with patch.object(commentary, "FFMPEG_VIDEO_ENCODER_THREADS", 2):
+            limited = commentary._limit_ffmpeg_threads([
+                "ffmpeg", "-y",
+                "-i", "in.mp4",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "out.mp4",
+            ])
+
+        self.assertIn("-threads:v", limited)
+        thread_index = limited.index("-threads:v")
+        self.assertEqual("2", limited[thread_index + 1])
+        self.assertLess(limited.index("-c:v"), thread_index)
+        self.assertLess(thread_index, limited.index("-preset"))
+
+    def test_commentary_libx264_thread_limiter_preserves_existing_encoder_threads(self):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", "in.mp4",
+            "-c:v", "libx264",
+            "-threads:v", "1",
+            "out.mp4",
+        ]
+
+        limited = commentary._limit_ffmpeg_threads(cmd)
+
+        self.assertEqual(1, limited.count("-threads:v"))
+        self.assertIn("1", limited)
+
     def test_commentary_ffmpeg_thread_limiter_preserves_existing_threads(self):
         cmd = ["ffmpeg", "-y", "-threads", "1", "-i", "in.mp4", "out.mp4"]
 
@@ -2385,6 +2743,22 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("-threads", limited[2])
         self.assertEqual("1", limited[3])
         self.assertEqual(cmd[4:], limited[4:])
+
+    def test_ffmpeg_malloc_failure_is_summarized_without_version_dump(self):
+        stderr = "\n".join([
+            "ffmpeg version N-124716-g054dffd133-20260531 Copyright",
+            "configuration: --prefix=/ffbuild/prefix --enable-libx264",
+            "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'source.mp4':",
+            "x264 [error]: malloc of size 11619264 failed",
+            "[vost#0:0/libx264] Error submitting video frame to the encoder",
+            "Conversion failed!",
+        ])
+
+        summary = commentary._summarize_ffmpeg_failure(stderr)
+
+        self.assertIn("ran out of memory", summary)
+        self.assertIn("malloc of size 11619264 failed", summary)
+        self.assertNotIn("configuration:", summary)
 
     def test_burn_subtitles_uses_thread_limited_runner(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2817,7 +3191,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual([60.0, 60.0, 60.0], result["subtitle_block_durations"])
         mix_video.assert_called_once()
 
-    def test_source_spoken_commentary_mutes_original_audio_in_block_synced_render(self):
+    def test_source_spoken_commentary_preserves_configured_original_audio_in_block_synced_render(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = os.path.join(tmpdir, "source.mp4")
             open(source_path, "wb").close()
@@ -2862,7 +3236,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     "chapters": [],
                     "hashtags": [],
                 }), \
-                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [30.0, 30.0])) as create_synced, \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [30.0, 30.0])) as create_synced, \
                 patch.object(commentary, "_create_ambient_audio_bed") as create_ambient, \
                 patch.object(commentary, "_mix_voiceover_with_video") as mix_video, \
                 patch.object(commentary, "_generate_commentary_covers", return_value={}):
@@ -2880,14 +3254,14 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 )
 
         create_synced.assert_called_once()
-        self.assertEqual(0.0, create_synced.call_args.kwargs["original_audio_volume"])
-        self.assertEqual(0.0, create_synced.call_args.kwargs["pause_original_audio_volume"])
+        self.assertEqual(0.3, create_synced.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.6, create_synced.call_args.kwargs["pause_original_audio_volume"])
         create_ambient.assert_not_called()
-        self.assertEqual(0.0, mix_video.call_args.kwargs["original_audio_volume"])
-        self.assertIsNone(mix_video.call_args.kwargs["ambient_audio_path"])
+        self.assertEqual(0.3, mix_video.call_args.kwargs["original_audio_volume"])
+        self.assertEqual("ambient.m4a", mix_video.call_args.kwargs["ambient_audio_path"])
         self.assertTrue(result["source_has_spoken_commentary"])
-        self.assertEqual(0.0, result["original_audio_volume"])
-        self.assertEqual(0.0, result["pause_original_audio_volume"])
+        self.assertEqual(0.3, result["original_audio_volume"])
+        self.assertEqual(0.6, result["pause_original_audio_volume"])
         self.assertEqual(0.3, result["requested_original_audio_volume"])
         self.assertEqual(0.6, result["requested_pause_original_audio_volume"])
 
@@ -3005,8 +3379,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         generate_edit_first.assert_called_once()
         create_synced.assert_called_once()
         self.assertEqual(intermediate_path, create_synced.call_args.kwargs["video_path"])
-        self.assertEqual(0.0, create_synced.call_args.kwargs["original_audio_volume"])
-        self.assertEqual(0.0, create_synced.call_args.kwargs["pause_original_audio_volume"])
+        self.assertEqual(0.3, create_synced.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.6, create_synced.call_args.kwargs["pause_original_audio_volume"])
         create_ambient.assert_not_called()
         self.assertEqual("openai_selected_visual_edit.mp4", result["openai_intermediate_edit"])
         self.assertEqual("openai_selected_visual_edit.mp4", result["render_source_video"])
@@ -3014,7 +3388,751 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual("two_to_four", result["openai_edit_first"]["source_target_duration"])
         self.assertEqual("full", result["openai_edit_first"]["render_target_duration"])
         self.assertTrue(result["source_has_spoken_commentary"])
-        self.assertEqual(0.0, mix_video.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.3, mix_video.call_args.kwargs["original_audio_volume"])
+
+    def test_cached_openai_edit_first_script_restores_intermediate_cut_for_render(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            intermediate_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            open(intermediate_path, "wb").close()
+            edited_analysis_path = os.path.join(tmpdir, "openai_edited_visual_analysis.json")
+            with open(edited_analysis_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "provider": "openai_compatible",
+                    "analysis_stage": "edited_video_commentary",
+                    "frames": [{"timestamp": 5.0}, {"timestamp": 15.0}],
+                    "observations": [
+                        {"timestamp": 5.0, "visual": "edited opening action", "importance": 5, "interest_score": 5},
+                        {"timestamp": 15.0, "visual": "edited ending result", "importance": 5, "interest_score": 5},
+                    ],
+                    "candidate_segments": [],
+                }, f)
+            cached_script = {
+                "title": "Cached Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "先讲中间片开头的动作。\n\n再讲中间片结尾的结果。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 10,
+                        "visual": "edited opening action",
+                        "visual_facts": ["edited opening action"],
+                        "evidence_timestamps": [5.0],
+                        "narration": "先讲中间片开头的动作。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                    {
+                        "start": 10,
+                        "end": 20,
+                        "visual": "edited ending result",
+                        "visual_facts": ["edited ending result"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "再讲中间片结尾的结果。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                ],
+                "edit_segments": [
+                    {"start": 0, "end": 10, "reason": "edited opening action", "video_speed": 1.0},
+                    {"start": 10, "end": 20, "reason": "edited ending result", "video_speed": 1.0},
+                ],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary", "intermediate_edit": "openai_selected_visual_edit.mp4"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "edited_visual_analysis_path": edited_analysis_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 10, "source_start": 20, "source_end": 30, "video_speed": 1.0},
+                        {"output_start": 10, "output_end": 20, "source_start": 60, "source_end": 70, "video_speed": 1.0},
+                    ],
+                    "source_target_duration": "two_to_four",
+                    "render_target_duration": "full",
+                },
+            }
+            script_path = os.path.join(tmpdir, "cached_commentary_script.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "script": cached_script,
+                    "transcript": {"text": "", "segments": [], "language": "unknown"},
+                }, f)
+            with open(os.path.join(tmpdir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                commentary.json.dump({"script_path": script_path}, f)
+
+            def fake_mix(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"final")
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 90, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "_get_video_duration", side_effect=lambda path: 20.0 if path == intermediate_path or str(path).endswith(".mp4") else 90.0), \
+                patch.object(commentary, "_has_audio_stream", return_value=False), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [10.0, 10.0])) as create_synced, \
+                patch.object(commentary, "_mix_voiceover_with_video", side_effect=fake_mix), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}), \
+                patch.object(commentary, "_probe_media_format_duration", return_value=20.0), \
+                patch.object(commentary, "_openai_generate_edit_first_commentary_script") as generate_edit_first:
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="openai",
+                    openai_key="openai-key",
+                    openai_base_url="http://openai-compatible.test/v1",
+                    openai_model="test-model",
+                    target_duration="two_to_four",
+                    checkpoint=lambda fields: None,
+                )
+
+        generate_edit_first.assert_not_called()
+        create_synced.assert_called_once()
+        self.assertEqual(intermediate_path, create_synced.call_args.kwargs["video_path"])
+        self.assertEqual("openai_selected_visual_edit.mp4", result["render_source_video"])
+        self.assertEqual(20.0, result["render_source_duration"])
+        self.assertEqual("full", result["openai_edit_first"]["render_target_duration"])
+
+    def test_cached_openai_edit_first_rebuilds_intermediate_cut_when_source_audio_is_needed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            intermediate_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            open(intermediate_path, "wb").close()
+            edited_analysis_path = os.path.join(tmpdir, "openai_edited_visual_analysis.json")
+            with open(edited_analysis_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "provider": "openai_compatible",
+                    "analysis_stage": "edited_video_commentary",
+                    "frames": [{"timestamp": 5.0}, {"timestamp": 15.0}],
+                    "observations": [
+                        {"timestamp": 5.0, "visual": "edited opening action", "importance": 5, "interest_score": 5},
+                        {"timestamp": 15.0, "visual": "edited ending result", "importance": 5, "interest_score": 5},
+                    ],
+                    "candidate_segments": [],
+                }, f)
+            cached_script = {
+                "title": "Cached Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "先讲中间片开头的动作。\n\n再讲中间片结尾的结果。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 10,
+                        "visual": "edited opening action",
+                        "visual_facts": ["edited opening action"],
+                        "evidence_timestamps": [5.0],
+                        "narration": "先讲中间片开头的动作。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                    {
+                        "start": 10,
+                        "end": 20,
+                        "visual": "edited ending result",
+                        "visual_facts": ["edited ending result"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "再讲中间片结尾的结果。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                ],
+                "edit_segments": [
+                    {"start": 0, "end": 10, "reason": "edited opening action", "video_speed": 1.0},
+                    {"start": 10, "end": 20, "reason": "edited ending result", "video_speed": 1.0},
+                ],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary", "intermediate_edit": "openai_selected_visual_edit.mp4"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "edited_visual_analysis_path": edited_analysis_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 10, "source_start": 20, "source_end": 30, "video_speed": 1.0},
+                        {"output_start": 10, "output_end": 20, "source_start": 60, "source_end": 70, "video_speed": 1.0},
+                    ],
+                    "source_target_duration": "two_to_four",
+                    "render_target_duration": "full",
+                },
+            }
+            script_path = os.path.join(tmpdir, "cached_commentary_script.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "script": cached_script,
+                    "transcript": {"text": "", "segments": [], "language": "unknown"},
+                }, f)
+            with open(os.path.join(tmpdir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                commentary.json.dump({"script_path": script_path}, f)
+
+            def fake_mix(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"final")
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 90, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "_get_video_duration", side_effect=lambda path: 20.0 if str(path).endswith(".mp4") else 90.0), \
+                patch.object(commentary, "_has_audio_stream", side_effect=lambda path: path == source_path), \
+                patch.object(commentary, "_create_visual_edit") as create_visual, \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=("ambient.m4a", [10.0, 10.0])) as create_synced, \
+                patch.object(commentary, "_mix_voiceover_with_video", side_effect=fake_mix), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}), \
+                patch.object(commentary, "_probe_media_format_duration", return_value=20.0):
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="openai",
+                    openai_key="openai-key",
+                    openai_base_url="http://openai-compatible.test/v1",
+                    openai_model="test-model",
+                    target_duration="two_to_four",
+                    original_audio_volume=0.3,
+                    pause_original_audio_volume=0.6,
+                    checkpoint=lambda fields: None,
+                )
+
+        create_visual.assert_called_once()
+        self.assertEqual(source_path, create_visual.call_args.args[0])
+        self.assertTrue(create_visual.call_args.kwargs["include_audio"])
+        self.assertEqual("openai_selected_visual_edit_with_audio.mp4", os.path.basename(create_synced.call_args.kwargs["video_path"]))
+        self.assertEqual("openai_selected_visual_edit_with_audio.mp4", result["render_source_video"])
+
+    def test_cached_openai_edit_first_script_with_source_commentary_preserves_audio_without_regenerating(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            intermediate_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            open(intermediate_path, "wb").close()
+            edited_analysis_path = os.path.join(tmpdir, "openai_edited_visual_analysis.json")
+            with open(edited_analysis_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "provider": "openai_compatible",
+                    "analysis_stage": "edited_video_commentary",
+                    "frames": [{"timestamp": 5.0}, {"timestamp": 15.0}],
+                    "observations": [
+                        {"timestamp": 5.0, "visual": "edited opening action", "importance": 5, "interest_score": 5},
+                        {"timestamp": 15.0, "visual": "edited ending result", "importance": 5, "interest_score": 5},
+                    ],
+                    "candidate_segments": [],
+                }, f)
+            cached_script = {
+                "title": "Cached Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "先讲中间片开头的动作。\n\n再讲中间片结尾的结果。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 10,
+                        "visual": "edited opening action",
+                        "visual_facts": ["edited opening action"],
+                        "evidence_timestamps": [5.0],
+                        "narration": "先讲中间片开头的动作。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                    {
+                        "start": 10,
+                        "end": 20,
+                        "visual": "edited ending result",
+                        "visual_facts": ["edited ending result"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "再讲中间片结尾的结果。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 10.0,
+                    },
+                ],
+                "edit_segments": [
+                    {"start": 0, "end": 10, "reason": "edited opening action", "video_speed": 1.0},
+                    {"start": 10, "end": 20, "reason": "edited ending result", "video_speed": 1.0},
+                ],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary", "intermediate_edit": "openai_selected_visual_edit.mp4"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "edited_visual_analysis_path": edited_analysis_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 10, "source_start": 20, "source_end": 30, "video_speed": 1.0},
+                        {"output_start": 10, "output_end": 20, "source_start": 60, "source_end": 70, "video_speed": 1.0},
+                    ],
+                    "source_target_duration": "two_to_four",
+                    "render_target_duration": "full",
+                },
+            }
+            source_commentary_transcript = {
+                "text": " ".join(["original narrator explains action"] * 30),
+                "segments": [
+                    {"start": 0, "end": 6, "text": "The original narrator explains the opening."},
+                    {"start": 20, "end": 26, "text": "The original narrator explains the middle."},
+                    {"start": 40, "end": 46, "text": "The original narrator explains the ending."},
+                    {"start": 55, "end": 62, "text": "The original narrator explains the result."},
+                    {"start": 70, "end": 78, "text": "The original narrator explains the final point."},
+                ],
+                "language": "en",
+            }
+            script_path = os.path.join(tmpdir, "cached_commentary_script.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "script": cached_script,
+                    "transcript": source_commentary_transcript,
+                }, f)
+            with open(os.path.join(tmpdir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                commentary.json.dump({"script_path": script_path}, f)
+
+            def fake_mix(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"final")
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 90, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "_get_video_duration", side_effect=lambda path: 20.0 if path == intermediate_path or str(path).endswith(".mp4") else 90.0), \
+                patch.object(commentary, "_has_audio_stream", return_value=True), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [10.0, 10.0])) as create_synced, \
+                patch.object(commentary, "_mix_voiceover_with_video", side_effect=fake_mix) as mix_video, \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}), \
+                patch.object(commentary, "_probe_media_format_duration", return_value=20.0), \
+                patch.object(commentary, "_openai_generate_edit_first_commentary_script") as generate_edit_first:
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="openai",
+                    openai_key="",
+                    openai_base_url="",
+                    openai_model="",
+                    target_duration="two_to_four",
+                    original_audio_volume=0.3,
+                    pause_original_audio_volume=0.6,
+                    checkpoint=lambda fields: None,
+                )
+
+        generate_edit_first.assert_not_called()
+        create_synced.assert_called_once()
+        self.assertEqual(0.3, create_synced.call_args.kwargs["original_audio_volume"])
+        self.assertEqual(0.6, create_synced.call_args.kwargs["pause_original_audio_volume"])
+        self.assertEqual(0.3, mix_video.call_args.kwargs["original_audio_volume"])
+        self.assertTrue(result["source_has_spoken_commentary"])
+        self.assertEqual(0.3, result["original_audio_volume"])
+        self.assertEqual(0.6, result["pause_original_audio_volume"])
+
+    def test_cached_openai_edit_first_script_regenerates_when_source_edit_omits_terminal_ending(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            intermediate_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            open(intermediate_path, "wb").close()
+            edited_analysis_path = os.path.join(tmpdir, "openai_edited_visual_analysis.json")
+            with open(edited_analysis_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "provider": "openai_compatible",
+                    "analysis_stage": "edited_video_commentary",
+                    "frames": [{"timestamp": 5.0}, {"timestamp": 15.0}],
+                    "observations": [
+                        {"timestamp": 5.0, "visual": "old edited opening action", "importance": 5, "interest_score": 5},
+                        {"timestamp": 15.0, "visual": "old edited repair process without final packaging", "importance": 5, "interest_score": 5},
+                    ],
+                    "candidate_segments": [],
+                }, f)
+            source_visual_analysis = openai_visual_analysis_with_late_packaging_ending()
+            source_analysis_path = os.path.join(tmpdir, "openai_visual_analysis.json")
+            with open(source_analysis_path, "w", encoding="utf-8") as f:
+                commentary.json.dump(source_visual_analysis, f)
+            cached_script = {
+                "title": "Old Cached Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "旧缓存只讲到维修过程。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 20,
+                        "visual": "old edited repair process",
+                        "visual_facts": ["old edited repair process"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "旧缓存只讲到维修过程。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                        "rendered_duration": 20.0,
+                    },
+                ],
+                "edit_segments": [{"start": 0, "end": 20, "reason": "old edited repair process", "video_speed": 1.0}],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary", "intermediate_edit": "openai_selected_visual_edit.mp4"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "edited_visual_analysis_path": edited_analysis_path,
+                    "source_visual_analysis_path": source_analysis_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 20, "source_start": 1578.0, "source_end": 1611.0, "video_speed": 1.0},
+                    ],
+                    "source_target_duration": "two_to_four",
+                    "render_target_duration": "full",
+                },
+            }
+            script_path = os.path.join(tmpdir, "cached_commentary_script.json")
+            with open(script_path, "w", encoding="utf-8") as f:
+                commentary.json.dump({
+                    "script": cached_script,
+                    "transcript": {"text": "", "segments": [], "language": "unknown"},
+                }, f)
+            with open(os.path.join(tmpdir, "commentary_task.json"), "w", encoding="utf-8") as f:
+                commentary.json.dump({"script_path": script_path}, f)
+
+            regenerated_script = {
+                "title": "Regenerated Remix",
+                "summary": "summary",
+                "hook": "hook",
+                "narration": "重新生成后先讲包装动作。\n\n再讲合盖收尾结果。",
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 10,
+                        "visual": "regenerated edited packaging action",
+                        "visual_facts": ["regenerated edited packaging action"],
+                        "evidence_timestamps": [5.0],
+                        "narration": "重新生成后先讲包装动作。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                    {
+                        "start": 10,
+                        "end": 20,
+                        "visual": "regenerated edited closing ending",
+                        "visual_facts": ["regenerated edited closing ending"],
+                        "evidence_timestamps": [15.0],
+                        "narration": "再讲合盖收尾结果。",
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                ],
+                "edit_segments": [
+                    {"start": 0, "end": 10, "reason": "regenerated edited packaging action", "video_speed": 1.0},
+                    {"start": 10, "end": 20, "reason": "regenerated edited closing ending", "video_speed": 1.0},
+                ],
+                "chapters": [],
+                "hashtags": [],
+                "_openai_analysis": {"mode": "edit_first_then_commentary", "intermediate_edit": "openai_selected_visual_edit.mp4"},
+                "_openai_edit_first": {
+                    "enabled": True,
+                    "intermediate_edit_path": intermediate_path,
+                    "edited_visual_analysis_path": edited_analysis_path,
+                    "source_visual_analysis_path": source_analysis_path,
+                    "source_edit_timeline": [
+                        {"output_start": 0, "output_end": 20, "source_start": 1809.0, "source_end": 1833.0, "video_speed": 1.0},
+                    ],
+                    "source_target_duration": "two_to_four",
+                    "render_target_duration": "full",
+                },
+            }
+
+            def fake_mix(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"final")
+
+            with patch.object(commentary, "_get_video_info", return_value={"duration": 1855.5, "width": 1920, "height": 1080, "fps": 30}), \
+                patch.object(commentary, "_get_video_duration", side_effect=lambda path: 20.0 if path == intermediate_path or str(path).endswith(".mp4") else 1855.5), \
+                patch.object(commentary, "_has_audio_stream", return_value=False), \
+                patch.object(commentary, "_load_or_transcribe_commentary_transcript", return_value={"text": "", "segments": [], "language": "unknown"}), \
+                patch.object(commentary, "_prepare_analysis_video_for_openai_frames", return_value=source_path), \
+                patch.object(commentary, "_extract_openai_analysis_frames", return_value=[{"path": source_path, "timestamp": 1.0, "source_video_path": source_path}]), \
+                patch.object(commentary, "_create_block_synced_visuals_and_audio", return_value=(None, [10.0, 10.0])) as create_synced, \
+                patch.object(commentary, "_mix_voiceover_with_video", side_effect=fake_mix), \
+                patch.object(commentary, "_generate_commentary_covers", return_value={}), \
+                patch.object(commentary, "_probe_media_format_duration", return_value=20.0), \
+                patch.object(commentary, "_openai_generate_edit_first_commentary_script", return_value=(
+                    regenerated_script,
+                    source_visual_analysis,
+                    {"provider": "openai_compatible", "analysis_stage": "edited_video_commentary"},
+                    intermediate_path,
+                    regenerated_script["_openai_edit_first"]["source_edit_timeline"],
+                    20.0,
+                )) as generate_edit_first:
+
+                result = commentary.generate_commentary_video(
+                    source=source_path,
+                    output_dir=tmpdir,
+                    gemini_key="key",
+                    source_type="file",
+                    subtitles=False,
+                    analysis_mode="openai",
+                    openai_key="openai-key",
+                    openai_base_url="http://openai-compatible.test/v1",
+                    openai_model="test-model",
+                    target_duration="two_to_four",
+                    checkpoint=lambda fields: None,
+                )
+
+        generate_edit_first.assert_called_once()
+        create_synced.assert_called_once()
+        self.assertEqual(intermediate_path, create_synced.call_args.kwargs["video_path"])
+        self.assertEqual("Regenerated Remix", result["title"])
+        self.assertEqual(
+            regenerated_script["_openai_edit_first"]["source_edit_timeline"],
+            result["openai_source_edit_timeline"],
+        )
+
+    def test_locked_edited_video_narration_plan_covers_intermediate_cut_without_filler(self):
+        edited_visual_analysis = {
+            "provider": "openai_compatible",
+            "analysis_stage": "edited_video_commentary",
+            "frames": [{"timestamp": timestamp} for timestamp in [1.5, 8.0, 18.0, 29.0, 36.0, 48.0, 58.0]],
+            "observations": [
+                {
+                    "timestamp": timestamp,
+                    "visual": f"real edited frame evidence {timestamp}",
+                    "process_stage": "edited manufacturing process",
+                    "importance": 4,
+                    "interest_score": 4,
+                    "keep_candidate": True,
+                    "edit_value": "must_keep",
+                }
+                for timestamp in [1.5, 8.0, 18.0, 29.0, 36.0, 48.0, 58.0]
+            ],
+            "candidate_segments": [],
+        }
+        edit_timeline = [
+            {"output_start": 0.0, "output_end": 30.0, "source_start": 100.0, "source_end": 130.0, "video_speed": 1.0},
+            {"output_start": 30.0, "output_end": 60.0, "source_start": 400.0, "source_end": 430.0, "video_speed": 1.0},
+        ]
+
+        plan = commentary._build_locked_edited_video_narration_plan(
+            edited_visual_analysis,
+            edit_timeline,
+            60.0,
+            "en",
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["locked_edited_video_timeline"])
+        self.assertAlmostEqual(60.0, plan["playable_seconds"], places=2)
+        self.assertEqual(0.0, plan["blocks"][0]["start"])
+        self.assertEqual(60.0, plan["blocks"][-1]["end"])
+        known_frames = {1.5, 8.0, 18.0, 29.0, 36.0, 48.0, 58.0}
+        self.assertTrue(plan["blocks"])
+        for block in plan["blocks"]:
+            self.assertTrue(block["evidence_timestamps"])
+            self.assertTrue(set(block["evidence_timestamps"]).issubset(known_frames))
+            self.assertNotIn("filler", block["visual"].lower())
+
+    def test_openai_edit_first_final_pass_locks_intermediate_timeline_even_when_model_underselects(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = os.path.join(tmpdir, "source.mp4")
+            open(source_path, "wb").close()
+            edited_path = os.path.join(tmpdir, "openai_selected_visual_edit.mp4")
+            frame_path = os.path.join(tmpdir, "frame.jpg")
+            open(frame_path, "wb").close()
+            long_lines = [
+                "The first locked range shows the real edited process with concrete visible movement, material handling, and a clear manufacturing step that continues through this section.",
+                "The next locked range keeps describing the same edited-video evidence with enough detail for the actual visual duration, without adding any unseen claim.",
+                "This narrated block stays grounded in the timestamped frames while explaining the visible workshop action, object state, and process progression.",
+                "The final returned block is intentionally shorter than the full edited timeline in its timestamps, but the backend must preserve the locked plan coverage.",
+            ]
+            short_model_script = {
+                "title": "Short model script",
+                "summary": "",
+                "hook": "",
+                "narration": " ".join(long_lines),
+                "narration_blocks": [
+                    {
+                        "start": 0,
+                        "end": 9,
+                        "visual": "model chose only opening",
+                        "visual_facts": ["model chose only opening"],
+                        "evidence_timestamps": [6.0],
+                        "narration": long_lines[0],
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                    {
+                        "start": 9,
+                        "end": 18,
+                        "visual": "model chose only middle",
+                        "visual_facts": ["model chose only middle"],
+                        "evidence_timestamps": [12.0],
+                        "narration": long_lines[1],
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                    {
+                        "start": 18,
+                        "end": 27,
+                        "visual": "model chose only ending",
+                        "visual_facts": ["model chose only ending"],
+                        "evidence_timestamps": [24.0],
+                        "narration": long_lines[2],
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                    {
+                        "start": 27,
+                        "end": 36,
+                        "visual": "model still stops early",
+                        "visual_facts": ["model still stops early"],
+                        "evidence_timestamps": [30.0],
+                        "narration": long_lines[3],
+                        "pause": False,
+                        "rate": "+0%",
+                        "pitch": "+0Hz",
+                        "video_speed": 1.0,
+                        "speed_reason": "",
+                    },
+                ],
+                "edit_segments": [],
+                "episode_plan": {"should_split": False, "reason": "not needed"},
+                "episodes": [],
+                "cut_strategy": [],
+                "chapters": [],
+                "hashtags": [],
+            }
+            transcript = {
+                "text": "factory process",
+                "language": "en",
+                "segments": [{"start": 100.0, "end": 160.0, "text": "factory process"}],
+            }
+            source_visual_analysis = {
+                "provider": "openai_compatible",
+                "frame_count": 3,
+                "batch_count": 1,
+                "frames": [{"timestamp": 100.0}, {"timestamp": 130.0}, {"timestamp": 150.0}],
+                "observations": [],
+                "candidate_segments": [
+                    {
+                        "start": 100.0,
+                        "end": 160.0,
+                        "reason": "useful source manufacturing sequence",
+                        "importance": 5,
+                        "interest_score": 5,
+                        "edit_value": "must_keep",
+                        "evidence_timestamps": [100.0, 130.0, 150.0],
+                    }
+                ],
+            }
+            edited_frame_infos = [
+                {"path": frame_path, "timestamp": timestamp, "source_video_path": edited_path}
+                for timestamp in [1.5, 8.0, 18.0, 29.0, 36.0, 48.0, 58.0]
+            ]
+            edited_visual_analysis = {
+                "provider": "openai_compatible",
+                "analysis_stage": "edited_video_commentary",
+                "frame_count": len(edited_frame_infos),
+                "batch_count": 1,
+                "frames": [{"timestamp": item["timestamp"]} for item in edited_frame_infos],
+                "observations": [
+                    {
+                        "timestamp": item["timestamp"],
+                        "visual": f"real edited evidence {item['timestamp']}",
+                        "process_stage": "edited manufacturing process",
+                        "importance": 4,
+                        "interest_score": 4,
+                        "keep_candidate": True,
+                        "edit_value": "must_keep",
+                    }
+                    for item in edited_frame_infos
+                ],
+                "candidate_segments": [],
+            }
+
+            def fake_visual_edit(_source_video_path, _segments, output_path, *_args, **_kwargs):
+                with open(output_path, "wb") as f:
+                    f.write(b"edited")
+
+            with patch.object(commentary, "_load_openai_visual_analysis", return_value=source_visual_analysis), \
+                patch.object(commentary, "_create_visual_edit", side_effect=fake_visual_edit), \
+                patch.object(commentary, "_get_video_duration", return_value=60.0), \
+                patch.object(commentary, "_extract_openai_analysis_frames", return_value=edited_frame_infos), \
+                patch.object(commentary, "_analyze_openai_visual_timeline", return_value=edited_visual_analysis), \
+                patch.object(commentary, "_call_openai_compatible_chat", return_value=commentary.json.dumps(short_model_script)):
+                final_script, _source_analysis, _edited_analysis, _intermediate_path, source_timeline, render_duration = commentary._openai_generate_edit_first_commentary_script(
+                    transcript=transcript,
+                    video_title="Demo",
+                    duration=180.0,
+                    source_video_path=source_path,
+                    output_dir=tmpdir,
+                    openai_key="key",
+                    openai_base_url="http://openai-compatible.test/v1",
+                    openai_model="test-model",
+                    frame_infos=[{"path": frame_path, "timestamp": 100.0, "source_video_path": source_path}],
+                    language="en",
+                    style="documentary",
+                    custom_style_prompt=None,
+                    target_duration="two_to_four",
+                    aspect_mode="16:9",
+                    openai_sampling_options={},
+                    source_audio_analysis=None,
+                    auto_video_speed=False,
+                )
+
+        self.assertEqual(60.0, render_duration)
+        self.assertTrue(source_timeline)
+        self.assertEqual(0.0, final_script["narration_blocks"][0]["start"])
+        self.assertEqual(60.0, final_script["narration_blocks"][-1]["end"])
+        self.assertGreaterEqual(
+            sum(commentary._block_visual_duration(block) for block in final_script["narration_blocks"]),
+            54.0,
+        )
+        self.assertNotEqual(
+            [(0, 9), (9, 18), (18, 27), (27, 36)],
+            [(block["start"], block["end"]) for block in final_script["narration_blocks"]],
+        )
+        for block in final_script["narration_blocks"]:
+            self.assertTrue(block["evidence_timestamps"])
+            self.assertTrue(0.0 <= block["start"] < block["end"] <= 60.0)
 
     def test_full_duration_renders_ai_planned_commentary_episodes_from_final_video(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3314,6 +4432,76 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertNotIn(0, starts)
         self.assertNotIn(40, starts)
         self.assertTrue(all(block["evidence_timestamps"] for block in plan["blocks"]))
+
+    def test_openai_candidate_edit_plan_includes_real_late_packaging_ending(self):
+        visual_analysis = openai_visual_analysis_with_late_packaging_ending()
+
+        plan = commentary._build_openai_candidate_edit_plan(
+            visual_analysis,
+            duration=1855.5,
+            target_duration="two_to_four",
+            language="zh",
+        )
+
+        self.assertIsNotNone(plan)
+        ranges = [(block["start"], block["end"]) for block in plan["blocks"]]
+        self.assertTrue(
+            any(start >= 1809.0 and end <= 1833.0 for start, end in ranges),
+            ranges,
+        )
+        self.assertFalse(
+            ranges[-1][1] <= 1611.0,
+            ranges,
+        )
+        self.assertIn("packaging", plan["blocks"][-1]["visual"].lower())
+
+    def test_openai_selected_ranges_reject_omitting_available_ending_payoff(self):
+        visual_analysis = openai_visual_analysis_with_late_packaging_ending()
+        narration = repeated_scene_text("当前画面里的零件和工具动作都在推进流程，解说只描述真实可见内容", 2)
+        blocks = [
+            {
+                "start": start,
+                "end": end,
+                "visual": visual,
+                "visual_facts": [visual],
+                "evidence_timestamps": [round((start + end) / 2, 3)],
+                "narration": narration,
+                "pause": False,
+                "video_speed": 1.0,
+            }
+            for start, end, visual in [
+                (88.0, 136.0, "furnace melting and stirring sequence"),
+                (193.0, 229.0, "sand molding and demolding sequence"),
+                (367.0, 412.0, "second furnace stirring with smoke and sparks"),
+                (846.0, 883.0, "lathe machining and part removal sequence"),
+                (1578.0, 1611.0, "precise insertion fitting and hammering on chrome faucet parts"),
+            ]
+        ]
+
+        with self.assertRaisesRegex(Exception, "omit the real ending/payoff evidence"):
+            commentary._validate_openai_selected_ranges_are_important(
+                blocks,
+                visual_analysis,
+                duration=1855.5,
+                target_seconds=240.0,
+            )
+
+        blocks.append({
+            "start": 1809.0,
+            "end": 1833.0,
+            "visual": "packaging close-up shows wrapped part inserted into checkered box and closing flaps",
+            "visual_facts": ["packaging close-up shows wrapped part inserted into checkered box and closing flaps"],
+            "evidence_timestamps": [1821.0],
+            "narration": narration,
+            "pause": False,
+            "video_speed": 1.0,
+        })
+        commentary._validate_openai_selected_ranges_are_important(
+            blocks,
+            visual_analysis,
+            duration=1855.5,
+            target_seconds=240.0,
+        )
 
     def test_openai_full_target_is_limited_by_candidate_playable_evidence(self):
         visual_analysis = openai_candidate_limited_long_visual_analysis()
@@ -4267,6 +5455,137 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             visual_analysis=visual_analysis,
         )
 
+    def test_openai_visual_timeline_rejects_unsupported_same_block_reaction_claim(self):
+        block = {
+            "start": 175.0,
+            "end": 188.0,
+            "visual": "Pink-gloved hands hold an open bag beside a bee-covered branch; smoke drifts through the frame",
+            "visual_facts": [
+                "Pink-gloved hands hold open bag next to dense bee swarm on branch",
+                "smoke is visible around the branch",
+            ],
+            "evidence_timestamps": [178.0, 184.0],
+            "narration": "烟雾散了，蜂巢已经到手准备下树，树枝有点晃我抓紧了，手套按实别让它晃动。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 178.0}, {"timestamp": 184.0}],
+            "observations": [
+                {"timestamp": 178.0, "visual": "Pink-gloved hand holds a bag near a bee-covered branch with smoke visible"},
+                {"timestamp": 184.0, "visual": "Hands and a bag remain beside the branch; no downclimbing or leaving is shown"},
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "unsupported same-block scene claim"):
+            commentary._validate_scene_matched_narration_blocks(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                visual_analysis=visual_analysis,
+                language="zh",
+            )
+
+    def test_openai_visual_timeline_rejects_subjective_reaction_not_visual_resting(self):
+        block = {
+            "start": 0.0,
+            "end": 13.5,
+            "visual": "POV looking down at a large honeycomb on a tree branch; pink-gloved hand resting on hive",
+            "visual_facts": [
+                "pink-gloved hand resting on hive while bees crawl over the comb",
+                "forest canopy is visible below the branch",
+                "knife is visible near the honeycomb edge",
+            ],
+            "evidence_timestamps": [1.5, 4.5, 7.5],
+            "narration": "蜂巢贴着树枝展开，粉手套压在蜂巢边上，蜜蜂飞满天，我的手开始冒汗了。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 1.5}, {"timestamp": 4.5}, {"timestamp": 7.5}],
+            "observations": [
+                {"timestamp": 1.5, "visual": "hand resting on hive; forest visible below"},
+                {"timestamp": 4.5, "visual": "knife and glove near honeycomb while bees fly"},
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, "unsupported same-block scene claim"):
+            commentary._validate_scene_matched_narration_blocks(
+                {"narration": block["narration"], "narration_blocks": [block]},
+                visual_analysis=visual_analysis,
+                language="zh",
+            )
+
+    def test_openai_visual_timeline_reports_multiple_unsupported_scene_claims(self):
+        data = {
+            "narration_blocks": [
+                {
+                    "start": 0.0,
+                    "end": 10.0,
+                    "visual": "gloved hands adjust a bag beside smoke and bees",
+                    "visual_facts": ["gloved hands adjust a bag", "smoke drifts around bees"],
+                    "evidence_timestamps": [3.0],
+                    "narration": "袋子贴着树枝继续调整，我的手还抖着。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+                {
+                    "start": 10.0,
+                    "end": 20.0,
+                    "visual": "hands keep handling the bag on the branch",
+                    "visual_facts": ["hands keep handling the bag on the branch"],
+                    "evidence_timestamps": [13.0],
+                    "narration": "烟雾散开以后，蜂巢已经到手准备下树。",
+                    "pause": False,
+                    "video_speed": 1.0,
+                },
+            ]
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 3.0}, {"timestamp": 13.0}],
+            "observations": [
+                {"timestamp": 3.0, "visual": "hands adjust a bag near bees"},
+                {"timestamp": 13.0, "visual": "hands keep handling the bag; no leaving is shown"},
+            ],
+        }
+
+        with self.assertRaisesRegex(Exception, r"Unsupported claim blocks: \[1, 2\]"):
+            commentary._validate_scene_matched_narration_blocks(
+                data,
+                visual_analysis=visual_analysis,
+                language="zh",
+            )
+
+    def test_openai_visual_timeline_allows_supported_same_block_completion_claim(self):
+        block = {
+            "start": 188.0,
+            "end": 203.0,
+            "visual": "Red-hoodie helper and pink-gloved hands tie and secure the collection bag on the branch",
+            "visual_facts": [
+                "the bag is tied closed around the honeycomb contents",
+                "helper secures the packed bag on the branch",
+            ],
+            "evidence_timestamps": [190.0, 199.0],
+            "narration": "红衣服队友和我一起收尾，袋子彻底固定在枝上，蜂巢已经收好。",
+            "pause": False,
+            "video_speed": 1.0,
+        }
+        visual_analysis = {
+            "provider": "openai_compatible",
+            "frames": [{"timestamp": 190.0}, {"timestamp": 199.0}],
+            "observations": [
+                {"timestamp": 190.0, "visual": "Red hoodie helper assists while the packed bag is tied closed"},
+                {"timestamp": 199.0, "visual": "Hands secure the bag on the branch with honeycomb contents inside"},
+            ],
+        }
+
+        commentary._validate_scene_matched_narration_blocks(
+            {"narration": block["narration"], "narration_blocks": [block]},
+            visual_analysis=visual_analysis,
+            language="zh",
+        )
+
     def test_openai_visual_timeline_requires_evidence_timestamps_from_extracted_frames(self):
         block = {
             "start": 0.0,
@@ -5064,7 +6383,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         video_cmds = [cmd for cmd in commands if cmd[-1].endswith(".mp4") and "-ss" in cmd]
         self.assertEqual(1, len(video_cmds))
         self.assertEqual("12.000", video_cmds[0][video_cmds[0].index("-t") + 1])
-        self.assertIn("setpts=PTS/2.000000", video_cmds[0][video_cmds[0].index("-vf") + 1])
+        self.assertRegex(video_cmds[0][video_cmds[0].index("-vf") + 1], r"setpts=PTS(?:/2\.000000|\*0\.500000)")
         self.assertEqual((0.0, 12.0, "block_ambient_001_s2000_src12000_dur6000.m4a", 0.08, 2.0, 6.0), original_audio_calls[0])
         self.assertEqual(ambient_audio_path, ambient)
         self.assertEqual([6.0], block_durations)
@@ -5232,7 +6551,7 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertFalse(blocks[0]["pause"])
         self.assertAlmostEqual(120 + expected_duration, blocks[0]["end"], places=2)
 
-    def test_block_synced_render_refuses_to_trim_away_evidence_timestamps(self):
+    def test_block_synced_render_splits_tail_when_trim_would_lose_evidence_timestamp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = os.path.join(tmpdir, "source.mp4")
             open(video_path, "wb").close()
@@ -5272,9 +6591,8 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                 patch.object(commentary, "_get_audio_duration", return_value=3.0), \
                 patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
                 patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
-                patch.object(commentary, "_run_command", side_effect=fake_run_command), \
-                self.assertRaisesRegex(Exception, "cannot be trimmed without losing its visual evidence"):
-                commentary._create_block_synced_visuals_and_audio(
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                _ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
                     video_path=video_path,
                     narration_blocks=blocks,
                     timed_video_path=timed_video_path,
@@ -5292,7 +6610,13 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
                     trim_short_tts_tails=True,
                 )
 
-        self.assertEqual([], commands)
+        self.assertEqual(2, len(blocks))
+        self.assertFalse(blocks[0]["pause"])
+        self.assertTrue(blocks[1]["pause"])
+        self.assertEqual([], blocks[0]["evidence_timestamps"])
+        self.assertEqual([137.0], blocks[1]["evidence_timestamps"])
+        self.assertAlmostEqual(20.0, sum(block_durations), places=2)
+        self.assertGreater(len(commands), 0)
 
     def test_block_synced_render_splits_short_tts_evidence_timestamps_by_tail_pause(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5360,6 +6684,72 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
         self.assertEqual([36.4, 41.4], blocks[0]["evidence_timestamps"])
         self.assertEqual([43.946], blocks[1]["evidence_timestamps"])
         self.assertAlmostEqual(15.0, sum(block_durations), places=2)
+
+    def test_block_synced_render_splits_trim_tail_when_needed_to_preserve_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "source.mp4")
+            open(video_path, "wb").close()
+            timed_video_path = os.path.join(tmpdir, "timed.mp4")
+            voiceover_path = os.path.join(tmpdir, "voiceover.m4a")
+            ambient_audio_path = os.path.join(tmpdir, "ambient.m4a")
+
+            def fake_voiceover(**kwargs):
+                with open(kwargs["output_path"], "wb") as f:
+                    f.write(b"voice")
+
+            def fake_fit_audio(_input_audio_path, output_audio_path, _target_duration):
+                with open(output_audio_path, "wb") as f:
+                    f.write(b"fit")
+
+            def fake_original_audio(_video_path, _start, _duration, output_path, volume=1.0, speed=1.0, output_duration=None):
+                with open(output_path, "wb") as f:
+                    f.write(b"original")
+
+            def fake_run_command(cmd, cwd=None):
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"media")
+
+            blocks = [{
+                "start": 52.0,
+                "end": 65.0,
+                "visual": "手持多枚钉子和锤子继续敲击，树干上出现多处钉痕",
+                "visual_facts": ["树干上出现多处钉痕"],
+                "evidence_timestamps": [52.44, 55.437, 61.43, 64.426],
+                "narration": "多处钉痕形成临时踏点，动作熟练不拖沓",
+                "video_speed": 1.0,
+            }]
+            with patch.object(commentary, "_get_video_duration", return_value=3600.0), \
+                patch.object(commentary, "generate_commentary_voiceover", side_effect=fake_voiceover), \
+                patch.object(commentary, "_get_audio_duration", return_value=4.7), \
+                patch.object(commentary, "_fit_audio_part_to_duration", side_effect=fake_fit_audio), \
+                patch.object(commentary, "_extract_original_audio_clip", side_effect=fake_original_audio), \
+                patch.object(commentary, "_run_command", side_effect=fake_run_command):
+                ambient, block_durations = commentary._create_block_synced_visuals_and_audio(
+                    video_path=video_path,
+                    narration_blocks=blocks,
+                    timed_video_path=timed_video_path,
+                    voiceover_path=voiceover_path,
+                    ambient_audio_path=ambient_audio_path,
+                    aspect_mode="16:9",
+                    work_dir=tmpdir,
+                    tts_provider="edge",
+                    language="zh",
+                    elevenlabs_key=None,
+                    voice_id="voice",
+                    edge_voice="zh-CN-YunjianNeural",
+                    original_audio_volume=0.0,
+                    pause_original_audio_volume=0.6,
+                    preserve_source_resolution=True,
+                    trim_short_tts_tails=True,
+                )
+
+        self.assertEqual(ambient_audio_path, ambient)
+        self.assertEqual(2, len(blocks))
+        self.assertFalse(blocks[0]["pause"])
+        self.assertTrue(blocks[1]["pause"])
+        self.assertEqual([52.44, 55.437], blocks[0]["evidence_timestamps"])
+        self.assertEqual([61.43, 64.426], blocks[1]["evidence_timestamps"])
+        self.assertAlmostEqual(13.0, sum(block_durations), places=2)
 
     def test_non_full_output_duration_rejects_medium_render_shortfall(self):
         with self.assertRaisesRegex(Exception, "expected at least 180.0s"):
@@ -6522,6 +7912,110 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
 
         self.assertEqual("Demo", result["title"])
         self.assertEqual(commentary.OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS, calls[0]["timeout_seconds"])
+
+    def test_openai_chat_retries_xai_stream_disconnect_408(self):
+        class FakeResponse:
+            def __init__(self, status_code, text, payload=None):
+                self.status_code = status_code
+                self.text = text
+                self._payload = payload or {}
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            calls = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, *args, **kwargs):
+                FakeClient.calls += 1
+                if FakeClient.calls == 1:
+                    return FakeResponse(
+                        408,
+                        '{"error":{"message":"xai stream error: stream disconnected before response.completed"}}',
+                    )
+                return FakeResponse(
+                    200,
+                    "{}",
+                    {"choices": [{"message": {"content": "ok"}}]},
+                )
+
+        FakeClient.calls = 0
+        with patch.object(commentary.httpx, "Client", FakeClient), \
+            patch.object(commentary.time, "sleep"):
+            text = commentary._call_openai_compatible_chat(
+                api_key="key",
+                base_url="https://provider.example/v1",
+                model="demo",
+                messages=[{"role": "user", "content": "hello"}],
+                max_tokens=100,
+            )
+
+        self.assertEqual("ok", text)
+        self.assertEqual(2, FakeClient.calls)
+
+    def test_openai_visual_batch_stream_disconnect_splits_real_frame_batches(self):
+        frame_infos = [
+            {"path": f"frame-{index}.jpg", "timestamp": float(index)}
+            for index in range(1, 5)
+        ]
+        calls = []
+
+        def fake_call(**kwargs):
+            image_count = sum(
+                1
+                for item in kwargs["messages"][0]["content"]
+                if isinstance(item, dict) and item.get("type") == "image_url"
+            )
+            calls.append(image_count)
+            if image_count > 2:
+                raise Exception(
+                    "OpenAI-compatible API stream disconnected after 5 attempts: "
+                    "HTTP 408 xai stream error: stream disconnected before response.completed"
+                )
+            observations = [
+                {
+                    "image": index + 1,
+                    "timestamp": float(index + 1),
+                    "visual": f"real frame evidence {index + 1}",
+                    "importance": 4,
+                    "interest_score": 4,
+                    "keep_candidate": True,
+                    "edit_value": "useful",
+                }
+                for index in range(image_count)
+            ]
+            return commentary.json.dumps({
+                "batch_index": 1,
+                "observations": observations,
+                "candidate_segments": [],
+            })
+
+        with patch.object(commentary, "_openai_image_content_part", side_effect=lambda path: {"type": "image_url", "image_url": {"url": path}}), \
+            patch.object(commentary, "_call_openai_compatible_chat", side_effect=fake_call), \
+            patch.object(commentary.time, "sleep"):
+            result = commentary._analyze_openai_visual_timeline(
+                frame_infos=frame_infos,
+                video_title="Demo",
+                duration=20.0,
+                api_key="key",
+                base_url="https://provider.example/v1",
+                model="demo-model",
+                sampling_options={"batch_size": 4, "visual_concurrency": 1},
+            )
+
+        self.assertEqual([4, 2, 2], calls)
+        self.assertEqual(4, len(result["observations"]))
+        self.assertTrue(result["batches"][0]["split_batch"])
+        self.assertTrue(all("real frame evidence" in item["visual"] for item in result["observations"]))
 
     def test_openai_visual_analysis_cache_reused_before_batch_calls(self):
         cached = {

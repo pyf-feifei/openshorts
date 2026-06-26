@@ -16,6 +16,9 @@ import {
   COMMENTARY_LOG_PANEL_BODY_CLASS,
   getCommentaryLogPanelState,
 } from './commentaryLogPanel.js';
+import {
+  mergeStyleIntoLocalStorage,
+} from './commentaryStyleSync.js';
 
 test('commentary tab defaults match hustle Chinese remix setup', () => {
   assert.equal(COMMENTARY_DEFAULTS.style, 'hustle');
@@ -128,8 +131,9 @@ test('commentary exposes first-person hustle commentary style', () => {
 test('commentary allows a custom style prompt under commentary style', () => {
   const source = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
 
-  assert.match(source, /id: 'custom'/);
-  assert.match(source, /自定义提示词/);
+  assert.match(source, /setStyle\('custom'\)/);
+  assert.match(source, /新建自定义风格/);
+  assert.doesNotMatch(source, /label: '自定义提示词'/);
   assert.match(source, /customStylePrompt/);
   assert.match(source, /custom_style_prompt/);
   assert.match(source, /自定义风格提示词/);
@@ -137,6 +141,11 @@ test('commentary allows a custom style prompt under commentary style', () => {
   assert.match(source, /CUSTOM_STYLE_STORAGE_KEY/);
   assert.match(source, /添加到下拉框/);
   assert.match(source, /更新下拉框选项/);
+  assert.match(source, /handleCreateCustomStyleOption/);
+  assert.match(source, /新建自定义解说风格/);
+  assert.match(source, /handleDeleteCustomStyleOption/);
+  assert.match(source, /删除这个自定义风格/);
+  assert.match(source, /event\.stopPropagation\(\)/);
   assert.match(source, /customStyleOptionsRef/);
 });
 
@@ -253,4 +262,75 @@ test('commentary log panel can collapse while expanded logs stay internally scro
   assert.equal(collapsedState.countLabel, '暂无日志');
   assert.equal(collapsedState.toggleLabel, '展开运行日志');
   assert.equal(collapsedState.emptyText, '等待开始...');
+});
+test('commentary style learner is wired into the sidebar and style APIs', () => {
+  const appSource = readFileSync(resolve(import.meta.dirname, '../App.jsx'), 'utf8');
+  const learnerSource = readFileSync(resolve(import.meta.dirname, 'CommentaryStyleLearner.jsx'), 'utf8');
+  const commentarySource = readFileSync(resolve(import.meta.dirname, 'CommentaryTab.jsx'), 'utf8');
+  const translationsSource = readFileSync(resolve(import.meta.dirname, '../i18n/translations.js'), 'utf8');
+
+  assert.match(appSource, /setActiveTab\('style-learning'\)/);
+  assert.match(appSource, /<CommentaryStyleLearner/);
+  assert.match(appSource, /openAICompatibleConfig=\{\{/);
+  assert.match(appSource, /nav\.commentaryStyleLearner/);
+  assert.doesNotMatch(learnerSource, /\/api\/settings\/douyin-cookies/);
+  assert.match(learnerSource, /\/api\/commentary\/style-learning\/jobs/);
+  assert.match(learnerSource, /language/);
+  assert.match(learnerSource, /styleLearning\.language/);
+  assert.match(learnerSource, /viewFullPrompt/);
+  assert.match(learnerSource, /downloadPrompt/);
+  assert.match(learnerSource, /downloadStyleJson/);
+  assert.match(learnerSource, /max_videos: 100/);
+  assert.match(learnerSource, /rankingCount/);
+  assert.match(learnerSource, /totalVideos/);
+  assert.match(learnerSource, /mergeStyleIntoLocalStorage/);
+  assert.match(learnerSource, /useI18n/);
+  assert.match(learnerSource, /styleLearning\.description/);
+  assert.match(translationsSource, /likes plus saves/);
+  assert.match(translationsSource, /公开主页抓到 \{total\} 条/);
+  assert.match(translationsSource, /获取解说风格/);
+  assert.match(commentarySource, /\/api\/commentary\/styles/);
+  assert.match(commentarySource, /openshorts:commentary-styles-updated/);
+});
+
+test('style learner merges learned backend styles into local custom style storage', () => {
+  const events = [];
+  global.window = {
+    localStorage: {
+      value: JSON.stringify([
+        { id: 'custom:old', label: '旧风格', prompt: '旧提示词' },
+      ]),
+      getItem() {
+        return this.value;
+      },
+      setItem(_key, value) {
+        this.value = value;
+      },
+    },
+    dispatchEvent(event) {
+      events.push(event.type);
+    },
+  };
+  global.CustomEvent = class CustomEvent {
+    constructor(type, options = {}) {
+      this.type = type;
+      this.detail = options.detail;
+    }
+  };
+
+  const merged = mergeStyleIntoLocalStorage({
+    id: 'custom:learned',
+    label: '学到的风格',
+    prompt: '先说画面动作，再给短促判断。',
+    custom: true,
+  });
+  const stored = JSON.parse(window.localStorage.value);
+
+  assert.equal(merged.id, 'custom:learned');
+  assert.equal(stored.length, 2);
+  assert.equal(stored[1].label, '学到的风格');
+  assert.deepEqual(events, ['openshorts:commentary-styles-updated']);
+
+  delete global.window;
+  delete global.CustomEvent;
 });

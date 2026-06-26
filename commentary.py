@@ -21,7 +21,7 @@ from PIL import Image
 from gemini_client import create_gemini_client, normalize_gemini_base_url
 from gemini_pool import GeminiKeyPool
 from main import detect_scenes, download_youtube_video, transcribe_video
-from resource_limits import resolve_thread_count
+from resource_limits import resolve_thread_count, resolve_worker_count
 from saasshorts import generate_voiceover
 
 
@@ -164,6 +164,10 @@ OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS = max(
     int(os.environ.get("OPENSHORTS_OPENAI_SCRIPT_REQUEST_TIMEOUT_SECONDS", "900")),
 )
 OPENAI_REQUEST_RETRIES = max(1, int(os.environ.get("OPENSHORTS_OPENAI_REQUEST_RETRIES", "3")))
+OPENAI_STREAM_DISCONNECT_RETRIES = max(
+    OPENAI_REQUEST_RETRIES,
+    int(os.environ.get("OPENSHORTS_OPENAI_STREAM_DISCONNECT_RETRIES", "5")),
+)
 OPENAI_VISUAL_MAX_TOKENS = max(1000, int(os.environ.get("OPENSHORTS_OPENAI_VISUAL_MAX_TOKENS", "6000")))
 OPENAI_SCRIPT_MAX_TOKENS = max(2000, int(os.environ.get("OPENSHORTS_OPENAI_SCRIPT_MAX_TOKENS", "64000")))
 OPENAI_AUDIO_PROBE_SECONDS = max(2.0, float(os.environ.get("OPENSHORTS_OPENAI_AUDIO_PROBE_SECONDS", "8")))
@@ -197,6 +201,16 @@ GEMINI_ANALYSIS_HEIGHT = max(144, int(os.environ.get("OPENSHORTS_GEMINI_ANALYSIS
 GEMINI_ANALYSIS_CRF = int(os.environ.get("OPENSHORTS_GEMINI_ANALYSIS_CRF", "32"))
 GEMINI_ANALYSIS_AUDIO_BITRATE = os.environ.get("OPENSHORTS_GEMINI_ANALYSIS_AUDIO_BITRATE", "48k")
 FFMPEG_THREADS = resolve_thread_count("OPENSHORTS_FFMPEG_THREADS", default_cap=8, reserve_cores=6)
+FFMPEG_VIDEO_ENCODER_THREADS = resolve_thread_count(
+    "OPENSHORTS_FFMPEG_VIDEO_ENCODER_THREADS",
+    default_cap=2,
+    reserve_cores=8,
+)
+FFMPEG_VIDEO_ENCODER_CONCURRENCY = max(
+    1,
+    min(4, resolve_worker_count("OPENSHORTS_FFMPEG_VIDEO_ENCODER_CONCURRENCY", default=1)),
+)
+_FFMPEG_VIDEO_ENCODER_SEMAPHORE = threading.BoundedSemaphore(FFMPEG_VIDEO_ENCODER_CONCURRENCY)
 GEMINI_FILE_UPLOAD_RETRIES = max(1, int(os.environ.get("OPENSHORTS_GEMINI_FILE_UPLOAD_RETRIES", "3")))
 GEMINI_FILE_PROCESSING_TIMEOUT_SECONDS = max(60, int(os.environ.get("OPENSHORTS_GEMINI_FILE_PROCESSING_TIMEOUT_SECONDS", "3600")))
 GEMINI_FILE_PROCESSING_MAX_TIMEOUT_SECONDS = max(
@@ -234,6 +248,7 @@ FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION = float(os.environ.get("OPENSHORTS_FULL
 FULL_MODE_MIN_SCENE_MATCHED_NARRATION_CHARS_ZH = int(os.environ.get("OPENSHORTS_FULL_MODE_MIN_SCENE_MATCHED_NARRATION_CHARS_ZH", "36"))
 FULL_MODE_MIN_SCENE_MATCHED_NARRATION_CHARS_OTHER = int(os.environ.get("OPENSHORTS_FULL_MODE_MIN_SCENE_MATCHED_NARRATION_CHARS_OTHER", "24"))
 FULL_MODE_NARRATION_DENSITY_MIN_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_NARRATION_DENSITY_MIN_RATIO", "0.80"))
+FULL_MODE_ENDING_CANDIDATE_MIN_FRACTION = float(os.environ.get("OPENSHORTS_FULL_MODE_ENDING_CANDIDATE_MIN_FRACTION", "0.70"))
 FULL_MODE_MIN_NARRATED_BLOCK_VOICEOVER_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_MIN_NARRATED_BLOCK_VOICEOVER_RATIO", "0.55"))
 FULL_MODE_MAX_NARRATED_BLOCK_SILENCE_SECONDS = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_NARRATED_BLOCK_SILENCE_SECONDS", "12"))
 FULL_MODE_MAX_PLAYABLE_TARGET_RATIO = float(os.environ.get("OPENSHORTS_FULL_MODE_MAX_PLAYABLE_TARGET_RATIO", "1.10"))
@@ -291,6 +306,8 @@ COMMENTARY_REPEAT_LIMIT_PHRASES = (
     "爽了爽了",
 )
 COMMENTARY_REPEATED_SENTENCE_MIN_CHARS = 16
+COMMENTARY_REPEATED_NGRAM_MIN_CHARS = 4
+COMMENTARY_REPEATED_NGRAM_MAX_CHARS = 8
 COMMENTARY_AUTO_FILLED_PLACEHOLDER_PHRASES = (
     "这一段把前后工序之间的衔接补上",
     "这一段补上后段收尾",
@@ -381,13 +398,66 @@ def _normalize_ffmpeg_command_args(cmd: List[str]) -> List[str]:
     return [binary, *(_windows_path_from_wsl(arg) if isinstance(arg, str) and arg.startswith("/mnt/") else arg for arg in cmd[1:])]
 
 
+def _is_video_codec_flag(value: str) -> bool:
+    arg = str(value or "").lower()
+    return arg in {"-c:v", "-codec:v", "-vcodec"} or arg.startswith("-c:v:") or arg.startswith("-codec:v:")
+
+
+def _ffmpeg_command_uses_libx264(cmd: List[str]) -> bool:
+    for index, arg in enumerate(cmd[:-1]):
+        if _is_video_codec_flag(arg) and str(cmd[index + 1]).lower() == "libx264":
+            return True
+    return False
+
+
+def _ffmpeg_command_has_video_encoder_thread_limit(cmd: List[str]) -> bool:
+    for index, arg in enumerate(cmd):
+        lower = str(arg).lower()
+        if lower.startswith("-threads:v") or lower.startswith("-threads:0"):
+            return True
+        if lower == "-x264-params" and index + 1 < len(cmd) and "threads=" in str(cmd[index + 1]).lower():
+            return True
+    return False
+
+
+def _limit_libx264_encoder_threads(cmd: List[str]) -> List[str]:
+    if not _ffmpeg_command_uses_libx264(cmd) or _ffmpeg_command_has_video_encoder_thread_limit(cmd):
+        return cmd
+    limited = []
+    inserted = False
+    for index, arg in enumerate(cmd):
+        limited.append(arg)
+        if (
+            not inserted
+            and str(arg).lower() == "libx264"
+            and index > 0
+            and _is_video_codec_flag(cmd[index - 1])
+        ):
+            limited.extend(["-threads:v", str(FFMPEG_VIDEO_ENCODER_THREADS)])
+            inserted = True
+    return limited
+
+
 def _limit_ffmpeg_threads(cmd: List[str]) -> List[str]:
     cmd = _normalize_ffmpeg_command_args(cmd)
     if not cmd or not _is_ffmpeg_command(cmd[0]):
         return cmd
+    cmd = _limit_libx264_encoder_threads(cmd)
     if "-threads" in cmd:
         return cmd
     return [cmd[0], "-threads", str(FFMPEG_THREADS), *cmd[1:]]
+
+
+@contextmanager
+def _ffmpeg_video_encoder_slot(cmd: List[str]):
+    if cmd and _is_ffmpeg_command(cmd[0]) and _ffmpeg_command_uses_libx264(cmd):
+        _FFMPEG_VIDEO_ENCODER_SEMAPHORE.acquire()
+        try:
+            yield
+        finally:
+            _FFMPEG_VIDEO_ENCODER_SEMAPHORE.release()
+        return
+    yield
 
 
 def _ffmpeg_output_format_args(output_path: str) -> List[str]:
@@ -396,28 +466,58 @@ def _ffmpeg_output_format_args(output_path: str) -> List[str]:
     return []
 
 
+def _summarize_ffmpeg_failure(output: str) -> str:
+    text = str(output or "").replace("\r", "\n")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    important = []
+    for line in lines:
+        lower = line.lower()
+        if lower.startswith("ffmpeg version") or lower.startswith("configuration:") or lower.startswith("libav"):
+            continue
+        if any(marker in lower for marker in ("error", "failed", "conversion failed", "no space", "invalid", "could not", "cannot", "unable")):
+            important.append(line)
+    if important:
+        summary = "\n".join(important[-12:])
+    else:
+        summary = "\n".join(lines[-20:])
+    lowered = summary.lower()
+    if "malloc" in lowered and "failed" in lowered:
+        return (
+            "FFmpeg video encoding ran out of memory while rendering commentary blocks. "
+            f"OpenShorts limits libx264 to {FFMPEG_VIDEO_ENCODER_THREADS} encoder thread(s) and "
+            f"{FFMPEG_VIDEO_ENCODER_CONCURRENCY} concurrent video encoder job(s); retry the task, "
+            "or lower OPENSHORTS_FFMPEG_VIDEO_ENCODER_THREADS / OPENSHORTS_FFMPEG_VIDEO_ENCODER_CONCURRENCY if the machine is still under memory pressure.\n"
+            f"{summary}"
+        )
+    return summary
+
+
 def _run_capture_command(cmd: List[str], cwd: Optional[str] = None):
     _raise_if_commentary_cancelled()
-    process = subprocess.Popen(
-        _limit_ffmpeg_threads(cmd),
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    _register_commentary_process(process)
-    try:
-        while True:
-            _raise_if_commentary_cancelled(process)
-            try:
-                stdout, stderr = process.communicate(timeout=0.25)
-                return process.returncode, stdout, stderr
-            except subprocess.TimeoutExpired:
-                continue
-    finally:
-        _unregister_commentary_process(process)
+    run_cmd = _limit_ffmpeg_threads(cmd)
+    with _ffmpeg_video_encoder_slot(run_cmd):
+        process = subprocess.Popen(
+            run_cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        _register_commentary_process(process)
+        try:
+            while True:
+                _raise_if_commentary_cancelled(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=0.25)
+                    return process.returncode, stdout, stderr
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            _unregister_commentary_process(process)
 
 
 def _run_command(cmd: List[str], cwd: Optional[str] = None) -> None:
@@ -428,7 +528,8 @@ def _run_command(cmd: List[str], cwd: Optional[str] = None) -> None:
             f"FFmpeg executable not found: {FFMPEG_BINARY}. Install ffmpeg or set OPENSHORTS_FFMPEG_BINARY to a valid binary."
         ) from exc
     if returncode != 0:
-        raise Exception(stderr or stdout or f"Command failed: {' '.join(cmd)}")
+        summary = _summarize_ffmpeg_failure(stderr or stdout)
+        raise Exception(summary or stderr or stdout or f"Command failed: {' '.join(cmd)}")
 
 
 def _clean_publish_text(value: str) -> str:
@@ -686,44 +787,46 @@ def _run_ffmpeg_with_progress(
 
     run_cmd = _limit_ffmpeg_threads([cmd[0], "-nostats", "-progress", "pipe:1", *cmd[1:]])
     _raise_if_commentary_cancelled()
-    process = subprocess.Popen(
-        run_cmd,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-    _register_commentary_process(process)
-    output_lines = []
-    last_percent = -1
-    try:
-        if process.stdout:
-            for raw_line in process.stdout:
+    with _ffmpeg_video_encoder_slot(run_cmd):
+        process = subprocess.Popen(
+            run_cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        _register_commentary_process(process)
+        output_lines = []
+        last_percent = -1
+        try:
+            if process.stdout:
+                for raw_line in process.stdout:
+                    _raise_if_commentary_cancelled(process)
+                    line = raw_line.strip()
+                    if line:
+                        output_lines.append(line)
+                    if "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    seconds = _parse_ffmpeg_progress_seconds(key, value)
+                    if seconds is None:
+                        continue
+                    percent = int(max(0, min(99, (seconds / duration) * 100)))
+                    if percent >= last_percent + 5:
+                        last_percent = percent
+                        progress(f"{label}: {percent}%")
+            while process.poll() is None:
                 _raise_if_commentary_cancelled(process)
-                line = raw_line.strip()
-                if line:
-                    output_lines.append(line)
-                if "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                seconds = _parse_ffmpeg_progress_seconds(key, value)
-                if seconds is None:
-                    continue
-                percent = int(max(0, min(99, (seconds / duration) * 100)))
-                if percent >= last_percent + 5:
-                    last_percent = percent
-                    progress(f"{label}: {percent}%")
-        while process.poll() is None:
-            _raise_if_commentary_cancelled(process)
-            time.sleep(0.1)
-        return_code = process.returncode
-    finally:
-        _unregister_commentary_process(process)
+                time.sleep(0.1)
+            return_code = process.returncode
+        finally:
+            _unregister_commentary_process(process)
     if return_code != 0:
-        raise Exception("\n".join(output_lines[-80:]) or f"Command failed: {' '.join(cmd)}")
+        summary = _summarize_ffmpeg_failure("\n".join(output_lines[-80:]))
+        raise Exception(summary or "\n".join(output_lines[-80:]) or f"Command failed: {' '.join(cmd)}")
     progress(f"{label}: 100%")
 
 
@@ -1024,7 +1127,7 @@ def _format_source_commentary_timeline(
     return "\n".join(lines)
 
 
-def _should_check_source_commentary_for_audio_muting(
+def _should_transcribe_source_commentary_context(
     original_audio_volume: float,
     pause_original_audio_volume: float,
     target_duration: str,
@@ -1479,16 +1582,25 @@ def _style_grounding_instruction(style: str, language: str) -> str:
     return "Keep the selected style grounded in the visible action of each timestamped range."
 
 
-def _custom_style_instruction(custom_style_prompt: Optional[str]) -> str:
-    prompt = re.sub(r"\s+", " ", (custom_style_prompt or "").strip())
-    if not prompt:
+def _custom_style_instruction(custom_style_prompt: Optional[str], language: str = "") -> str:
+    raw_prompt = str(custom_style_prompt or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    raw_prompt = "\n".join(re.sub(r"[ \t\f\v]+", " ", line).strip() for line in raw_prompt.split("\n")).strip()
+    raw_prompt = re.sub(r"\n{3,}", "\n\n", raw_prompt)
+    if not raw_prompt:
         return ""
-    prompt = prompt[:2000]
+    prompt = raw_prompt[:5000]
+    operation_logic_instruction = ""
+    if _custom_style_requires_operation_logic(raw_prompt, language):
+        operation_logic_instruction = (
+            "The custom style explicitly asks for process/operation/step logic, purpose, reason, principle, or why-explanation. "
+            "For that style, each ordinary process block must first name the visible action/tool/material, then add a concise purpose, operation logic, or visible result for that same timestamp range. "
+            "Do not return action-only labels when the custom style asks for explanation. "
+        )
     return (
         "\n- Custom user style instruction is a binding production requirement, not a loose tone hint. "
-        "Apply it to every narrated block's wording, pacing, point of view, and explanatory depth while preserving visual grounding, timeline sync, factuality, safety, and JSON schema rules. "
-        "If the custom style asks for process, operation, purpose, why, logic, or industrial/mechanical explanation, each ordinary process block must first name the visible action/tool/material, then add a concise purpose, operation logic, or visible result for that same timestamp range. "
-        "Do not return action-only labels when the custom style asks for explanation. "
+        "Apply it to every narrated block's wording, pacing, point of view, and explanatory depth as long as it does not conflict with visual grounding, timeline sync, factuality, safety, and JSON schema rules. "
+        f"{operation_logic_instruction}"
+        "If the custom style asks for verb-first, action-first, short dense sentences, technical plainspoken narration, or tool+action+object structure, do not simply translate visual_facts as 'worker/hand/tool does X' repeatedly. Vary the grammatical subject around concrete tools, materials, parts, actions, and results while staying evidence-based. "
         "Use only current block visual_facts, evidence_timestamps, visible frame evidence, or transcript evidence for any purpose/result claim. Custom prompt: "
         f"{prompt}"
     )
@@ -1852,6 +1964,409 @@ def _candidate_segment_speed(segment: Dict) -> float:
     )
 
 
+ENDING_POSITIVE_KEYWORDS = (
+    "final",
+    "finish",
+    "finished",
+    "finishing",
+    "completion",
+    "completed",
+    "complete",
+    "closure",
+    "closing",
+    "closed",
+    "wrap-up",
+    "wrap up",
+    "payoff",
+    "result",
+    "reveal",
+    "showcase",
+    "test",
+    "testing",
+    "tested",
+    "assembled",
+    "installed",
+    "installation",
+    "clean ending",
+    "natural scene resolution",
+    "packaging",
+    "package",
+    "packaged",
+    "seal",
+    "sealed",
+    "box",
+    "boxed",
+    "delivery",
+    "成品",
+    "完成",
+    "完工",
+    "结束",
+    "收尾",
+    "封口",
+    "封盒",
+    "合盖",
+    "装盒",
+    "包装",
+    "打包",
+    "入盒",
+    "盒子",
+    "检测",
+    "测试",
+    "试用",
+    "展示",
+    "亮相",
+    "验收",
+    "成型",
+    "装好",
+    "装配完成",
+)
+
+ENDING_NEGATIVE_KEYWORDS = (
+    "setup",
+    "preparation",
+    "preparing",
+    "beginning",
+    "start",
+    "starts",
+    "initial",
+    "early",
+    "access",
+    "selecting",
+    "selection",
+    "tool preparation",
+    "transition",
+    "waiting",
+    "pause",
+    "ongoing",
+    "repeated",
+    "repetitive",
+    "准备",
+    "开始",
+    "前期",
+    "取料",
+    "选料",
+    "等待",
+    "过渡",
+    "重复",
+)
+
+
+def _visual_item_text_for_ending_detection(item: Dict) -> str:
+    parts = []
+    for key in (
+        "reason",
+        "process_stage",
+        "visual",
+        "edit_value",
+        "pace",
+        "title",
+        "summary",
+        "label",
+    ):
+        value = str(item.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _visual_text_has_ending_signal(text: str) -> bool:
+    haystack = str(text or "").lower()
+    if not haystack:
+        return False
+    return any(keyword in haystack for keyword in ENDING_POSITIVE_KEYWORDS)
+
+
+def _visual_text_is_only_weak_ending_signal(text: str) -> bool:
+    haystack = str(text or "").lower()
+    if not haystack:
+        return True
+    has_negative = any(keyword in haystack for keyword in ENDING_NEGATIVE_KEYWORDS)
+    has_strong_positive = any(
+        keyword in haystack
+        for keyword in (
+            "final",
+            "finished",
+            "completion",
+            "completed",
+            "closure",
+            "closing",
+            "closed",
+            "result",
+            "payoff",
+            "reveal",
+            "showcase",
+            "test",
+            "assembled",
+            "installed",
+            "packaging",
+            "package",
+            "sealed",
+            "box",
+            "natural scene resolution",
+            "成品",
+            "完成",
+            "完工",
+            "结束",
+            "收尾",
+            "封口",
+            "封盒",
+            "合盖",
+            "装盒",
+            "包装",
+            "打包",
+            "入盒",
+            "测试",
+            "试用",
+            "展示",
+            "验收",
+        )
+    )
+    return has_negative and not has_strong_positive
+
+
+def _ending_signal_strength(text: str) -> float:
+    haystack = str(text or "").lower()
+    if not haystack:
+        return 0.0
+    strength = 0.0
+    if any(
+        keyword in haystack
+        for keyword in (
+            "natural scene resolution",
+            "wrap-up",
+            "wrap up",
+            "final box",
+            "final package",
+            "finishing package",
+            "finished package",
+            "closing flaps",
+            "closed box",
+            "sealed box",
+            "装盒",
+            "入盒",
+            "合盖",
+            "封盒",
+            "最终盒",
+            "收尾",
+        )
+    ):
+        strength = max(strength, 9.0)
+    if any(
+        keyword in haystack
+        for keyword in (
+            "packaging",
+            "package",
+            "packaged",
+            "wrapped",
+            "wrapping",
+            "folding",
+            "sealed",
+            "seal",
+            "box",
+            "boxed",
+            "delivery",
+            "包装",
+            "打包",
+            "折好",
+            "封口",
+            "盒子",
+        )
+    ):
+        strength = max(strength, 8.0)
+    if any(
+        keyword in haystack
+        for keyword in (
+            "test",
+            "testing",
+            "tested",
+            "installed",
+            "installation",
+            "assembled",
+            "showcase",
+            "result reveal",
+            "completed product",
+            "finished product",
+            "测试",
+            "试用",
+            "安装",
+            "装配完成",
+            "成品展示",
+            "验收",
+        )
+    ):
+        strength = max(strength, 7.0)
+    if any(
+        keyword in haystack
+        for keyword in (
+            "payoff",
+            "result",
+            "reveal",
+            "final",
+            "finished",
+            "finishing",
+            "completion",
+            "completed",
+            "complete",
+            "closure",
+            "closing",
+            "closed",
+            "成品",
+            "完成",
+            "完工",
+            "结束",
+            "亮相",
+            "成型",
+            "装好",
+        )
+    ):
+        strength = max(strength, 5.0)
+    if any(keyword in haystack for keyword in ("polishing", "polish", "cleaning", "inspection", "inspect", "抛光", "清洁", "擦拭", "检查")):
+        strength = max(strength, 3.0)
+    if _visual_text_is_only_weak_ending_signal(text):
+        strength = min(strength, 2.0)
+    return strength
+
+
+def _candidate_segment_ending_strength(segment: Dict, visual_analysis: Optional[Dict]) -> float:
+    strength = _ending_signal_strength(_visual_item_text_for_ending_detection(segment))
+    for observation in _candidate_segment_observations(segment, visual_analysis):
+        strength = max(strength, _ending_signal_strength(_visual_item_text_for_ending_detection(observation)))
+    return strength
+
+
+def _candidate_segment_has_ending_signal(segment: Dict, visual_analysis: Optional[Dict]) -> bool:
+    text = _visual_item_text_for_ending_detection(segment)
+    if _visual_text_has_ending_signal(text) and not _visual_text_is_only_weak_ending_signal(text):
+        return True
+    for observation in _candidate_segment_observations(segment, visual_analysis):
+        text = _visual_item_text_for_ending_detection(observation)
+        if _visual_text_has_ending_signal(text) and not _visual_text_is_only_weak_ending_signal(text):
+            return True
+    return False
+
+
+def _candidate_segment_is_ending_candidate(
+    segment: Dict,
+    visual_analysis: Optional[Dict],
+    source_duration: float,
+    min_fraction: Optional[float] = None,
+) -> bool:
+    duration = max(1.0, float(source_duration or 0.0))
+    threshold_fraction = (
+        FULL_MODE_ENDING_CANDIDATE_MIN_FRACTION
+        if min_fraction is None
+        else max(0.0, min(1.0, float(min_fraction)))
+    )
+    try:
+        start = float(segment.get("start"))
+        end = float(segment.get("end"))
+    except (TypeError, ValueError):
+        return False
+    if end <= start:
+        return False
+    midpoint = (start + end) / 2.0
+    if midpoint < duration * threshold_fraction and end < duration * (threshold_fraction + 0.08):
+        return False
+    if _candidate_segment_importance(segment, visual_analysis) < 3.5:
+        return False
+    return _candidate_segment_ending_strength(segment, visual_analysis) >= 3.0 and _candidate_segment_has_ending_signal(segment, visual_analysis)
+
+
+def _visual_analysis_ending_candidate_segments(
+    segments: List[Dict],
+    visual_analysis: Optional[Dict],
+    source_duration: float,
+) -> List[Dict]:
+    return [
+        segment
+        for segment in segments or []
+        if _candidate_segment_is_ending_candidate(segment, visual_analysis, source_duration)
+    ]
+
+
+def _visual_analysis_terminal_ending_candidates(
+    segments: List[Dict],
+    visual_analysis: Optional[Dict],
+    source_duration: float,
+) -> List[Dict]:
+    candidates = _visual_analysis_ending_candidate_segments(segments, visual_analysis, source_duration)
+    if not candidates:
+        return []
+    best_strength = max(
+        _candidate_segment_ending_strength(segment, visual_analysis)
+        for segment in candidates
+    )
+    return [
+        segment
+        for segment in candidates
+        if _candidate_segment_ending_strength(segment, visual_analysis) >= best_strength - 0.25
+    ]
+
+
+def _selected_segments_overlap_required_ending(
+    selected: List[Dict],
+    required_segment: Dict,
+) -> bool:
+    try:
+        required_start = float(required_segment.get("start"))
+        required_end = float(required_segment.get("end"))
+    except (TypeError, ValueError):
+        return True
+    required_duration = max(0.0, required_end - required_start)
+    if required_duration <= 0:
+        return True
+    for segment in selected or []:
+        try:
+            start = float(segment.get("start"))
+            end = float(segment.get("end"))
+        except (TypeError, ValueError):
+            continue
+        overlap = _segment_overlap_seconds(start, end, required_start, required_end)
+        if overlap >= min(required_duration * 0.35, 6.0):
+            return True
+    return False
+
+
+def _selected_segments_overlap_any_ending_candidate(
+    selected: List[Dict],
+    ending_candidates: List[Dict],
+) -> bool:
+    return any(
+        _selected_segments_overlap_required_ending(selected, candidate)
+        for candidate in ending_candidates or []
+    )
+
+
+def _openai_required_ending_candidate(
+    segments: List[Dict],
+    visual_analysis: Optional[Dict],
+    source_duration: float,
+    selected: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
+    candidates = _visual_analysis_terminal_ending_candidates(segments, visual_analysis, source_duration)
+    if not candidates:
+        return None
+    if _selected_segments_overlap_any_ending_candidate(selected or [], candidates):
+        return None
+    selected_latest = _openai_plan_latest_end(selected or [])
+    later_candidates = [
+        segment
+        for segment in candidates
+        if float(segment.get("end") or 0.0) > selected_latest + FULL_MODE_VALIDATION_EPSILON_SECONDS
+    ]
+    pool = later_candidates or candidates
+    return max(
+        pool,
+        key=lambda segment: (
+            _candidate_segment_ending_strength(segment, visual_analysis),
+            _candidate_segment_importance(segment, visual_analysis),
+            float(segment.get("interest_score") or 0.0),
+            float(segment.get("end") or 0.0) / max(1.0, float(source_duration or 0.0)),
+            -float(segment.get("playable_seconds") or 0.0),
+        ),
+    )
+
+
 def _openai_plan_segment_id(segment: Dict) -> int:
     try:
         return int(segment.get("candidate_index"))
@@ -1982,6 +2497,7 @@ def _build_openai_candidate_edit_plan(
             "reason": str(item.get("reason") or "AI visual candidate").strip(),
             "speed_reason": str(item.get("speed_reason") or "").strip(),
             "importance": _candidate_segment_importance(item, visual_analysis),
+            "interest_score": _coerce_visual_score(item.get("interest_score")),
             "edit_value": str(item.get("edit_value") or "").strip(),
             "evidence_timestamps": evidence_timestamps,
         })
@@ -2045,6 +2561,15 @@ def _build_openai_candidate_edit_plan(
         )
         selected.append(late_segment)
         total += float(late_segment.get("playable_seconds") or 0.0)
+    required_ending = _openai_required_ending_candidate(
+        raw_segments,
+        visual_analysis,
+        source_duration,
+        selected=selected,
+    )
+    if required_ending and not _selected_segments_overlap_required_ending(selected, required_ending):
+        selected.append(required_ending)
+        total += float(required_ending.get("playable_seconds") or 0.0)
     selected, total = _trim_openai_candidate_selection_to_window(
         selected,
         total,
@@ -2454,27 +2979,36 @@ def _normalize_narration_blocks(raw_blocks: List[Dict], duration: float) -> List
                 normalized_block[key] = item[key]
         normalized.append(normalized_block)
     normalized.sort(key=lambda block: block["start"])
-    merged = []
+    merged: List[Dict] = []
     for block in normalized:
         if (
             merged
-            and bool(merged[-1].get("pause"))
             and bool(block.get("pause"))
+            and bool(merged[-1].get("pause"))
+            and abs(_safe_video_speed(block.get("video_speed")) - _safe_video_speed(merged[-1].get("video_speed"))) <= 0.001
             and float(block.get("start") or 0.0) <= float(merged[-1].get("end") or 0.0) + 0.3
         ):
             previous = merged[-1]
-            previous["end"] = round(max(float(previous["end"]), float(block["end"])), 3)
+            previous["end"] = round(max(float(previous.get("end") or 0.0), float(block.get("end") or 0.0)), 3)
             visual_parts = [
                 str(previous.get("visual") or "").strip(),
                 str(block.get("visual") or "").strip(),
             ]
-            previous["visual"] = "; ".join(part for part in visual_parts if part)
-            previous["video_speed"] = min(
-                _safe_video_speed(previous.get("video_speed")),
-                _safe_video_speed(block.get("video_speed")),
-            )
-            previous["rate"] = "+0%"
-            previous["pitch"] = "+0Hz"
+            previous["visual"] = "; ".join(dict.fromkeys(part for part in visual_parts if part))
+            facts = []
+            for source in (previous, block):
+                values = source.get("visual_facts")
+                if isinstance(values, list):
+                    facts.extend(str(value).strip() for value in values if str(value).strip())
+            if facts:
+                previous["visual_facts"] = list(dict.fromkeys(facts))
+            evidence = []
+            for source in (previous, block):
+                values = source.get("evidence_timestamps")
+                if isinstance(values, list):
+                    evidence.extend(value for value in values if isinstance(value, (int, float)))
+            if evidence:
+                previous["evidence_timestamps"] = sorted(set(round(float(value), 3) for value in evidence))
             continue
         merged.append(block)
     return merged
@@ -2556,16 +3090,22 @@ def _summarize_auto_video_speed(blocks: List[Dict], enabled: bool) -> Dict:
 
 
 def _narration_blocks_to_edit_segments(blocks: List[Dict]) -> List[Dict]:
-    return [
-        {
+    segments = []
+    for block in blocks or []:
+        segment = {
             "start": block["start"],
             "end": block["end"],
             "reason": block.get("visual") or "scene-matched narration block",
-            "video_speed": _safe_video_speed(block.get("video_speed")),
-            "speed_reason": str(block.get("speed_reason") or "").strip(),
         }
-        for block in blocks or []
-    ]
+        speed = _safe_video_speed(block.get("video_speed"))
+        speed_reason = str(block.get("speed_reason") or "").strip()
+        if speed > 1.0001:
+            segment["video_speed"] = speed
+            segment["speed_reason"] = speed_reason
+        elif speed_reason:
+            segment["speed_reason"] = speed_reason
+        segments.append(segment)
+    return segments
 
 
 def _commit_narration_blocks_to_script(data: Dict, blocks: List[Dict]) -> None:
@@ -2863,7 +3403,7 @@ def _repair_full_mode_pause_blocks(blocks: List[Dict], min_visual_seconds: float
     if not blocks:
         return blocks
     max_pause_seconds = max(1.0, float(max_pause_seconds if max_pause_seconds is not None else FULL_MODE_MAX_PAUSE_SECONDS))
-    repaired = [dict(block) for block in blocks]
+    repaired = _normalize_narration_blocks([dict(block) for block in blocks], max(float(block.get("end") or 0.0) for block in blocks))
     for block in repaired:
         if not bool(block.get("pause")):
             continue
@@ -2897,7 +3437,7 @@ def _repair_full_mode_pause_blocks(blocks: List[Dict], min_visual_seconds: float
             continue
         block["end"] = round(float(block.get("end") or start) + (room * speed), 3)
         visual_seconds += room
-    return repaired
+    return _normalize_narration_blocks(repaired, max(float(block.get("end") or 0.0) for block in repaired))
 
 
 def _repair_full_mode_overselected_visual_budget(
@@ -3028,6 +3568,26 @@ def _edit_segments_playable_timeline(edit_segments: List[Dict]) -> Tuple[List[Di
     return timeline, cursor
 
 
+def _edit_segments_from_source_timeline(source_edit_timeline: List[Dict]) -> List[Dict]:
+    segments = []
+    for item in source_edit_timeline or []:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("source_start", item.get("start"))
+        end = item.get("source_end", item.get("end"))
+        if start is None or end is None:
+            continue
+        segment = {
+            "start": start,
+            "end": end,
+            "reason": item.get("reason", ""),
+            "video_speed": item.get("video_speed", item.get("speed", 1.0)),
+            "speed_reason": item.get("speed_reason", ""),
+        }
+        segments.append(segment)
+    return segments
+
+
 def _remap_transcript_to_edited_timeline(transcript: Optional[Dict], edit_timeline: List[Dict]) -> Dict:
     if not isinstance(transcript, dict):
         return {"text": "", "segments": [], "language": "unknown"}
@@ -3153,6 +3713,146 @@ def _script_from_full_source_edit_plan(
     }
     _normalize_script_timeline(script, safe_duration, target_duration, "")
     return script
+
+
+def _edited_visual_plan_observation_text(
+    visual_analysis: Optional[Dict],
+    start: float,
+    end: float,
+    limit: int = 4,
+) -> List[str]:
+    if not visual_analysis:
+        return []
+    items = []
+    for item in visual_analysis.get("observations") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            timestamp = float(item.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        if not (start - 0.35 <= timestamp <= end + 0.35):
+            continue
+        parts = []
+        for key in ("process_stage", "visual", "reason"):
+            text = re.sub(r"\s+", " ", str(item.get(key) or "").strip())
+            if text:
+                parts.append(text)
+        if parts:
+            items.append(f"{timestamp:.3f}s: {'; '.join(parts)}")
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _build_locked_edited_video_narration_plan(
+    edited_visual_analysis: Optional[Dict],
+    edit_timeline: List[Dict],
+    edited_duration: float,
+    language: str,
+) -> Optional[Dict]:
+    duration = max(0.0, float(edited_duration or 0.0))
+    if duration <= 0 or not edited_visual_analysis:
+        return None
+    frame_timestamps = [
+        timestamp
+        for timestamp in _visual_analysis_frame_timestamps(edited_visual_analysis)
+        if 0.0 <= timestamp <= duration
+    ]
+    if len(frame_timestamps) < 2:
+        return None
+
+    timeline_boundaries = {0.0, duration}
+    for item in edit_timeline or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("output_start", "output_end"):
+            try:
+                value = float(item.get(key))
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= value <= duration:
+                timeline_boundaries.add(round(value, 3))
+
+    target_count = _target_narration_block_count_for_target_seconds(duration)
+    max_block_seconds = 16.0
+    min_block_seconds = 4.0
+    boundaries = sorted(timeline_boundaries)
+    if len(boundaries) <= 2:
+        boundaries = [0.0, duration]
+        current = max_block_seconds
+        while current < duration - min_block_seconds:
+            boundaries.append(round(current, 3))
+            current += max_block_seconds
+        boundaries = sorted(set(boundaries))
+    else:
+        while len(boundaries) < target_count + 1:
+            longest_index = None
+            longest_duration = 0.0
+            for index in range(len(boundaries) - 1):
+                span = boundaries[index + 1] - boundaries[index]
+                if span > longest_duration and span >= max_block_seconds * 1.4:
+                    longest_duration = span
+                    longest_index = index
+            if longest_index is None:
+                break
+            start = boundaries[longest_index]
+            end = boundaries[longest_index + 1]
+            midpoint = (start + end) / 2.0
+            evidence_inside = [timestamp for timestamp in frame_timestamps if start + 0.75 <= timestamp <= end - 0.75]
+            if evidence_inside:
+                midpoint = min(evidence_inside, key=lambda timestamp: abs(timestamp - midpoint))
+            boundaries.append(round(midpoint, 3))
+            boundaries = sorted(set(boundaries))
+
+    blocks = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end - start < 1.0:
+            continue
+        evidence = _visual_analysis_evidence_timestamps_for_range(
+            edited_visual_analysis,
+            start,
+            end,
+            limit=4,
+        )
+        evidence = [timestamp for timestamp in evidence if start <= float(timestamp) <= end]
+        if not evidence:
+            continue
+        observations = _edited_visual_plan_observation_text(edited_visual_analysis, start, end)
+        visual = _limit_text_chars(
+            re.sub(r"\s+", " ", " | ".join(observations)).strip(),
+            320,
+        )
+        if not visual:
+            visual = f"Edited-video visual evidence from {start:.1f}s to {end:.1f}s."
+        playable_seconds = max(0.0, end - start)
+        blocks.append({
+            "index": len(blocks) + 1,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "visual": visual,
+            "visual_facts": observations[:4] or [visual],
+            "evidence_timestamps": evidence,
+            "pause": False,
+            "video_speed": 1.0,
+            "speed_reason": "",
+            "playable_seconds": round(playable_seconds, 3),
+            "min_narration_chars": _minimum_sync_narration_chars_for_visual_duration(playable_seconds, language),
+        })
+    if not blocks:
+        return None
+    playable_seconds = sum(_block_visual_duration(block) for block in blocks)
+    if playable_seconds < _full_mode_min_playable_visual_seconds(duration, duration) - FULL_MODE_VALIDATION_EPSILON_SECONDS:
+        return None
+    return {
+        "target_seconds": round(duration, 3),
+        "min_seconds": _full_mode_min_playable_visual_seconds(duration, duration),
+        "max_seconds": _full_mode_max_playable_visual_seconds(duration, duration),
+        "playable_seconds": playable_seconds,
+        "source_seconds": sum(_block_source_duration(block) for block in blocks),
+        "blocks": blocks,
+        "locked_edited_video_timeline": True,
+    }
 
 
 def _blocks_from_edited_timeline_script(
@@ -3459,24 +4159,14 @@ def _custom_style_requires_operation_logic(custom_style_prompt: Optional[str], l
         return False
     lower_prompt = prompt.lower()
     if (language or "").lower().startswith("zh"):
-        strong_markers = (
-            "解释操作逻辑",
-            "操作逻辑",
-            "流程逻辑",
-            "工序逻辑",
-            "这一步目的",
-            "目的层",
-            "逻辑层",
-            "动作层",
-            "结果层",
-        )
-        if any(marker in prompt for marker in strong_markers):
-            return True
-        process_markers = ("工业", "机械", "设备", "工序", "流程", "操作", "加工", "回收", "生产")
-        explanation_markers = ("逻辑", "目的", "解释", "关键", "原因", "原理", "作用")
-        return any(marker in prompt for marker in process_markers) and any(
-            marker in prompt for marker in explanation_markers
-        )
+        compact_prompt = re.sub(r"\s+", "", prompt)
+        return bool(re.search(
+            r"操作逻辑|流程逻辑|工序逻辑|步骤逻辑|每(?:一)?步(?:的)?目的|这一步(?:的)?目的|"
+            r"(?:解释|讲清|说明|拆解).{0,16}(?:操作|流程|工序|步骤|加工|制作|生产).{0,16}(?:逻辑|目的|原因|原理|作用|为什么|为何)|"
+            r"(?:操作|流程|工序|步骤|加工|制作|生产).{0,16}(?:逻辑|目的|原因|原理|作用|为什么|为何)|"
+            r"(?:逻辑|目的|原因|原理|作用|为什么|为何).{0,16}(?:操作|流程|工序|步骤|加工|制作|生产)",
+            compact_prompt,
+        ))
     return bool(re.search(
         r"operation logic|process logic|why|purpose|explain(?:s|ing)? the process|mechanical explanation|industrial explanation",
         lower_prompt,
@@ -3489,9 +4179,13 @@ def _narration_has_operation_logic(text: str, language: str) -> bool:
         return False
     if (language or "").lower().startswith("zh"):
         return bool(re.search(
-            r"为了|用来|便于|方便|防止|避免|这样(?:能|可以|才|就)|这么做|"
+            r"为了|用来|便于|方便|防止|避免|这么做|"
             r"这一步(?:是|要|先|主要|的目的)|主要是|目的|关键是|好让|"
-            r"让.{0,16}(?:能|可以)|就能|才能|保证|保持|为后面|给后面|后续|下一步|"
+            r"这样[^，。！？；;,.!?]{0,18}(?:能|可以|才|就|会|更|变得|方便|稳|准|快|顺|干净|清楚|容易|"
+            r"提升|提高|减少|降低|避免|防止|保证|保持|对应|形成|完成|固定|稳定)|"
+            r"让[^，。！？；;,.!?]{0,20}(?:能|可以|更|变得|方便|稳|准|快|顺|干净|清楚|容易|"
+            r"提升|提高|减少|降低|避免|防止|保证|保持|形成|完成|固定|稳定)|"
+            r"就能|才能|保证|保持|为后面|给后面|后续|下一步|"
             r"原因|原理|作用|因为|所以|使(?!用).{0,12}(?:更|能|可以)",
             narration,
         ))
@@ -3523,6 +4217,192 @@ def _custom_style_process_block_like(block: Dict, language: str) -> bool:
         combined,
         flags=re.IGNORECASE,
     ))
+
+
+def _custom_style_requires_compact_action_diction(custom_style_prompt: Optional[str], language: str) -> bool:
+    prompt = re.sub(r"\s+", " ", str(custom_style_prompt or "")).strip()
+    if not prompt:
+        return False
+    lower_prompt = prompt.lower()
+    if (language or "").lower().startswith("zh"):
+        markers = (
+            "动词开头",
+            "短句密集",
+            "技术白描",
+            "工具+动作+对象",
+            "三要素公式",
+            "结果导向",
+            "精准命名",
+            "模糊指代",
+            "单句≤",
+            "单句<=",
+            "单句不超过",
+        )
+        return any(marker in prompt for marker in markers)
+    return bool(re.search(
+        r"verb[- ]first|action[- ]first|compact sentences|short dense sentences|"
+        r"tool\s*\+\s*action\s*\+\s*object|technical plainspoken|avoid vague subjects",
+        lower_prompt,
+    ))
+
+
+def _zh_narration_clauses(text: str) -> List[str]:
+    return [
+        clause.strip()
+        for clause in re.split(r"[\u3002\uff01\uff1f!?;\uff1b\uff0c,\n\r]+", str(text or ""))
+        if clause.strip()
+    ]
+
+
+def _zh_narration_sentences(text: str) -> List[str]:
+    return [
+        sentence.strip()
+        for sentence in re.split(r"[\u3002\uff01\uff1f!?;\uff1b\n\r]+", str(text or ""))
+        if sentence.strip()
+    ]
+
+
+def _zh_clause_generic_subject_prefix(clause: str) -> Optional[str]:
+    text = re.sub(r"\s+", "", str(clause or "")).strip("，,。！？!?；;：:")
+    if not text:
+        return None
+    text = re.sub(r"^(?:接着|随后|然后|再|继续|最后|同时|这时|先|开始|直接|慢慢|马上|把|将|用){0,3}", "", text)
+    generic_subjects = (
+        "工作人员",
+        "工人",
+        "师傅",
+        "男人",
+        "男子",
+        "女人",
+        "女子",
+        "两人",
+        "三人",
+        "多人",
+        "双手",
+        "手指",
+        "手臂",
+        "手掌",
+        "手",
+        "工具",
+    )
+    for subject in generic_subjects:
+        if text.startswith(subject):
+            return subject
+    return None
+
+
+def _custom_style_compact_action_failure_details(
+    data: Dict,
+    language: str,
+    custom_style_prompt: Optional[str],
+    duration: Optional[float] = None,
+) -> Optional[Dict]:
+    if not _custom_style_requires_compact_action_diction(custom_style_prompt, language):
+        return None
+    blocks = data.get("narration_blocks") or []
+    if duration is not None:
+        try:
+            blocks = _normalize_narration_blocks(blocks, float(duration or 0.0))
+        except Exception:
+            blocks = [block for block in blocks if isinstance(block, dict)]
+    spoken_blocks = [
+        block for block in blocks
+        if isinstance(block, dict) and not bool(block.get("pause")) and str(block.get("narration") or "").strip()
+    ]
+    narration = _narration_from_blocks({"narration_blocks": spoken_blocks}) or str(data.get("narration") or "")
+    compact_narration = re.sub(r"\s+", "", narration)
+    if not compact_narration:
+        return None
+
+    if not (language or "").lower().startswith("zh"):
+        return None
+
+    all_clauses = _zh_narration_clauses(narration)
+    all_sentences = _zh_narration_sentences(narration)
+    if len(all_clauses) < 8:
+        return None
+
+    generic_examples = []
+    generic_lead_count = 0
+    for block_index, block in enumerate(spoken_blocks or [], start=1):
+        block_narration = str(block.get("narration") or "")
+        for clause in _zh_narration_clauses(block_narration):
+            subject = _zh_clause_generic_subject_prefix(clause)
+            if not subject:
+                continue
+            generic_lead_count += 1
+            if len(generic_examples) < 10:
+                generic_examples.append({
+                    "block_index": block_index,
+                    "subject": subject,
+                    "clause": _limit_text_chars(clause, 60),
+                    "visual": _limit_text_chars(str(block.get("visual") or ""), 80),
+                })
+
+    person_terms = ("工人", "工作人员", "师傅", "男人", "男子", "女人", "女子")
+    generic_terms = person_terms + ("双手", "手指", "手臂", "手掌", "手", "工具")
+    term_counts = {term: compact_narration.count(term) for term in generic_terms}
+    overused_terms = {
+        term: count
+        for term, count in term_counts.items()
+        if count > max(3, math.ceil(max(1, len(spoken_blocks)) * (0.35 if term in person_terms else 0.65)))
+    }
+
+    sentence_lengths = [len(re.sub(r"\s+", "", sentence)) for sentence in all_sentences]
+    long_sentences = [
+        {"length": length, "sentence": _limit_text_chars(sentence, 70)}
+        for sentence, length in zip(all_sentences, sentence_lengths)
+        if length > 24
+    ]
+    average_sentence_length = sum(sentence_lengths) / max(1, len(sentence_lengths))
+
+    failures = []
+    generic_threshold = max(6, math.ceil(len(all_clauses) * 0.22))
+    if generic_lead_count > generic_threshold:
+        failures.append("too many clauses start with generic people/body/tool subjects instead of action, tool, material, or result wording")
+    if overused_terms and generic_lead_count >= max(4, math.ceil(len(all_clauses) * 0.14)):
+        failures.append("generic subjects are repeated too often for the selected action-first custom style")
+    long_threshold = max(4, math.ceil(len(all_sentences) * 0.30))
+    if long_sentences and (len(long_sentences) > long_threshold or average_sentence_length > 22.0):
+        failures.append("sentences are too long for the selected compact short-sentence custom style")
+    if not failures:
+        return None
+    return {
+        "failures": failures,
+        "clause_count": len(all_clauses),
+        "sentence_count": len(all_sentences),
+        "generic_lead_count": generic_lead_count,
+        "generic_lead_threshold": generic_threshold,
+        "overused_generic_terms": overused_terms,
+        "average_sentence_length": round(average_sentence_length, 1),
+        "long_sentence_count": len(long_sentences),
+        "long_sentence_threshold": long_threshold,
+        "generic_lead_examples": generic_examples,
+        "long_sentence_examples": long_sentences[:6],
+    }
+
+
+def _validate_custom_style_compact_action_diction(
+    data: Dict,
+    language: str,
+    custom_style_prompt: Optional[str],
+    duration: Optional[float] = None,
+) -> None:
+    details = _custom_style_compact_action_failure_details(data, language, custom_style_prompt, duration)
+    if not details:
+        return
+    raise Exception(
+        "Custom style narration quality validation failed. "
+        "The custom_style_prompt asks for compact action-first technical narration, but the script relies too much on generic subjects such as workers, hands, or tools, or uses sentences that are too long for the selected style. "
+        f"Failures: {details.get('failures')}. "
+        f"Generic-led clauses: {details.get('generic_lead_count')}/{details.get('clause_count')} "
+        f"(allowed about {details.get('generic_lead_threshold')}). "
+        f"Overused generic terms: {json.dumps(details.get('overused_generic_terms') or {}, ensure_ascii=False)}. "
+        f"Long sentences: {details.get('long_sentence_count')}/{details.get('sentence_count')} "
+        f"(average length {details.get('average_sentence_length')}). "
+        f"Examples: {json.dumps((details.get('generic_lead_examples') or [])[:8], ensure_ascii=False)}. "
+        "Rewrite with concrete tool/material/action/result phrasing, varied subjects, and short scene-matched clauses. Do not invent unsupported details."
+    )
 
 
 def _custom_style_operation_logic_failure_details(
@@ -3704,7 +4584,11 @@ def _normalize_script_timeline(data: Dict, duration: float, target_duration: str
 def _normalize_script_narration(data: Dict) -> str:
     narration = str(data.get("narration") or "").strip()
     block_narration = _narration_from_blocks(data)
-    if block_narration:
+    if block_narration and (
+        not narration
+        or _contains_visual_analysis_label_artifact(narration, "zh")
+        or not re.search(r"[\u3400-\u9fff]", narration)
+    ):
         narration = block_narration
     return narration
 
@@ -3727,6 +4611,11 @@ def _first_visual_analysis_label_artifact_index(text: str, language: str = "") -
         return -1
     if not (language or "").lower().startswith("zh"):
         return -1
+    if (
+        not re.search(r"[\u3400-\u9fff]", value)
+        and re.search(r"[A-Za-z][A-Za-z0-9 _-]*\s*/\s*[A-Za-z]", value)
+    ):
+        return 0
 
     def has_cjk_before(index: int) -> bool:
         return bool(re.search(r"[\u3400-\u9fff]", value[:max(0, index)]))
@@ -3816,9 +4705,115 @@ def _strip_visual_analysis_label_artifacts_from_script(data: Dict, language: str
         data["narration"] = _narration_from_blocks(data) or str(data.get("narration") or "")
 
 
+def _compact_text_for_overlap(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "", str(value or "")).lower()
+
+
+def _dedupe_repeated_visual_sentence_from_narration(block: Dict, language: str = "") -> str:
+    narration = _strip_camera_meta_phrasing_text(str(block.get("narration") or block.get("text") or "")).strip()
+    if not narration or not (language or "").lower().startswith("zh"):
+        return narration
+
+    candidates = []
+    visual = str(block.get("visual") or "").strip()
+    if visual:
+        candidates.append(visual)
+    visual_facts = block.get("visual_facts") if isinstance(block.get("visual_facts"), list) else []
+    candidates.extend(str(fact).strip() for fact in visual_facts if str(fact).strip())
+    scene_sentence = _scene_fact_sentence(block, language).strip()
+    if scene_sentence:
+        candidates.append(scene_sentence)
+
+    best: Optional[Tuple[int, str]] = None
+    for candidate in candidates:
+        clean_candidate = _strip_camera_meta_phrasing_text(str(candidate or "")).strip(" ，,。！？!?")
+        if not clean_candidate or not re.search(r"[\u3400-\u9fff]", clean_candidate):
+            continue
+        compact_candidate = _compact_text_for_overlap(clean_candidate)
+        if len(compact_candidate) < 8:
+            continue
+        first_found = narration.find(clean_candidate)
+        search_start = 0
+        while True:
+            found = narration.find(clean_candidate, search_start)
+            if found < 0:
+                break
+            prefix = narration[:found].strip(" ，,。！？!?")
+            suffix = narration[found + len(clean_candidate):].strip(" ，,。！？!?")
+            suffix_compact = _compact_text_for_overlap(suffix)
+            copied_tail = bool(suffix_compact and compact_candidate in suffix_compact)
+            if (
+                first_found == 0
+                or not suffix
+                or not (copied_tail or re.search(r"[A-Za-z]{3,}", suffix))
+            ):
+                search_start = found + max(1, len(clean_candidate))
+                continue
+            # Keep the natural lead-in and remove copied visual evidence. If the
+            # same visual phrase appears twice, remove the first copied instance
+            # too because the second one would otherwise keep being spoken.
+            if prefix and re.search(r"[\u3400-\u9fff]", prefix):
+                if best is None or found < best[0]:
+                    best = (found, prefix)
+                break
+            search_start = found + max(1, len(clean_candidate))
+        if best is not None:
+            continue
+        compact_narration = _compact_text_for_overlap(narration)
+        compact_index = compact_narration.find(compact_candidate)
+        if compact_index > 0:
+            # Exact compact matches catch punctuation variants such as a copied
+            # visual phrase repeated after a Chinese comma or sentence break.
+            raw_index = -1
+            compact_seen = 0
+            for raw_index, char in enumerate(narration):
+                if re.match(r"[0-9A-Za-z\u3400-\u9fff]", char):
+                    if compact_seen == compact_index:
+                        break
+                    compact_seen += 1
+            if raw_index > 0:
+                prefix = narration[:raw_index].strip(" ，,。！？!?")
+                suffix = narration[raw_index + len(clean_candidate):].strip(" ，,。！？!?")
+                suffix_compact = _compact_text_for_overlap(suffix)
+                copied_tail = bool(suffix_compact and compact_candidate in suffix_compact)
+                if (
+                    compact_narration.startswith(compact_candidate)
+                    or not suffix
+                    or not (copied_tail or re.search(r"[A-Za-z]{3,}", suffix))
+                ):
+                    continue
+                if prefix and re.search(r"[\u3400-\u9fff]", prefix):
+                    if best is None or raw_index < best[0]:
+                        best = (raw_index, prefix)
+    if best is None:
+        return narration
+    return best[1].rstrip("。")
+
+
+def _dedupe_visual_sentence_artifacts_from_script(data: Dict, language: str = "") -> None:
+    if not isinstance(data, dict) or not (language or "").lower().startswith("zh"):
+        return
+    changed = False
+    for block in data.get("narration_blocks") or []:
+        if not isinstance(block, dict) or bool(block.get("pause")):
+            continue
+        original = str(block.get("narration") or block.get("text") or "")
+        cleaned = _dedupe_repeated_visual_sentence_from_narration(block, language)
+        if cleaned and cleaned != original:
+            block["narration"] = cleaned
+            changed = True
+    if changed and data.get("narration_blocks"):
+        data["narration"] = _narration_from_blocks(data) or str(data.get("narration") or "")
+
+
 def _validate_no_visual_analysis_label_artifacts(data: Dict, language: str) -> None:
     if not (language or "").lower().startswith("zh"):
         return
+    top_level = str(data.get("narration") or "")
+    if top_level and _contains_visual_analysis_label_artifact(top_level, language):
+        block_narration = _narration_from_blocks(data)
+        if block_narration and not _contains_visual_analysis_label_artifact(block_narration, language):
+            data["narration"] = block_narration
     for index, block in enumerate(data.get("narration_blocks") or [], start=1):
         if not isinstance(block, dict) or bool(block.get("pause")):
             continue
@@ -3853,6 +4848,234 @@ def _sanitize_and_validate_no_visual_analysis_label_artifacts(data: Dict, langua
 
 def _sentence_repeat_key(sentence: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "", str(sentence or "")).lower()
+
+
+def _trim_zh_transition_prefix(text: str) -> str:
+    value = re.sub(r"\s+", "", str(text or "")).strip("，,。！？!?；;：:")
+    while True:
+        stripped = re.sub(
+            r"^(?:接着|随后|然后|再|继续|最后|同时|这时|这一步|这一段|这里|先|开始|直接|马上|慢慢|突然)",
+            "",
+            value,
+        )
+        if stripped == value:
+            return value
+        value = stripped
+
+
+def _zh_clause_template_key(clause: str) -> Optional[str]:
+    value = _trim_zh_transition_prefix(clause)
+    compact = _sentence_repeat_key(value)
+    if len(compact) < 12:
+        return None
+    # This key is intentionally structural: it keeps the repeated clause tail
+    # and compact length bucket, but does not name or ban specific phrases.
+    tail = compact[-min(10, max(6, len(compact) // 2)):]
+    length_bucket = int(math.ceil(len(compact) / 8.0) * 8)
+    return f"tail:{tail}|len:{length_bucket}"
+
+
+def _visual_evidence_compact_text(data: Dict) -> str:
+    parts = []
+    for block in data.get("narration_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        parts.append(str(block.get("visual") or ""))
+        facts = block.get("visual_facts")
+        if isinstance(facts, list):
+            parts.extend(str(fact or "") for fact in facts)
+    return re.sub(r"[^\u3400-\u9fff0-9A-Za-z]+", "", "\n".join(parts))
+
+
+def _zh_repeated_ngram_details(text: str, visual_evidence_text: str = "") -> List[Dict]:
+    compact = re.sub(r"[^\u3400-\u9fff0-9A-Za-z]+", "", str(text or ""))
+    if len(compact) < 80:
+        return []
+    visual_compact = re.sub(r"[^\u3400-\u9fff0-9A-Za-z]+", "", str(visual_evidence_text or ""))
+    details = []
+    stop_ngrams = {
+        "这个",
+        "那个",
+        "一下",
+        "起来",
+        "继续",
+        "开始",
+        "可以",
+        "看到",
+        "视频",
+        "画面",
+    }
+    for size in range(COMMENTARY_REPEATED_NGRAM_MAX_CHARS, COMMENTARY_REPEATED_NGRAM_MIN_CHARS - 1, -1):
+        counts: Dict[str, int] = {}
+        positions: Dict[str, List[int]] = {}
+        for index in range(0, max(0, len(compact) - size + 1)):
+            gram = compact[index:index + size]
+            if len(gram) < size or gram in stop_ngrams:
+                continue
+            if re.fullmatch(r"\d+", gram):
+                continue
+            if visual_compact and visual_compact.count(gram) >= 2:
+                continue
+            counts[gram] = counts.get(gram, 0) + 1
+            positions.setdefault(gram, []).append(index)
+        for gram, count in counts.items():
+            if count < 4:
+                continue
+            if any(gram in existing["phrase"] or existing["phrase"] in gram for existing in details):
+                continue
+            min_allowed_gap = max(6, size)
+            distinct_positions = []
+            for pos in positions.get(gram, []):
+                if not distinct_positions or pos - distinct_positions[-1] >= min_allowed_gap:
+                    distinct_positions.append(pos)
+            distinct_count = len(distinct_positions)
+            if distinct_count < 4:
+                continue
+            details.append({
+                "phrase": gram,
+                "count": distinct_count,
+                "length": size,
+            })
+        if len(details) >= 12:
+            break
+    details.sort(key=lambda item: (-int(item.get("count") or 0), -int(item.get("length") or 0), str(item.get("phrase") or "")))
+    return details[:12]
+
+
+def _zh_repeated_clause_and_template_details(texts: List[str]) -> Tuple[List[Dict], List[Dict]]:
+    clause_counts: Dict[str, int] = {}
+    clause_examples: Dict[str, str] = {}
+    template_counts: Dict[str, int] = {}
+    template_examples: Dict[str, List[str]] = {}
+    for text in texts:
+        for clause in _zh_narration_clauses(text):
+            key = _sentence_repeat_key(clause)
+            if len(key) >= COMMENTARY_REPEATED_SENTENCE_MIN_CHARS:
+                clause_counts[key] = clause_counts.get(key, 0) + 1
+                clause_examples.setdefault(key, clause)
+            template_key = _zh_clause_template_key(clause)
+            if template_key:
+                template_counts[template_key] = template_counts.get(template_key, 0) + 1
+                examples = template_examples.setdefault(template_key, [])
+                if len(examples) < 4 and clause not in examples:
+                    examples.append(clause)
+    repeated_clauses = [
+        {
+            "phrase": _limit_text_chars(clause_examples.get(key, key), 80),
+            "count": count,
+        }
+        for key, count in clause_counts.items()
+        if count > 1
+    ]
+    repeated_templates = [
+        {
+            "template": key,
+            "count": count,
+            "examples": [_limit_text_chars(example, 70) for example in template_examples.get(key, [])],
+        }
+        for key, count in template_counts.items()
+        if count >= 4
+    ]
+    repeated_clauses.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("phrase") or "")))
+    repeated_templates.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("template") or "")))
+    return repeated_clauses[:12], repeated_templates[:12]
+
+
+def _zh_adjacent_block_template_repetition_details(texts: List[str]) -> List[Dict]:
+    details = []
+    previous_keys = set()
+    previous_text = ""
+    for index, text in enumerate(texts, start=1):
+        keys = {
+            key
+            for key in (_zh_clause_template_key(clause) for clause in _zh_narration_clauses(text))
+            if key
+        }
+        overlap = sorted(keys & previous_keys)
+        if overlap:
+            details.append({
+                "block_index": index,
+                "previous_block_index": index - 1,
+                "templates": overlap[:5],
+                "previous": _limit_text_chars(previous_text, 90),
+                "current": _limit_text_chars(text, 90),
+            })
+        previous_keys = keys
+        previous_text = text
+    return details[:12]
+
+
+def _global_commentary_repetition_failure_details(data: Dict, language: str = "") -> Optional[Dict]:
+    texts = _narration_texts_for_repeat_validation(data)
+    if not texts:
+        return None
+    joined = "\n".join(texts)
+    if not joined.strip():
+        return None
+    if (language or "").lower().startswith("zh") and not re.search(r"[\u3400-\u9fff]", joined):
+        return None
+
+    fixed_phrase_repeats = []
+    for phrase in COMMENTARY_REPEAT_LIMIT_PHRASES:
+        count = len(re.findall(re.escape(phrase), joined))
+        if count > 2:
+            fixed_phrase_repeats.append({"phrase": phrase, "count": count})
+
+    if not (language or "").lower().startswith("zh"):
+        if fixed_phrase_repeats:
+            return {
+                "reason": "repeated catchphrases",
+                "fixed_phrase_repeats": fixed_phrase_repeats,
+            }
+        return None
+
+    spoken_block_count = len(texts)
+    if spoken_block_count < 4:
+        if fixed_phrase_repeats:
+            return {
+                "reason": "repeated catchphrases",
+                "fixed_phrase_repeats": fixed_phrase_repeats,
+            }
+        return None
+
+    repeated_clauses, repeated_templates = _zh_repeated_clause_and_template_details(texts)
+    repeated_ngrams = _zh_repeated_ngram_details(joined, _visual_evidence_compact_text(data))
+    adjacent_template_repeats = _zh_adjacent_block_template_repetition_details(texts)
+    failures = []
+    if fixed_phrase_repeats:
+        failures.append("fixed catchphrases repeat more than allowed")
+    if repeated_clauses:
+        failures.append("exact or near-exact clauses repeat across the whole script")
+    template_threshold = max(4, math.ceil(spoken_block_count * 0.22))
+    high_template_repeats = [
+        item for item in repeated_templates
+        if int(item.get("count") or 0) >= template_threshold
+    ]
+    if high_template_repeats:
+        failures.append("the whole-video narration reuses the same sentence templates too often")
+    ngram_threshold = max(4, math.ceil(spoken_block_count * 0.20))
+    high_ngram_repeats = [
+        item for item in repeated_ngrams
+        if int(item.get("count") or 0) >= ngram_threshold
+    ]
+    if high_ngram_repeats:
+        failures.append("short stock phrases repeat too often across unrelated blocks")
+    adjacent_threshold = max(2, math.ceil(spoken_block_count * 0.18))
+    if len(adjacent_template_repeats) >= adjacent_threshold:
+        failures.append("neighboring blocks reuse the same wording pattern instead of developing new commentary")
+    if not failures:
+        return None
+    return {
+        "reason": "; ".join(failures),
+        "spoken_block_count": spoken_block_count,
+        "fixed_phrase_repeats": fixed_phrase_repeats,
+        "repeated_clauses": repeated_clauses,
+        "repeated_templates": high_template_repeats[:8],
+        "repeated_ngrams": high_ngram_repeats[:8],
+        "adjacent_template_repeats": adjacent_template_repeats[:8],
+        "template_threshold": template_threshold,
+        "ngram_threshold": ngram_threshold,
+    }
 
 
 def _scene_fact_sentence(block: Dict, language: str) -> str:
@@ -3892,18 +5115,30 @@ def _scene_fact_sentence(block: Dict, language: str) -> str:
 
 
 def _normalize_zh_render_narration_text(block: Dict) -> str:
-    narration = _strip_camera_meta_phrasing_text(str(block.get("narration") or ""))
-    if _contains_visual_analysis_label_artifact(narration, "zh"):
+    original_narration = str(block.get("narration") or "")
+    narration = _strip_camera_meta_phrasing_text(original_narration)
+    had_english_residue = bool(re.search(r"[A-Za-z]{3,}", original_narration) or re.search(r"[A-Za-z]{3,}", narration))
+    had_label_artifact = _contains_visual_analysis_label_artifact(narration, "zh")
+    if had_label_artifact:
         cleaned = _strip_visual_analysis_label_artifact(narration, "zh")
         if cleaned and re.search(r"[\u3400-\u9fff]", cleaned) and not _contains_visual_analysis_label_artifact(cleaned, "zh"):
             narration = cleaned
         else:
             return narration.rstrip("。")
     visual_sentence = _scene_fact_sentence(block, "zh").rstrip("。")
-    original_narration = str(block.get("narration") or "")
-    if visual_sentence and (re.search(r"[A-Za-z]{3,}", narration) or "画面里" in original_narration):
+    if not visual_sentence and re.search(r"[A-Za-z]{3,}", original_narration):
+        visual = str(block.get("visual") or "").strip()
+        if visual and re.search(r"[\u3400-\u9fff]", visual) and not _contains_visual_analysis_label_artifact(visual, "zh"):
+            visual_sentence = _strip_camera_meta_phrasing_text(visual).strip(" ，,。")
+    if visual_sentence and (
+        re.search(r"[A-Za-z]{3,}", narration)
+        or "画面里" in original_narration
+        or (had_english_residue and had_label_artifact)
+    ):
         if "画面里" in original_narration:
             prefix = original_narration.split("画面里", 1)[0].strip("，,。 ")
+        elif had_english_residue and had_label_artifact and not re.search(r"[A-Za-z]{3,}", narration):
+            prefix = narration.rstrip("，,。 ")
         else:
             prefix = re.split(r"[A-Za-z]{3,}", narration, maxsplit=1)[0].rstrip("，,。 ")
         narration = (prefix + "。" if prefix else "") + visual_sentence
@@ -3927,20 +5162,19 @@ def _normalize_full_mode_render_narration_blocks(blocks: List[Dict], language: s
     return normalized
 
 
-def _validate_no_repeated_commentary_text(data: Dict) -> None:
+def _validate_no_repeated_commentary_text(data: Dict, language: str = "") -> None:
     if data.get("_skip_repeat_validation"):
         return
-    texts = _narration_texts_for_repeat_validation(data)
-    if not texts:
+    details = _global_commentary_repetition_failure_details(data, language)
+    if not details:
         return
-    joined = "\n".join(texts)
-    for phrase in COMMENTARY_REPEAT_LIMIT_PHRASES:
-        count = len(re.findall(re.escape(phrase), joined))
-        if count > 2:
-            raise Exception(
-                "AI commentary narration repeats a catchphrase too many times. "
-                f"Phrase {phrase!r} appears {count} times; rewrite repeated lines instead of relying on backend text cleanup."
-            )
+    raise Exception(
+        "AI commentary narration has whole-video repetitive wording. "
+        "This is a global script quality failure, not a single banned-word issue. "
+        f"Reason: {details.get('reason')}. "
+        "Rewrite the full commentary with varied sentence openings, purposes, transitions, reactions, and payoff wording while preserving the same visual evidence and timeline. "
+        f"Details: {json.dumps(details, ensure_ascii=False)}"
+    )
 
 
 def _banned_phrase_instruction() -> str:
@@ -3948,6 +5182,15 @@ def _banned_phrase_instruction() -> str:
     return (
         f"- Never use these banned phrases anywhere in the returned JSON: {phrases}. Describe the concrete scene directly instead of using meta-summary wording.\n"
         "- In narration and narration_blocks.narration, do not use the word '镜头' or camera/meta phrasing like '镜头切到', '镜头拉近', '镜头里', '镜头展示', or '镜头带我们'. Do not use detached phrases like '画面里', '画面中', '视频里', '视频中', '当前画面', '画面显示', '画面展示', '可以看到', or '能看到'. Do not mention the writing itself with phrases like '这段解说', '解说词', '旁白稿', '脚本说明', '交代完整', or '自然收住'. Also avoid any equivalent editorial wrap-up wording such as '到此告一段落', '该交代的都交代完', '作为收尾', '不再展开', 'this narration wraps up', or 'the script is complete'. Describe the subject and action directly instead."
+    )
+
+
+def _global_commentary_variety_instruction() -> str:
+    return (
+        "- Whole-video narration quality rule: before returning JSON, audit the complete narration as one script. "
+        "Do not repeat the same explanatory template, transition pattern, payoff wording, reaction line, purpose phrase, or stock value judgment across many blocks. "
+        "If several blocks need to explain purpose/result, vary the grammar and substance around the exact visible tool, material, action, state change, risk, or result for that block instead of reusing one formula. "
+        "Adjacent narration_blocks must not sound like the same sentence with only nouns swapped. Repeated concrete object names from the video are allowed when visually necessary; repeated filler templates, catchphrases, and generic oral-broadcast habits are not."
     )
 
 
@@ -4015,6 +5258,7 @@ def _strip_camera_meta_phrasing_text(text: str) -> str:
         "镜头给到",
         "镜头带到",
         "镜头里",
+        "镜头",
         "画面里",
         "画面中",
         "视频里",
@@ -4051,6 +5295,7 @@ def _strip_camera_meta_phrasing(data: Dict) -> None:
 def _sanitize_generated_commentary_script(data: Dict, language: str = "") -> None:
     _strip_camera_meta_phrasing(data)
     _strip_visual_analysis_label_artifacts_from_script(data, language)
+    _dedupe_visual_sentence_artifacts_from_script(data, language)
     if isinstance(data, dict):
         data["_generated_sanitized"] = True
 
@@ -4211,6 +5456,108 @@ def _visual_analysis_frame_timestamps(visual_analysis: Optional[Dict]) -> List[f
     return sorted(set(timestamps))
 
 
+def _block_grounding_text(block: Dict, visual_analysis: Optional[Dict]) -> str:
+    parts = [
+        str(block.get("visual") or ""),
+        " ".join(str(fact) for fact in (block.get("visual_facts") or []) if str(fact).strip()),
+        _visual_analysis_observation_text_for_block(block, visual_analysis),
+    ]
+    text = " ".join(parts).lower()
+    text = re.sub(
+        r"\b(?:no|not|without|does\s+not|do\s+not|did\s+not|is\s+not|are\s+not|isn't|aren't)\b"
+        r"[^.;,，。；\n\r]{0,140}\b(?:shown|visible|seen|showing|show|indicating)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:no|not|without|does\s+not|do\s+not|did\s+not|is\s+not|are\s+not|isn't|aren't)\s+"
+        r"(?:shown|visible|seen|showing|show|indicating|with)?\s*"
+        r"(?:downclimbing|climbing\s+down|leaving|leave|departing|departure|exiting|exit|rest|relief|finished|complete|secured|tied|closed|packed)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(?:没有|未见|看不到|未显示|没有出现|并未|不是|尚未)[^。；;,.，、]{0,16}"
+        r"(?:下树|离开|撤离|休息|松口气|松了口气|完成|固定|绑好|收好|装好|打包)",
+        " ",
+        text,
+    )
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _zh_unsupported_scene_claim_details(block: Dict, visual_analysis: Optional[Dict], index: int) -> List[Dict]:
+    narration = re.sub(r"\s+", "", str(block.get("narration") or block.get("text") or ""))
+    if not narration:
+        return []
+    evidence_text = _block_grounding_text(block, visual_analysis)
+    unsupported_groups = [
+        {
+            "claim_type": "rest or relief",
+            "claim_pattern": r"喘口气|松了口气|松一口气|歇一口气|休息|缓一缓|放心了|心跳加速|手还抖|手开始冒汗|吓一跳|紧张",
+            "evidence_pattern": r"喘口气|松了口气|松一口气|休息|停下|暂停|擦汗|坐下|放松|安全|脱险|表情|发抖|冒汗|紧张|relief|relaxed|pause|stops?|safe|sweat|shak(?:e|ing|y)?",
+        },
+        {
+            "claim_type": "leaving or next off-screen step",
+            "claim_pattern": r"准备下树|下树|撤下来|收工|可以走了|要走了|回去|带回去|拿回去",
+            "evidence_pattern": r"下树|爬下|离开|撤离|收工|收尾|结束|完成|打包|包装|带走|拿走|背包|离场|final|ending|completion|packed|secured|finished|leav(?:e|ing|es)|climb(?:s|ing)?down|depart|exit|nextstep",
+        },
+        {
+            "claim_type": "completion or secured result",
+            "claim_pattern": r"彻底固定|彻底收好|已经稳了|没有松动|绑好了|固定好|完成了|彻底完成|终于完成|大功告成|成功了|到手|收好了|装好了",
+            "evidence_pattern": r"固定|绑好|扎紧|系紧|完成|结束|收好|装好|装进|装入|收进|袋中|包装|成品|结果|最终|完成状态|secur|tied|closed|packed|finished|complete|completion|final|result|collect|contents|filled|bagged",
+        },
+    ]
+    details = []
+    for group in unsupported_groups:
+        if re.search(group["evidence_pattern"], evidence_text, flags=re.IGNORECASE):
+            continue
+        for match in re.finditer(group["claim_pattern"], narration, flags=re.IGNORECASE):
+            if any(item.get("claim") == match.group(0) and item.get("claim_type") == group["claim_type"] for item in details):
+                continue
+            details.append({
+                "block_index": index,
+                "claim_type": group["claim_type"],
+                "claim": match.group(0),
+                "narration": _limit_text_chars(str(block.get("narration") or ""), 160),
+                "visual": _limit_text_chars(str(block.get("visual") or ""), 160),
+                "visual_facts": [
+                    _limit_text_chars(str(fact), 120)
+                    for fact in (block.get("visual_facts") or [])[:4]
+                ],
+            })
+    return details
+
+
+def _validate_narration_claims_are_scene_supported(
+    data: Dict,
+    language: str,
+    visual_analysis: Optional[Dict] = None,
+) -> None:
+    if not (language or "").lower().startswith("zh"):
+        return
+    failures = []
+    for index, block in enumerate(data.get("narration_blocks") or [], start=1):
+        if not isinstance(block, dict) or bool(block.get("pause")):
+            continue
+        failures.extend(_zh_unsupported_scene_claim_details(block, visual_analysis, index))
+    if failures:
+        first = failures[0]
+        indexes = sorted(set(item.get("block_index") for item in failures if item.get("block_index")))
+        claims = [
+            f"Block {item.get('block_index')} {item.get('claim')!r} ({item.get('claim_type')})"
+            for item in failures[:8]
+        ]
+        raise Exception(
+            "AI narration contains an unsupported same-block scene claim. "
+            f"Block {first['block_index']} claims {first['claim']!r} ({first['claim_type']}), but that claim is not supported by the block's visual_facts, visual description, or timestamped visual evidence. "
+            f"Unsupported claim blocks: {indexes}. Claims: {claims}. "
+            "Rewrite the narration to describe only visible same-range action, or move the claim to a block where the evidence actually shows it. "
+            f"Details: {json.dumps(failures[:12], ensure_ascii=False)}"
+        )
+
+
 def _validate_block_evidence_timestamps(block: Dict, visual_analysis: Optional[Dict], index: int) -> None:
     if not visual_analysis or visual_analysis.get("provider") != "openai_compatible":
         return
@@ -4259,21 +5606,6 @@ def _repair_short_narration_visual_ranges(blocks: List[Dict], language: str) -> 
         shortfall = _narration_density_shortfall_details(item, len(repaired) + 1, language)
         narration = str(item.get("narration") or item.get("text") or "").strip()
         current_chars = len(re.sub(r"\s+", "", narration))
-        expected_chars = int(shortfall.get("expected_chars") or 0) if shortfall else _expected_narration_chars_for_visual_duration(_block_visual_duration(item), language)
-        visual_text = str(item.get("visual") or "").strip()
-        visual_facts = item.get("visual_facts") if isinstance(item.get("visual_facts"), list) else []
-        fact_text = "，".join(str(fact).strip() for fact in visual_facts if str(fact).strip())
-        if (language or "").lower().startswith("zh"):
-            safe_source_text = _scene_fact_sentence(item, language).strip()
-            source_text = safe_source_text.rstrip("。！？!?") if safe_source_text else ""
-        else:
-            source_text = fact_text or visual_text
-        if current_chars < expected_chars and source_text:
-            additions = []
-            while len(re.sub(r"\s+", "", narration + "".join(additions))) < expected_chars:
-                additions.append(f"{source_text}。")
-            item["narration"] = narration + "".join(additions)
-            current_chars = len(re.sub(r"\s+", "", item["narration"]))
         shortfall = _narration_density_shortfall_details(item, len(repaired) + 1, language)
         if shortfall:
             speed = _safe_video_speed(item.get("video_speed"))
@@ -4329,6 +5661,8 @@ def _repair_full_mode_small_density_shortfalls(
     visual_seconds = sum(_block_visual_duration(block) for block in repaired)
     changed = False
     for index, block in enumerate(repaired, start=1):
+        if bool(block.get("_locked_edit_plan")):
+            continue
         shortfall = _narration_density_shortfall_details(block, index, language)
         current_playable = _block_visual_duration(block)
         narration_text = str(block.get("narration") or block.get("text") or "").strip()
@@ -4481,7 +5815,14 @@ def _trim_chinese_narration_to_chars(text: str, max_chars: int) -> str:
     if candidate[-1:] in "，,":
         trimmed = candidate.rstrip("，,。！？!?")
         return (trimmed + "。") if trimmed and len(trimmed) < max_chars else (trimmed or candidate)
-    body = compact[: max_chars - 1].rstrip("，,。！？!?")
+    boundary_match = None
+    for match in re.finditer(r"[。！？!?；;，,、]", candidate):
+        boundary_match = match
+    if boundary_match and boundary_match.end() >= max(1, int(max_chars * 0.55)):
+        body = candidate[:boundary_match.end()].rstrip("，,、；;。！？!?")
+        if body:
+            return body + "。"
+    body = compact[: max_chars - 1].rstrip("，,、；;。！？!?")
     return (body + "。") if body else candidate
 
 
@@ -4629,11 +5970,13 @@ def _validate_scene_matched_narration_blocks(
     data: Dict,
     visual_analysis: Optional[Dict] = None,
     strict_scene_actions: bool = False,
+    language: str = "",
 ) -> None:
     for index, block in enumerate(data.get("narration_blocks") or [], start=1):
         if not isinstance(block, dict) or bool(block.get("pause")):
             continue
         _validate_block_evidence_timestamps(block, visual_analysis, index)
+    _validate_narration_claims_are_scene_supported(data, language, visual_analysis)
 
 
 def _block_best_visual_importance(block: Dict, visual_analysis: Optional[Dict]) -> float:
@@ -4715,6 +6058,28 @@ def _validate_openai_selected_ranges_are_important(
             f"Weak block indexes: {weak_blocks[:8]}. "
             "Choose the video's important, good-looking, story-progressing moments from timestamped visual evidence; do not fill the edit with arbitrary low-value footage."
         )
+    ending_candidates = _visual_analysis_terminal_ending_candidates(
+        visual_analysis.get("candidate_segments") or [],
+        visual_analysis,
+        duration,
+    )
+    if ending_candidates and not _selected_segments_overlap_any_ending_candidate(blocks, ending_candidates):
+        strongest_ending = max(
+            ending_candidates,
+            key=lambda segment: (
+                _candidate_segment_ending_strength(segment, visual_analysis),
+                _candidate_segment_importance(segment, visual_analysis),
+                float(segment.get("end") or 0.0),
+            ),
+        )
+        raise Exception(
+            "OpenAI selected visual ranges omit the real ending/payoff evidence. "
+            f"The visual analysis contains a grounded ending candidate at {float(strongest_ending.get('start') or 0.0):.1f}-"
+            f"{float(strongest_ending.get('end') or 0.0):.1f}s "
+            f"({str(strongest_ending.get('reason') or 'ending candidate')[:160]}), "
+            "but the selected edit does not include any ending/result/completed-state range. "
+            "Re-select enough useful source ranges so the final cut ends on a real visible payoff, result, test, packaging, or completed state from the visual evidence; do not narrate a fake conclusion."
+        )
 
 
 def _has_visual_plan(data: Dict) -> bool:
@@ -4728,6 +6093,7 @@ def _validate_commentary_script_for_target(
     language: str,
     visual_analysis: Optional[Dict] = None,
     custom_style_prompt: Optional[str] = None,
+    validate_global_repetition: bool = False,
 ) -> None:
     generated_sanitized = bool(data.get("_generated_sanitized"))
     if target_duration != "full":
@@ -4741,6 +6107,7 @@ def _validate_commentary_script_for_target(
         data,
         visual_analysis=visual_analysis,
         strict_scene_actions=bool(visual_analysis),
+        language=language,
     )
     if target_duration != "full":
         blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
@@ -4749,7 +6116,9 @@ def _validate_commentary_script_for_target(
             raise duration_error
         _sanitize_and_validate_no_visual_analysis_label_artifacts(data, language)
         _validate_custom_style_operation_logic(data, language, custom_style_prompt, duration)
-        _validate_no_repeated_commentary_text(data)
+        _validate_custom_style_compact_action_diction(data, language, custom_style_prompt, duration)
+        if validate_global_repetition:
+            _validate_no_repeated_commentary_text(data, language)
         return
     target_seconds = _target_visual_duration_seconds_for_analysis(duration, target_duration, visual_analysis)
     blocks = _normalize_narration_blocks(data.get("narration_blocks") or [], duration)
@@ -4758,6 +6127,7 @@ def _validate_commentary_script_for_target(
             "AI narration_blocks are required for comprehensive full-mode commentary. "
             "OpenShorts needs timestamped narration blocks so each voiceover section can stay synced with the matching selected visual range."
         )
+    source_is_tiny_full_mode = duration <= 60.0
 
     def commit_blocks(updated_blocks: List[Dict]) -> None:
         _commit_narration_blocks_to_script(data, updated_blocks)
@@ -4804,6 +6174,7 @@ def _validate_commentary_script_for_target(
     max_visual_seconds = _full_mode_max_playable_visual_seconds(duration, target_seconds)
     if (
         _full_mode_preserves_source_process(duration, target_seconds)
+        and not source_is_tiny_full_mode
         and initial_selected_source_seconds < duration * 0.82
     ):
         raise Exception(
@@ -4825,7 +6196,7 @@ def _validate_commentary_script_for_target(
     min_visual_seconds = _full_mode_min_playable_visual_seconds(duration, target_seconds)
     max_visual_seconds = _full_mode_max_playable_visual_seconds(duration, target_seconds)
     visual_budget_tolerance = _full_mode_visual_budget_tolerance_seconds(target_seconds)
-    required_visual_seconds = min_visual_seconds
+    required_visual_seconds = 0.0 if source_is_tiny_full_mode else min_visual_seconds
     allow_backend_visual_budget_repair = visual_analysis is None
     if (
         allow_backend_visual_budget_repair
@@ -4951,7 +6322,11 @@ def _validate_commentary_script_for_target(
         repaired_short_blocks = []
         for index, block in enumerate(blocks, start=1):
             shortfall = _narration_density_shortfall_details(block, index, language)
-            if shortfall and _block_visual_duration(block) <= 24.0 + FULL_MODE_VALIDATION_EPSILON_SECONDS:
+            if (
+                shortfall
+                and not bool(block.get("_locked_edit_plan"))
+                and _block_visual_duration(block) <= 24.0 + FULL_MODE_VALIDATION_EPSILON_SECONDS
+            ):
                 repaired_short_blocks.extend(_repair_short_narration_visual_ranges([block], language))
             else:
                 repaired_short_blocks.append(block)
@@ -5053,16 +6428,22 @@ def _validate_commentary_script_for_target(
                 for index, block in enumerate(blocks, start=1):
                     _validate_narration_density_matches_visual_duration(block, index, language)
                 _validate_ai_video_speed_decisions(blocks, language, visual_analysis=visual_analysis, duration=duration)
+                _validate_narration_claims_are_scene_supported(data, language, visual_analysis)
                 _validate_custom_style_operation_logic(data, language, custom_style_prompt, duration)
-                _validate_no_repeated_commentary_text(data)
+                _validate_custom_style_compact_action_diction(data, language, custom_style_prompt, duration)
+                if validate_global_repetition:
+                    _validate_no_repeated_commentary_text(data, language)
                 return
         raise Exception(
             "AI narration is too long for comprehensive full-mode commentary. "
             f"Got {len(narration)} chars; expected at most {max_chars}. "
             "The generated voiceover would run much longer than the selected visuals and can overload local rendering, so OpenShorts rejected it."
         )
+    _validate_narration_claims_are_scene_supported(data, language, visual_analysis)
     _validate_custom_style_operation_logic(data, language, custom_style_prompt, duration)
-    _validate_no_repeated_commentary_text(data)
+    _validate_custom_style_compact_action_diction(data, language, custom_style_prompt, duration)
+    if validate_global_repetition:
+        _validate_no_repeated_commentary_text(data, language)
 
 
 def _is_rendered_cached_full_mode_script(data: Dict) -> bool:
@@ -5088,6 +6469,7 @@ def _validate_rendered_cached_full_mode_script(
     target_duration: str,
     language: str,
     custom_style_prompt: Optional[str] = None,
+    validate_global_repetition: bool = False,
 ) -> None:
     if target_duration != "full" or not _is_rendered_cached_full_mode_script(data):
         _validate_commentary_script_for_target(
@@ -5096,6 +6478,7 @@ def _validate_rendered_cached_full_mode_script(
             target_duration,
             language,
             custom_style_prompt=custom_style_prompt,
+            validate_global_repetition=validate_global_repetition,
         )
         return
     _strip_camera_meta_phrasing(data)
@@ -5119,8 +6502,11 @@ def _validate_rendered_cached_full_mode_script(
     data["edit_segments"] = _narration_blocks_to_edit_segments(blocks)
     _commit_narration_blocks_to_script(data, blocks)
     _validate_no_banned_narration_patterns(data)
+    _validate_narration_claims_are_scene_supported(data, language)
     _validate_custom_style_operation_logic(data, language, custom_style_prompt, duration)
-    _validate_no_repeated_commentary_text(data)
+    _validate_custom_style_compact_action_diction(data, language, custom_style_prompt, duration)
+    if validate_global_repetition:
+        _validate_no_repeated_commentary_text(data, language)
 
 
 def _validate_voiceover_duration_for_target(
@@ -5170,6 +6556,10 @@ def _validation_error_is_visual_budget(validation_error: Optional[Exception]) ->
     return bool(_visual_budget_error_match(str(validation_error or "")))
 
 
+def _validation_error_is_global_repetition(validation_error: Optional[Exception]) -> bool:
+    return "whole-video repetitive wording" in str(validation_error or "")
+
+
 def _non_full_target_duration_validation_error(
     blocks: List[Dict],
     duration: float,
@@ -5194,6 +6584,12 @@ def _non_full_target_duration_validation_error(
 
 def _repair_scope_instruction(validation_error: Optional[Exception], attempt_label: str) -> str:
     error_text = str(validation_error or "")
+    if "Custom style narration quality validation failed" in error_text:
+        return (
+            f"This is {attempt_label}. The validation error is a custom-style wording failure, "
+            "so keep the selected timeline and visual evidence unless sync is invalid. "
+            "Rewrite narration into compact action-first technical commentary with varied tool/material/action/result subjects instead of repeated generic workers, hands, or tools."
+        )
     if "Custom style operation logic validation failed" in error_text:
         return (
             f"This is {attempt_label}. The validation error is a custom-style narration-depth failure, "
@@ -5482,6 +6878,46 @@ def _focused_validation_repair_instruction(
     if not validation_error:
         return ""
     error_text = str(validation_error)
+    if "Custom style narration quality validation failed" in error_text:
+        details = _custom_style_compact_action_failure_details(
+            invalid_script,
+            _language,
+            "动词开头 短句密集 技术白描 工具+动作+对象 精准命名",
+            duration,
+        )
+        repair_targets = []
+        generic_indexes = set()
+        if details:
+            generic_indexes = {
+                int(item.get("block_index") or 0)
+                for item in details.get("generic_lead_examples") or []
+                if int(item.get("block_index") or 0) > 0
+            }
+        for index, block in enumerate(_script_narration_blocks(invalid_script), start=1):
+            if generic_indexes and index not in generic_indexes:
+                continue
+            if not generic_indexes:
+                narration = str(block.get("narration") or "")
+                if not any(_zh_clause_generic_subject_prefix(clause) for clause in _zh_narration_clauses(narration)):
+                    continue
+            repair_targets.append({
+                "block_index": index,
+                "block": block,
+            })
+            if len(repair_targets) >= 12:
+                break
+        return f"""
+FOCUSED REPAIR REQUIRED:
+- The previous JSON did not actually follow the selected custom commentary style's wording rules. It overused generic subjects such as "工人", "手", "手指", "工具", "两人", or "三人", and some sentences read like visual-analysis notes instead of compact action-first narration.
+- Keep exactly {block_count} narration_blocks. Preserve start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps unless a local boundary is already invalid for sync.
+- Rewrite the affected narration fields with the custom style: short dense clauses, concrete tool/material/action/object wording, and immediate result or purpose when supported.
+- Do not fake details and do not hide the person when the person is the only visible subject, but avoid repeating "工人/手/工具..." as the default sentence starter. Prefer wording that promotes the visible material, tool, action, or immediate result from this exact block into the sentence subject.
+- Stay grounded in that block's visual_facts, evidence_timestamps, visual description, and transcript evidence. Do not invent unseen machine internals, quantities, hazards, worker intent, or later results.
+CUSTOM-STYLE QUALITY DETAILS:
+{json.dumps(details or {}, ensure_ascii=False)}
+AFFECTED BLOCK EVIDENCE:
+{json.dumps(repair_targets, ensure_ascii=False)}
+""".strip()
     if "Custom style operation logic validation failed" in error_text:
         details = _custom_style_operation_logic_failure_details(
             invalid_script,
@@ -5513,10 +6949,62 @@ FOCUSED REPAIR REQUIRED:
 - Keep exactly {block_count} narration_blocks. Preserve start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps unless a local boundary is already invalid for sync.
 - Rewrite action-only narration fields so each ordinary process block has short, natural commentary with this structure: visible action/tool/material first, then one concise purpose, operation-logic, or result sentence for the same timestamp range.
 - Stay grounded in that block's visual_facts, evidence_timestamps, visual description, and transcript evidence. Do not invent unseen machine internals, quantities, hazards, worker intent, or later results.
-- For Chinese industrial/mechanical custom styles, use compact process language such as "这一步是为了...", "这样能...", "主要是把...", "方便后面...", "防止...", or an equivalent natural phrase where supported by the visuals.
+- For Chinese industrial/mechanical custom styles, use compact process language that explains same-range purpose, result, constraint, or next workflow dependency, but vary the grammar across blocks and avoid reusing one explanatory formula.
 - Do not add generic filler, slogans, or raw visual-analysis labels. The narration should still be speakable inside each block's visual duration.
 ACTION-ONLY BLOCK EVIDENCE:
 {json.dumps(action_only_blocks, ensure_ascii=False)}
+""".strip()
+    if "whole-video repetitive wording" in error_text:
+        details = _global_commentary_repetition_failure_details(invalid_script, _language)
+        repair_targets = []
+        repeated_fragments = []
+        if details:
+            for key in ("fixed_phrase_repeats", "repeated_clauses", "repeated_templates", "repeated_ngrams"):
+                repeated_fragments.extend(details.get(key) or [])
+        fragment_text = json.dumps(repeated_fragments[:16], ensure_ascii=False)
+        for index, block in enumerate(_script_narration_blocks(invalid_script), start=1):
+            narration = str(block.get("narration") or "")
+            if not narration or bool(block.get("pause")):
+                continue
+            matched = False
+            for item in repeated_fragments:
+                phrase = str(item.get("phrase") or item.get("template") or "")
+                if phrase and phrase in narration:
+                    matched = True
+                    break
+            if not matched and len(repair_targets) < 8:
+                clause_templates = {
+                    key
+                    for key in (_zh_clause_template_key(clause) for clause in _zh_narration_clauses(narration))
+                    if key
+                }
+                if any(
+                    str(item.get("template") or "") in clause_templates
+                    for item in repeated_fragments
+                    if item.get("template")
+                ):
+                    matched = True
+            if matched:
+                repair_targets.append({
+                    "block_index": index,
+                    "block": block,
+                })
+            if len(repair_targets) >= 16:
+                break
+        return f"""
+FOCUSED REPAIR REQUIRED:
+- The previous JSON failed whole-video narration variety validation. This is a global script quality failure: too many blocks reuse the same explanatory template, transition pattern, payoff wording, reaction line, or short stock phrase.
+- Keep exactly {block_count} narration_blocks. Preserve start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps unless another validation error requires local sync repair.
+- Rewrite the narration as a complete script pass, not as a banned-word replacement. Do not merely swap one repeated phrase for another repeated phrase.
+- For every rewritten block, ground the wording in that block's concrete visible tool, material, part, action, state change, risk, or result. If multiple blocks explain purpose/result, vary the grammar and substance of each explanation from the local evidence.
+- Adjacent blocks must not sound like the same sentence with nouns swapped. Use different openings, different clause rhythm, different result/purpose framing, and different reactions where the visuals support them.
+- Repeated subject/object names are allowed when they are genuinely visible; repeated filler templates and generic oral-broadcast habits are not.
+WHOLE-SCRIPT REPETITION DETAILS:
+{json.dumps(details or {}, ensure_ascii=False)}
+REPEATED FRAGMENTS/TEMPLATES:
+{fragment_text}
+AFFECTED BLOCK EVIDENCE:
+{json.dumps(repair_targets, ensure_ascii=False)}
 """.strip()
     if "missing narration" in error_text:
         missing_indexes = []
@@ -5555,8 +7043,35 @@ FOCUSED REPAIR REQUIRED:
 - Keep exactly {block_count} narration_blocks and keep every locked block's start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps unchanged.
 - Rewrite the polluted narration fields as fluent natural commentary in the selected style, grounded only in that block's timestamped visual evidence and transcript evidence.
 - Do not include source timestamps, frame labels like "112.324s: Men cutting...", compact labels like "324s:Mencuttingandha", English category labels, slash-separated strings, edit_value labels, pace labels, or raw frame-analysis phrases in narration.
+- Do not include English category labels.
 POLLUTED BLOCK EVIDENCE:
 {json.dumps(polluted_blocks[:12], ensure_ascii=False)}
+""".strip()
+    if "unsupported same-block scene claim" in error_text:
+        unsupported_blocks = []
+        for index, block in enumerate(_script_narration_blocks(invalid_script), start=1):
+            if not isinstance(block, dict) or bool(block.get("pause")):
+                continue
+            block_details = _zh_unsupported_scene_claim_details(block, None, index)
+            for details in block_details:
+                unsupported_blocks.append({
+                    "block_index": index,
+                    "unsupported_claim": details,
+                    "block": block,
+                })
+                if len(unsupported_blocks) >= 12:
+                    break
+            if len(unsupported_blocks) >= 12:
+                break
+        return f"""
+FOCUSED REPAIR REQUIRED:
+- The previous JSON included same-block scene claims that were not supported by the block's visual_facts, visual description, or timestamped evidence. These claims make narration feel misaligned with the picture.
+- Keep exactly {block_count} narration_blocks. Preserve locked start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps unless a local boundary is already invalid for sync.
+- Rewrite the affected narration fields so they describe only what is visible in that same timestamp range. Do not claim relief, nervous body reactions, leaving/downclimbing, completion, secured state, collected result, or next off-screen step unless that same block's evidence explicitly shows it.
+- If the claim is important and supported in a later or earlier timestamp, move the claim to that block's narration instead of leaving it on the wrong visual range.
+- Do not invent replacement facts, do not write filler, and do not rely on old source narration being audible.
+UNSUPPORTED SAME-BLOCK CLAIMS:
+{json.dumps(unsupported_blocks, ensure_ascii=False)}
 """.strip()
     density_details = _density_validation_failure_details(validation_error, invalid_script)
     if density_details:
@@ -5742,8 +7257,23 @@ def _retry_correction_note(previous_error: Optional[str]) -> str:
             "The script described actions but did not explain enough same-range operation logic, purpose, or visible results. "
             "In the next script, keep narration grounded in each timestamp range and rewrite ordinary process blocks with visible action first, then a concise why/purpose/result sentence where supported by the evidence."
         )
+    if "Custom style narration quality validation failed" in error_text:
+        return (
+            "\n\nRetry correction note:\n"
+            "The previous run failed because the selected custom commentary style was not actually followed at the wording level. "
+            "The script overused generic subjects such as workers, hands, and tools, or used sentences that were too long for the compact action-first style. "
+            "In the next script, keep the visual evidence real, but write short dense clauses with concrete tool/material/action/result phrasing instead of repeating generic worker/hand sentence starters."
+        )
+    if "whole-video repetitive wording" in error_text:
+        return (
+            "\n\nRetry correction note:\n"
+            "The previous run failed because the complete commentary repeated the same wording patterns across the whole video. "
+            "Treat this as a global script rewrite, not a banned-word replacement: keep the selected visual evidence and timing, but vary sentence openings, purpose/result explanations, transitions, reactions, and payoff wording for each block. "
+            "Repeated visible object names are fine when necessary; repeated filler templates, catchphrases, and formulaic oral-broadcast habits are not."
+        )
     unsupported_claim_error = bool(re.search(
         r"concrete action claim|"
+        r"unsupported same-block scene claim|"
         r"concrete claim|"
         r"claim(?:ed|s)? .* not supported|"
         r"not supported by (?:its|the) selected visual range",
@@ -5788,6 +7318,9 @@ def _previous_error_invalidates_cached_script(previous_error: Optional[str]) -> 
     script_or_timeline_error = re.search(
         r"AI narration|"
         r"narration_blocks?|"
+        r"whole-video repetitive wording|"
+        r"unsupported same-block scene claim|"
+        r"Custom style narration quality validation failed|"
         r"visual range|"
         r"visual timeline|"
         r"full-mode edit target|"
@@ -5801,6 +7334,130 @@ def _previous_error_invalidates_cached_script(previous_error: Optional[str]) -> 
         flags=re.IGNORECASE,
     )
     return bool(script_or_timeline_error)
+
+
+def _restore_openai_edit_first_cached_render_context(
+    script: Dict,
+    output_dir: str,
+    source_video_path: Optional[str] = None,
+    aspect_mode: str = "16:9",
+    require_audio: bool = False,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[Optional[str], Optional[Dict], List[Dict], Optional[float]]:
+    if not isinstance(script, dict):
+        return None, None, [], None
+    metadata = script.get("_openai_edit_first") if isinstance(script.get("_openai_edit_first"), dict) else {}
+    if not metadata or metadata.get("enabled") is not True:
+        return None, None, [], None
+    intermediate_path = str(metadata.get("intermediate_edit_path") or "").strip()
+    if not intermediate_path:
+        intermediate_name = str((script.get("_openai_analysis") or {}).get("intermediate_edit") or "").strip()
+        if intermediate_name:
+            intermediate_path = os.path.join(output_dir, intermediate_name)
+    if not intermediate_path or not os.path.isabs(intermediate_path):
+        intermediate_path = os.path.join(output_dir, intermediate_path) if intermediate_path else ""
+    if not intermediate_path or not os.path.exists(intermediate_path):
+        raise Exception(
+            "Cached OpenAI edit-first script is missing its intermediate visual edit. "
+            "Regenerate the commentary instead of rendering edited-video narration against the original source."
+        )
+
+    edited_visual_analysis = None
+    edited_analysis_path = str(metadata.get("edited_visual_analysis_path") or "").strip()
+    if edited_analysis_path and not os.path.isabs(edited_analysis_path):
+        edited_analysis_path = os.path.join(output_dir, edited_analysis_path)
+    if edited_analysis_path and os.path.exists(edited_analysis_path):
+        try:
+            with open(edited_analysis_path, "r", encoding="utf-8") as f:
+                edited_visual_analysis = json.load(f) or None
+        except Exception:
+            edited_visual_analysis = None
+    if isinstance(edited_visual_analysis, dict):
+        edited_visual_analysis["analysis_stage"] = "edited_video_commentary"
+    source_edit_timeline = metadata.get("source_edit_timeline") if isinstance(metadata.get("source_edit_timeline"), list) else []
+    source_analysis_path = str(metadata.get("source_visual_analysis_path") or "").strip()
+    if source_analysis_path and not os.path.isabs(source_analysis_path):
+        source_analysis_path = os.path.join(output_dir, source_analysis_path)
+    if not source_analysis_path:
+        source_analysis_path = _openai_visual_analysis_cache_path(output_dir)
+    if source_edit_timeline and source_analysis_path and os.path.exists(source_analysis_path):
+        try:
+            with open(source_analysis_path, "r", encoding="utf-8") as f:
+                source_visual_analysis = json.load(f) or None
+        except Exception:
+            source_visual_analysis = None
+        if isinstance(source_visual_analysis, dict):
+            target_duration = str(metadata.get("source_target_duration") or "full")
+            source_duration = max(
+                (float(block.get("source_end") or block.get("end") or 0.0) for block in source_edit_timeline if isinstance(block, dict)),
+                default=0.0,
+            )
+            source_duration = max(
+                source_duration,
+                max(
+                    (float(segment.get("end") or 0.0) for segment in source_visual_analysis.get("candidate_segments") or [] if isinstance(segment, dict)),
+                    default=0.0,
+                ),
+                max(
+                    (float(frame.get("timestamp") or 0.0) for frame in source_visual_analysis.get("frames") or [] if isinstance(frame, dict)),
+                    default=0.0,
+                ),
+            )
+            source_video_path = str(source_visual_analysis.get("source_video_path") or "").strip()
+            if source_video_path and os.path.exists(source_video_path):
+                source_duration = max(source_duration, _get_video_duration(source_video_path) or 0.0)
+            target_seconds = _target_visual_duration_seconds_for_analysis(
+                source_duration,
+                target_duration,
+                source_visual_analysis,
+            )
+            source_blocks = []
+            for item in source_edit_timeline:
+                if not isinstance(item, dict):
+                    continue
+                block = dict(item)
+                if "start" not in block and "source_start" in block:
+                    block["start"] = block.get("source_start")
+                if "end" not in block and "source_end" in block:
+                    block["end"] = block.get("source_end")
+                block.setdefault("pause", False)
+                block.setdefault("video_speed", item.get("video_speed", 1.0))
+                source_blocks.append(block)
+            _validate_openai_selected_ranges_are_important(
+                source_blocks,
+                source_visual_analysis,
+                source_duration,
+                target_seconds,
+            )
+    if (
+        require_audio
+        and source_edit_timeline
+        and source_video_path
+        and os.path.exists(source_video_path)
+        and _has_audio_stream(source_video_path)
+        and not _has_audio_stream(intermediate_path)
+    ):
+        if progress:
+            progress("Cached OpenAI intermediate edit has no source audio; rebuilding it with synced original audio.")
+        source_segments = _edit_segments_from_source_timeline(source_edit_timeline)
+        if source_segments:
+            rebuild_dir = os.path.join(output_dir, "openai_edit_first_rebuild")
+            os.makedirs(rebuild_dir, exist_ok=True)
+            rebuilt_path = os.path.join(output_dir, "openai_selected_visual_edit_with_audio.mp4")
+            _create_visual_edit(
+                source_video_path,
+                source_segments,
+                rebuilt_path,
+                aspect_mode,
+                rebuild_dir,
+                preserve_source_resolution=False,
+                include_audio=True,
+            )
+            intermediate_path = rebuilt_path
+    render_duration = _get_video_duration(intermediate_path) or None
+    if progress:
+        progress("Restored OpenAI edit-first cached script against the intermediate edited video.")
+    return intermediate_path, edited_visual_analysis, source_edit_timeline, render_duration
 
 
 
@@ -5868,6 +7525,7 @@ REGENERATE FROM THE ATTACHED VIDEO:
 {timeline_rules}
 - Write clear scene-matched narration for the edited visuals. Explain what is happening on screen in each timestamp range; do not add filler, but do not intentionally shorten the explanation.
 {_banned_phrase_instruction()}
+{_global_commentary_variety_instruction()}
 - Narration must be at most {max_chars} non-whitespace characters so it remains speakable with the selected visuals; shorter commentary is valid only when it still explains the visible content clearly.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, video_speed, and speed_reason.
 - If episode_plan.should_split=true, keep episodes aligned to the repaired 1-based narration_blocks indexes using start_block and end_block.
@@ -5914,7 +7572,7 @@ def _build_visual_plan_finalization_prompt(
         target_seconds=target_seconds,
     )
     repair_scope_instruction = _repair_scope_instruction(validation_error, f"finalization attempt {attempt}")
-    custom_style_instruction = _custom_style_instruction(custom_style_prompt)
+    custom_style_instruction = _custom_style_instruction(custom_style_prompt, language)
     return f"""You are writing the final voiceover for a commentary remix.
 
 VIDEO-DERIVED VISUAL PLAN:
@@ -5936,6 +7594,7 @@ FINALIZE COMPLETE COMMENTARY:
 {timeline_rules}
 - Write a complete Simplified Chinese voiceover for the edited visuals. Explain the timestamped visual content clearly; use pauses only where the picture or original sound genuinely carries the meaning.
 {_banned_phrase_instruction()}
+{_global_commentary_variety_instruction()}
 - The top-level title must clearly say what the video is doing: name the concrete subject, process/action, and result or purpose. Use titles like "废旧电机拆解回收铜线全过程" instead of vague hype titles like "震撼工厂全过程" or "不可思议的改造".
 - The final narration must be at most {max_chars} non-whitespace characters so it remains speakable with the selected visuals; shorter commentary is valid only when it still explains the selected visuals clearly.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, video_speed, and speed_reason.
@@ -6166,6 +7825,8 @@ def _openai_candidate_edit_plan_prompt_text(edit_plan: Optional[Dict]) -> str:
         "planned_source_seconds": round(float(edit_plan.get("source_seconds") or 0.0), 1),
         "blocks": edit_plan.get("blocks") or [],
     }
+    if edit_plan.get("locked_edited_video_timeline"):
+        plan["locked_edited_video_timeline"] = True
     return json.dumps(plan, ensure_ascii=False)
 
 
@@ -6175,6 +7836,10 @@ def _locked_plan_block_guidance_text() -> str:
         "write concrete scene-matched detail from that exact visual range rather than filler. "
         "Do not add, remove, retime, or reinterpret the locked visual range; any concrete claim must be grounded in that block's visual_facts and evidence_timestamps."
     )
+
+
+def _plan_block_from_edited_video_timeline(edit_plan: Optional[Dict]) -> bool:
+    return bool(isinstance(edit_plan, dict) and edit_plan.get("locked_edited_video_timeline"))
 
 
 def _apply_openai_candidate_edit_plan(data: Dict, edit_plan: Optional[Dict], language: str = "") -> None:
@@ -6202,6 +7867,7 @@ def _apply_openai_candidate_edit_plan(data: Dict, edit_plan: Optional[Dict], lan
     fallback_index = 0
     rewritten = []
     used_model_indexes = set()
+    allow_positional_timestamped_blocks = _plan_block_from_edited_video_timeline(edit_plan)
     for index, plan_block in enumerate(plan_blocks):
         model_block = {}
         plan_start = float(plan_block.get("start") or 0.0)
@@ -6242,7 +7908,7 @@ def _apply_openai_candidate_edit_plan(data: Dict, edit_plan: Optional[Dict], lan
                 has_positional_timestamps = True
             except (TypeError, ValueError):
                 has_positional_timestamps = False
-            if not has_positional_timestamps:
+            if allow_positional_timestamped_blocks or not has_positional_timestamps:
                 model_block = positional_block
                 used_model_indexes.add(index)
         narration = str(model_block.get("narration") or model_block.get("text") or "").strip()
@@ -6562,7 +8228,7 @@ def _build_commentary_prompt(
         else "- For TARGET DURATION full, pause blocks should use the original source audio as the main sound, but total pause time must stay under about 25% of selected visual time. Avoid more than two pause blocks back-to-back."
     )
     style_grounding = _style_grounding_instruction(style, language)
-    custom_style_instruction = _custom_style_instruction(custom_style_prompt)
+    custom_style_instruction = _custom_style_instruction(custom_style_prompt, language)
     json_output_contract = _commentary_json_output_contract(block_count, target_duration)
 
     visual_analysis_text = ""
@@ -6637,6 +8303,13 @@ BACKEND-CALCULATED EDIT PLAN FROM AI VISUAL CANDIDATES:
         if locked_edit_plan_text
         else ""
     )
+    if locked_edit_plan_text and openai_candidate_edit_plan and openai_candidate_edit_plan.get("locked_edited_video_timeline"):
+        locked_edit_plan_rule = (
+            "- BACKEND-CALCULATED EDIT PLAN is the already-rendered intermediate edited video's real timeline, "
+            "built from actual output ranges and extracted frame evidence. Use exactly these plan blocks and exactly "
+            f"their start, end, video_speed, speed_reason, visual_facts, and evidence_timestamps. Do not select a shorter highlights reel, "
+            f"do not remove quiet process ranges, and do not invent replacement ranges. Your job is only to write narration for each locked edited-video range. {_locked_plan_block_guidance_text()}"
+        )
     production_timeline_rule = (
         "- Treat narration_blocks as the production timeline: each block's start/end is the edited-video range that will play while that exact block's narration is spoken."
         if is_edited_video_commentary
@@ -6692,6 +8365,7 @@ VISUAL CONTEXT:
 {locked_edit_plan_section}
 RULES:
 {_banned_phrase_instruction()}
+{_global_commentary_variety_instruction()}
 - Do not merely translate the transcript.
 - Rewrite it as an original, natural commentary narration.
 - Preserve the important facts, sequence, and context from the source.
@@ -6712,6 +8386,7 @@ RULES:
 - Any concrete action, state change, result, object identity, quantity, danger, or completion claim must be supported by that same block's timestamped visual evidence or transcript evidence. Do not move a claim onto a later loose close-up, aftermath shot, earlier setup, or unrelated range that does not show the described content.
 - Keep each block self-contained: first ground the viewer in the concrete visible action, then add interpretation or commentary for that exact action.
 - {style_grounding}{custom_style_instruction}
+- If a custom style is provided, apply it to narration_blocks.narration, not only title/summary. For Chinese action-first technical styles, avoid making most clauses start with generic subjects like "工人", "手", "手指", "工具", "两人", or "三人"; use concrete tool/material/part/action/result phrasing when the same evidence supports it.
 {timeline_rules}
 - For TARGET DURATION full, if the source has a final payoff, result reveal, before/after comparison, effect showcase, completed product, or conclusion, include the visual range where that result actually appears and let it play through.
 - For TARGET DURATION full, the selected blocks must not stop in the first half of a long source; at least one narration_blocks item must end after {int(duration * FULL_MODE_MIN_TIMELINE_COVERAGE_FRACTION)} seconds.
@@ -6802,6 +8477,15 @@ def _openai_chat_completions_url(base_url: str) -> str:
     return f"{normalized}/v1/chat/completions"
 
 
+def _openai_httpx_trust_env(base_url: str) -> bool:
+    try:
+        parsed = urlparse(str(base_url or "").strip())
+    except Exception:
+        return True
+    host = (parsed.hostname or "").strip().lower()
+    return host not in {"127.0.0.1", "localhost", "::1"}
+
+
 def _openai_image_content_part(image_path: str) -> Dict:
     with open(image_path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
@@ -6866,23 +8550,37 @@ def _call_openai_compatible_chat(
     last_error = None
     response_format_downgraded = False
     response_format_removed = False
-    for attempt in range(1, OPENAI_REQUEST_RETRIES + 1):
+    retry_limit = OPENAI_REQUEST_RETRIES
+    transient_408_text = ""
+    for attempt in range(1, OPENAI_STREAM_DISCONNECT_RETRIES + 1):
         try:
-            with httpx.Client(timeout=request_timeout, follow_redirects=True) as client:
+            with httpx.Client(timeout=request_timeout, follow_redirects=True, trust_env=_openai_httpx_trust_env(base_url)) as client:
                 response = client.post(url, headers=headers, json=payload)
         except Exception as exc:
             last_error = exc
-            if attempt >= OPENAI_REQUEST_RETRIES:
+            if attempt >= retry_limit:
                 raise Exception(f"OpenAI-compatible API request failed after {attempt} attempts: {exc}") from exc
             time.sleep(min(2 ** attempt, 8))
             continue
         if response.status_code < 400:
             break
+        response_text = response.text[:1200]
+        response_text_lower = response_text.lower()
+        stream_disconnected = bool(re.search(
+            r"stream disconnected|response\.completed|before response\.completed|timeout|timed out",
+            response_text_lower,
+            flags=re.IGNORECASE,
+        ))
+        if response.status_code in {408, 409} and stream_disconnected:
+            retry_limit = max(retry_limit, OPENAI_STREAM_DISCONNECT_RETRIES)
+            transient_408_text = response_text
+        elif response.status_code in {408, 409}:
+            retry_limit = max(retry_limit, OPENAI_REQUEST_RETRIES)
         if (
             response_format
             and not response_format_downgraded
             and response.status_code in {400, 422}
-            and "response_format" in response.text
+            and "response_format" in response_text
         ):
             if response_format.get("type") == "json_schema":
                 payload["response_format"] = {"type": "json_object"}
@@ -6894,20 +8592,25 @@ def _call_openai_compatible_chat(
             response_format_downgraded
             and not response_format_removed
             and response.status_code in {400, 422}
-            and "response_format" in response.text
+            and "response_format" in response_text
         ):
             payload.pop("response_format", None)
             response_format_removed = True
             continue
-        if response.status_code < 500 and response.status_code != 429:
+        if response.status_code < 500 and response.status_code not in {408, 409, 429}:
             raise Exception(
                 "OpenAI-compatible API returned an error: "
-                f"HTTP {response.status_code} {response.text[:1200]}"
+                f"HTTP {response.status_code} {response_text}"
             )
-        if attempt >= OPENAI_REQUEST_RETRIES:
+        if attempt >= retry_limit:
+            if transient_408_text:
+                raise Exception(
+                    "OpenAI-compatible API stream disconnected after "
+                    f"{attempt} attempts: HTTP {response.status_code} {transient_408_text}"
+                )
             raise Exception(
                 "OpenAI-compatible API returned an error after "
-                f"{attempt} attempts: HTTP {response.status_code} {response.text[:1200]}"
+                f"{attempt} attempts: HTTP {response.status_code} {response_text}"
             )
         time.sleep(min(2 ** attempt, 8))
     if response is None:
@@ -6920,6 +8623,17 @@ def _call_openai_compatible_chat(
     if not text:
         raise Exception("OpenAI-compatible API returned empty response text")
     return text
+
+
+def _is_openai_stream_disconnect_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return bool(
+        "stream disconnected" in text
+        or "response.completed" in text
+        or "http 408" in text
+        or "timed out" in text
+        or "timeout" in text
+    )
 
 
 def _select_openai_uniform_frame_samples(duration: float, sampling_options: Optional[Dict] = None) -> List[Dict]:
@@ -7569,9 +9283,11 @@ def _analyze_openai_visual_timeline(
     candidate_segments = []
     source_commentary_timeline = _format_source_commentary_timeline(transcript)
     source_audio_analysis_timeline = _format_source_audio_analysis_timeline(source_audio_analysis)
+    total_batches = len(batches)
 
-    def analyze_batch(index: int, batch: List[Dict]) -> Dict:
+    def analyze_batch(index: int, batch: List[Dict], batch_label: Optional[str] = None) -> Dict:
         _raise_if_commentary_cancelled()
+        label = batch_label or str(index)
         batch_timestamps = []
         for frame in batch:
             try:
@@ -7603,26 +9319,48 @@ def _analyze_openai_visual_timeline(
             duration,
             batch,
             index,
-            len(batches),
+            total_batches,
             source_commentary_timeline=local_source_commentary_timeline,
             source_audio_analysis_timeline=local_source_audio_analysis_timeline,
         )
-        text = _call_openai_compatible_chat(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            messages=_build_openai_visual_batch_messages(prompt, batch),
-            max_tokens=OPENAI_VISUAL_MAX_TOKENS,
-            response_format={"type": "json_object"},
-        )
+        try:
+            text = _call_openai_compatible_chat(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                messages=_build_openai_visual_batch_messages(prompt, batch),
+                max_tokens=OPENAI_VISUAL_MAX_TOKENS,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if _is_openai_stream_disconnect_error(exc) and len(batch) > 1:
+                midpoint = max(1, len(batch) // 2)
+                if progress:
+                    progress(
+                        "OpenAI-compatible visual analysis stream disconnected on "
+                        f"batch {label}/{total_batches}; splitting {len(batch)} frames into "
+                        f"{midpoint}+{len(batch) - midpoint} smaller real-evidence batches..."
+                    )
+                left = analyze_batch(index, batch[:midpoint], batch_label=f"{label}a")
+                right = analyze_batch(index, batch[midpoint:], batch_label=f"{label}b")
+                return {
+                    "batch_index": index,
+                    "split_batch": True,
+                    "split_reason": "provider stream disconnected before completing the larger batch",
+                    "frame_labels": (left.get("frame_labels") or []) + (right.get("frame_labels") or []),
+                    "observations": (left.get("observations") or []) + (right.get("observations") or []),
+                    "candidate_segments": (left.get("candidate_segments") or []) + (right.get("candidate_segments") or []),
+                    "batches": [left, right],
+                }
+            raise
         try:
             parsed = _parse_openai_json(text)
         except Exception:
             parsed = {
                 "batch_index": index,
-                "raw_analysis": text[:4000],
-                "frame_timestamps": [frame["timestamp"] for frame in batch],
-            }
+            "raw_analysis": text[:4000],
+            "frame_timestamps": [frame["timestamp"] for frame in batch],
+        }
         return _normalize_openai_visual_batch_result(parsed, batch)
 
     if progress:
@@ -7743,6 +9481,7 @@ VALIDATION ERROR:
 REPAIR FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 - {repair_scope_instruction}
 - Repartition the complete edit for the requested {duration_label} commentary. The final narration_blocks/edit_segments playable time after video_speed must not exceed {max_seconds:.0f} seconds; aim for at least {min_seconds:.0f} seconds only when the source has enough useful non-repetitive material.
+{_global_commentary_variety_instruction()}
 - Do not output the whole source timeline or a near-full-source edit. Select only the strongest useful source ranges from the available visual evidence, keep chronological order, remove repetitive/waiting/setup/camera-drift/low-value footage, and use justified video_speed for slow-but-useful ranges.
 - Each narration_blocks item must match its exact visible range. If a block would be too long for its narration, shorten the source range, split the block, or cut the weak tail.
 - Return narration_blocks with start, end, visual, narration, pause, rate, pitch, video_speed, and speed_reason. Keep pause=true blocks brief and only when the original picture or sound should carry the moment.
@@ -7776,6 +9515,7 @@ REPAIR FROM THE TRANSCRIPT AND MULTIMODAL VISUAL TIMELINE:
 {locked_plan_instruction}
 {timeline_rules}
 {_banned_phrase_instruction()}
+{_global_commentary_variety_instruction()}
 - Narration must be at most {max_chars} non-whitespace characters so it remains speakable with the selected visuals; shorter commentary is valid only when it still explains the visible content clearly.
 - Return exactly {block_count} narration_blocks with start, end, visual, narration, pause, rate, pitch, video_speed, and speed_reason.
 - For each non-pause block, set visual to concrete on-screen evidence from that exact timestamp range. In OpenAI-compatible mode, include evidence_timestamps copied from the extracted frame timestamps; these fields are used to keep narration grounded in the selected visuals.
@@ -7843,6 +9583,7 @@ def generate_openai_commentary_script(
     source_audio_analysis: Optional[Dict] = None,
     precomputed_visual_analysis: Optional[Dict] = None,
     lock_candidate_edit_plan: Optional[bool] = None,
+    precomputed_candidate_edit_plan: Optional[Dict] = None,
 ) -> Dict:
     visual_analysis = precomputed_visual_analysis
     if not visual_analysis:
@@ -7883,14 +9624,18 @@ def generate_openai_commentary_script(
         raise Exception("OpenAI-compatible analysis mode did not produce visual analysis.")
     use_locked_candidate_plan = OPENAI_LOCK_CANDIDATE_EDIT_PLAN if lock_candidate_edit_plan is None else bool(lock_candidate_edit_plan)
     candidate_edit_plan = (
-        _build_openai_candidate_edit_plan(
-            visual_analysis,
-            duration,
-            target_duration,
-            language,
+        precomputed_candidate_edit_plan
+        if precomputed_candidate_edit_plan
+        else (
+            _build_openai_candidate_edit_plan(
+                visual_analysis,
+                duration,
+                target_duration,
+                language,
+            )
+            if use_locked_candidate_plan
+            else None
         )
-        if use_locked_candidate_plan
-        else None
     )
     if candidate_edit_plan and progress:
         progress(
@@ -8002,6 +9747,7 @@ def generate_openai_commentary_script(
                 language,
                 visual_analysis=visual_analysis,
                 custom_style_prompt=custom_style_prompt,
+                validate_global_repetition=True,
             )
             data.setdefault("chapters", [])
             data.setdefault("hashtags", [])
@@ -8203,6 +9949,7 @@ def _openai_generate_edit_first_commentary_script(
         aspect_mode,
         intermediate_dir,
         preserve_source_resolution=False,
+        include_audio=_has_audio_stream(source_video_path),
     )
     actual_edited_duration = _get_video_duration(edited_video_path)
     if actual_edited_duration > 0:
@@ -8264,6 +10011,17 @@ def _openai_generate_edit_first_commentary_script(
 
     if progress:
         progress("Writing final commentary from the edited-video analysis and full-source context...")
+    edited_narration_plan = _build_locked_edited_video_narration_plan(
+        edited_visual_analysis,
+        edit_timeline,
+        edited_duration,
+        language,
+    )
+    if not edited_narration_plan:
+        raise Exception(
+            "OpenAI-compatible edit-first flow could not build a timestamp-evidenced narration plan "
+            "for the intermediate edited video. Regenerate with denser edited-video frame analysis instead of inventing filler ranges."
+        )
     edited_script = generate_openai_commentary_script(
         transcript=remapped_transcript,
         video_title=video_title,
@@ -8283,7 +10041,8 @@ def _openai_generate_edit_first_commentary_script(
         preserve_internal_sync_fields=True,
         source_audio_analysis=None,
         precomputed_visual_analysis=edited_visual_analysis,
-        lock_candidate_edit_plan=False,
+        lock_candidate_edit_plan=True,
+        precomputed_candidate_edit_plan=edited_narration_plan,
     )
     final_blocks = _blocks_from_edited_timeline_script(edited_script, edit_timeline, language)
     if not final_blocks:
@@ -8326,6 +10085,7 @@ def _openai_generate_edit_first_commentary_script(
         language,
         visual_analysis=edited_visual_analysis,
         custom_style_prompt=custom_style_prompt,
+        validate_global_repetition=True,
     )
     return final_script, source_visual_analysis, edited_visual_analysis, edited_video_path, edit_timeline, edited_duration
 
@@ -9034,7 +10794,13 @@ def generate_commentary_script(
                 target_duration,
                 language,
                 custom_style_prompt=custom_style_prompt,
+                validate_global_repetition=False,
             )
+            if _global_commentary_repetition_failure_details(data, language) and progress:
+                progress(
+                    "Gemini commentary script still repeats whole-video wording patterns; "
+                    "using the valid scene-synced script and leaving variety improvement to the next regeneration."
+                )
             data.setdefault("chapters", [])
             data.setdefault("hashtags", [])
             if data.get("narration_blocks"):
@@ -9120,6 +10886,7 @@ def _create_visual_edit(
     aspect_mode: str,
     work_dir: str,
     preserve_source_resolution: bool = False,
+    include_audio: bool = False,
 ) -> None:
     segments = list(edit_segments or [])
     if not segments:
@@ -9135,16 +10902,22 @@ def _create_visual_edit(
         speed = _safe_render_video_speed(segment.get("video_speed") or segment.get("speed"))
         filters = []
         if speed > 1.0001:
-            filters.append(f"setpts=PTS*{(1.0 / speed):.6f}")
+            filters.append(f"setpts=PTS/{speed:.6f}")
         if vf:
             filters.append(vf)
+        audio_filters = []
+        if include_audio and speed > 1.0001:
+            audio_filters.append(_atempo_filter(speed))
         cmd = [
             "ffmpeg", "-y",
             "-ss", f"{float(segment['start']):.3f}",
             "-t", f"{duration:.3f}",
             "-i", video_path,
-            "-an",
         ]
+        if include_audio:
+            cmd.extend(["-map", "0:v:0", "-map", "0:a?"])
+        else:
+            cmd.append("-an")
         if filters:
             cmd.extend([
                 "-vf", ",".join(filters),
@@ -9154,6 +10927,10 @@ def _create_visual_edit(
             ])
         else:
             cmd.extend(["-c:v", "copy"])
+        if include_audio:
+            if audio_filters:
+                cmd.extend(["-af", ",".join(audio_filters)])
+            cmd.extend(["-c:a", "aac", "-b:a", "128k"])
         cmd.append(part_path)
         _run_command(cmd)
         part_paths.append(part_path)
@@ -9299,7 +11076,7 @@ def _fit_video_to_voiceover(video_path: str, voiceover_path: str, output_path: s
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-filter:v", f"setpts=PTS*{(1.0 / ratio):.6f}",
+        "-filter:v", f"setpts=PTS/{ratio:.6f}",
         "-an",
         "-c:v", "libx264",
         "-preset", "fast",
@@ -9368,7 +11145,6 @@ def _concat_audio_parts_precise(paths: List[str], output_path: str, codec: str =
     ])
     if audio_codec == "aac" and bitrate:
         cmd.extend(["-b:a", bitrate])
-    cmd.extend(_ffmpeg_output_format_args(output_path))
     cmd.append(output_path)
     _run_command(cmd)
 
@@ -9532,7 +11308,7 @@ def _block_video_filter(aspect_filter: str, speed: float) -> str:
     filters = []
     speed = _safe_render_video_speed(speed)
     if speed > 1.0001:
-        filters.append(f"setpts=PTS*{(1.0 / speed):.6f}")
+        filters.append(f"setpts=PTS/{speed:.6f}")
     if aspect_filter:
         filters.append(aspect_filter)
     return ",".join(filters) or "setsar=1"
@@ -9775,12 +11551,39 @@ def _create_block_synced_visuals_and_audio(
                 trimmed_block_end = source_start + narrated_source_duration
                 evidence = _block_evidence_timestamps(block)
                 if evidence and not all(source_start - 0.35 <= timestamp <= trimmed_block_end + 0.35 for timestamp in evidence):
-                    raise Exception(
-                        "A timestamped commentary block cannot be trimmed without losing its visual evidence. "
-                        f"Block {index} would keep {source_start:.3f}-{trimmed_block_end:.3f}s, "
-                        f"but its evidence_timestamps are {evidence}. "
-                        "Shorten the selected source range around the evidence timestamps, add fuller scene-matched narration, or render the leftover visual as pause=true."
+                    tail_source_duration = max(0.1, source_duration - narrated_source_duration)
+                    tail_visual_duration = tail_source_duration / video_speed
+                    report(
+                        f"Splitting short-TTS commentary block {index}/{total_blocks}: "
+                        f"{last_voice_duration:.1f}s audio supports {narrated_visual_duration:.1f}s of "
+                        f"{visual_duration:.1f}s visuals; keeping {tail_visual_duration:.1f}s as pause to preserve timestamp evidence."
                     )
+                    return [
+                        render_segment(
+                            index=index,
+                            sub_index=0,
+                            block=block,
+                            source_start=source_start,
+                            render_source_duration=narrated_source_duration,
+                            video_speed=video_speed,
+                            visual_duration=narrated_visual_duration,
+                            is_pause=False,
+                            voice_path=block_voice_path,
+                            narration_text=narration_text,
+                        ),
+                        render_segment(
+                            index=index,
+                            sub_index=1,
+                            block=block,
+                            source_start=source_start + narrated_source_duration,
+                            render_source_duration=tail_source_duration,
+                            video_speed=video_speed,
+                            visual_duration=tail_visual_duration,
+                            is_pause=True,
+                            voice_path=None,
+                            narration_text="",
+                        ),
+                    ]
                 report(
                     f"Trimming short-TTS commentary block {index}/{total_blocks}: "
                     f"{last_voice_duration:.1f}s audio supports {narrated_visual_duration:.1f}s of "
@@ -10539,9 +12342,11 @@ def generate_commentary_video(
             "language": source_language or "unknown",
         }
         source_has_spoken_commentary = _transcript_has_source_commentary(transcript)
+        cached_validation_duration = duration
+        cached_validation_target_duration = target_duration
         if (
             not source_has_spoken_commentary
-            and _should_check_source_commentary_for_audio_muting(
+            and _should_transcribe_source_commentary_context(
                 effective_original_audio_volume,
                 effective_pause_original_audio_volume,
                 target_duration,
@@ -10556,11 +12361,11 @@ def generate_commentary_video(
                     progress=log,
                     checkpoint=checkpoint,
                     cached_message="Reusing cached Faster-Whisper transcript for source-commentary audio check...",
-                    transcribe_message="Transcribing source audio with Faster-Whisper for original-commentary muting check...",
+                    transcribe_message="Transcribing source audio with Faster-Whisper for original-commentary context...",
                 )
                 source_has_spoken_commentary = _transcript_has_source_commentary(transcript)
             except Exception as exc:
-                log(f"Could not transcribe source audio for original-commentary muting check: {str(exc)[:300]}")
+                log(f"Could not transcribe source audio for original-commentary context: {str(exc)[:300]}")
         if source_has_spoken_commentary:
             cached_metadata_path = os.path.splitext(cached_script_path)[0].replace("_script", "_metadata") + ".json"
             cached_metadata = {}
@@ -10571,31 +12376,53 @@ def generate_commentary_video(
                 except Exception:
                     cached_metadata = {}
             if cached_metadata.get("source_has_spoken_commentary") is not True:
-                log("Cached commentary script was generated before source-commentary audio muting; regenerating script.")
-                cached_script_path = None
-                using_rendered_cached_script = False
-                script = None
-                transcript = {
-                    "text": "",
-                    "segments": [],
-                    "language": source_language or "unknown",
-                }
-                source_has_spoken_commentary = False
+                log(
+                    "Cached commentary script lacks source-commentary context metadata; "
+                    "reusing the validated script and preserving the configured source-audio mix levels."
+                )
         try:
             if cached_script_path:
-                _normalize_script_timeline(script, duration, target_duration, language)
-                using_rendered_cached_script = target_duration == "full" and _is_rendered_cached_full_mode_script(script)
+                if analysis_mode == "openai":
+                    (
+                        restored_render_video_path,
+                        restored_edited_visual_analysis,
+                        restored_source_edit_timeline,
+                        restored_render_duration,
+                    ) = _restore_openai_edit_first_cached_render_context(
+                        script,
+                        output_dir,
+                        source_video_path=video_path,
+                        aspect_mode=resolved_aspect,
+                        require_audio=effective_original_audio_volume > 0 or effective_pause_original_audio_volume > 0,
+                        progress=log,
+                    )
+                    if restored_render_video_path:
+                        openai_intermediate_edit_path = restored_render_video_path
+                        render_video_path = restored_render_video_path
+                        openai_edited_visual_analysis = restored_edited_visual_analysis
+                        openai_source_edit_timeline = restored_source_edit_timeline
+                        render_duration = restored_render_duration
+                        cached_validation_duration = float(render_duration or _get_video_duration(render_video_path) or duration)
+                        cached_validation_target_duration = "full"
+                _normalize_script_timeline(script, cached_validation_duration, cached_validation_target_duration, language)
+                using_rendered_cached_script = cached_validation_target_duration == "full" and _is_rendered_cached_full_mode_script(script)
                 _validate_rendered_cached_full_mode_script(
                     script,
-                    duration,
-                    target_duration,
+                    cached_validation_duration,
+                    cached_validation_target_duration,
                     language,
                     custom_style_prompt=custom_style_prompt,
+                    validate_global_repetition=True,
                 )
         except Exception as exc:
             log(f"Cached commentary script failed current sync validation; regenerating script: {exc}")
             cached_script_path = None
             using_rendered_cached_script = False
+            openai_intermediate_edit_path = None
+            render_video_path = None
+            openai_edited_visual_analysis = None
+            openai_source_edit_timeline = []
+            render_duration = None
     else:
         cached_script_path = None
 
@@ -10676,7 +12503,7 @@ def generate_commentary_video(
             }
             source_has_spoken_commentary = False
             if (
-                _should_check_source_commentary_for_audio_muting(
+                _should_transcribe_source_commentary_context(
                     effective_original_audio_volume,
                     effective_pause_original_audio_volume,
                     target_duration,
@@ -10691,11 +12518,11 @@ def generate_commentary_video(
                         progress=log,
                         checkpoint=checkpoint,
                         cached_message="Reusing cached Faster-Whisper transcript for source-commentary audio check...",
-                        transcribe_message="Transcribing source audio with Faster-Whisper to detect original commentary before render...",
+                    transcribe_message="Transcribing source audio with Faster-Whisper to detect original commentary before render...",
                     )
                     source_has_spoken_commentary = _transcript_has_source_commentary(transcript)
                 except Exception as exc:
-                    log(f"Could not transcribe source audio for original-commentary muting check: {str(exc)[:300]}")
+                    log(f"Could not transcribe source audio for original-commentary context: {str(exc)[:300]}")
                     transcript = {
                         "text": "",
                         "segments": [],
@@ -10809,17 +12636,11 @@ def generate_commentary_video(
                     previous_error=previous_error,
                 )
 
-    if source_has_spoken_commentary:
-        if effective_original_audio_volume > 0 or effective_pause_original_audio_volume > 0:
-            log(
-                "Source video contains spoken commentary; muting original source audio in the final remix "
-                "so the old narration does not overlap the new voiceover."
-            )
-        effective_original_audio_volume = 0.0
-        effective_pause_original_audio_volume = 0.0
-        for block in (script.get("narration_blocks") or []):
-            if isinstance(block, dict) and bool(block.get("pause")):
-                block["source_audio_muted"] = True
+    if source_has_spoken_commentary and (effective_original_audio_volume > 0 or effective_pause_original_audio_volume > 0):
+        log(
+            "Source video contains spoken commentary; preserving source audio at the configured mix levels "
+            "so ambient/process sound remains audible."
+        )
 
     _raise_if_commentary_cancelled()
     active_video_path = render_video_path or video_path

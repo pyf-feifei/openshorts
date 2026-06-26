@@ -13,6 +13,17 @@ CUSTOM_OPERATION_STYLE = """
 工业机械操作解说风格。必须解释操作逻辑、这一步目的、动作层和结果层。
 """
 
+CUSTOM_VALUE_STYLE = """
+# 核心风格定位
+民间猎奇与反差，适合废旧物品回收、手工改造、民间手工艺制作。
+
+# 内容结构模板
+- 动作层：用生动、夸张的动词描述手工过程。
+- 价值层：穿插说明材料便宜和成品性价比。
+- 互动层：关键步骤后抛出问题。
+- 禁止遗漏变废为宝、性价比、老板赚钱等商业/价值逻辑。
+"""
+
 
 def _script_with_narration(narrations):
     return {
@@ -67,6 +78,47 @@ class CustomStyleOperationLogicTest(unittest.TestCase):
             CUSTOM_OPERATION_STYLE,
             duration=30,
         )
+
+    def test_custom_value_style_does_not_trigger_operation_logic_validation(self):
+        script = _script_with_narration([
+            "小伙用金属刀霍霍刮木箭杆，把废木刮直做箭身。",
+            "接着用纤维丝滑绑在箭尖上，固定箭头不松动。",
+            "三人带箭出门踩着三万六千步找猎物。",
+            "低角度追击瞄准，箭在手中快速调整。",
+        ])
+
+        self.assertFalse(commentary._custom_style_requires_operation_logic(CUSTOM_VALUE_STYLE, "zh"))
+        commentary._validate_custom_style_operation_logic(
+            script,
+            "zh",
+            CUSTOM_VALUE_STYLE,
+            duration=30,
+        )
+
+    def test_chinese_operation_logic_detects_same_range_result_wording(self):
+        self.assertTrue(commentary._narration_has_operation_logic(
+            "小伙用金属刀霍霍刮木箭杆，把废木刮直做箭身，这样箭杆笔直射击更准。",
+            "zh",
+        ))
+        self.assertTrue(commentary._narration_has_operation_logic(
+            "纤维丝绑在箭尖上固定箭头，这样让整支箭飞出去更稳。",
+            "zh",
+        ))
+
+    def test_custom_style_instruction_only_adds_operation_rule_when_explicit(self):
+        value_instruction = commentary._custom_style_instruction(CUSTOM_VALUE_STYLE, "zh")
+        operation_instruction = commentary._custom_style_instruction(CUSTOM_OPERATION_STYLE, "zh")
+
+        self.assertNotIn("explicitly asks for process/operation/step logic", value_instruction)
+        self.assertIn("explicitly asks for process/operation/step logic", operation_instruction)
+
+    def test_custom_style_instruction_keeps_long_learned_prompt(self):
+        marker = "复刻公式必须保留到长提示词后半段"
+        custom_prompt = "短句画面先行。" * 180 + marker + "不要编造画面外剧情。" * 80
+
+        instruction = commentary._custom_style_instruction(custom_prompt, "zh")
+
+        self.assertIn(marker, instruction)
 
     def test_source_commentary_transcript_is_detected_and_formatted(self):
         transcript = {
