@@ -534,6 +534,7 @@ from commentary_style_learning import (
     DOUYIN_COOKIES_PATH,
     StyleLearningCancelled,
     delete_commentary_style,
+    _has_openai_style_config,
     inspect_douyin_cookies,
     list_commentary_styles,
     normalize_douyin_cookies,
@@ -603,6 +604,7 @@ STYLE_LEARNING_PERSISTED_FIELDS = {
     "failed_videos",
     "style",
     "result",
+    "analysis_method",
     "error",
 }
 
@@ -1834,12 +1836,8 @@ async def commentary_style_learning_create(
         header_base_url=x_openai_compatible_base_url,
         header_model=x_openai_compatible_model,
     )
-    if not openai_config["api_key"]:
-        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible API Key")
-    if not openai_config["base_url"]:
-        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible Base URL")
-    if not openai_config["model"]:
-        raise HTTPException(status_code=400, detail="Missing OpenAI-compatible model")
+    has_openai_style_config = _has_openai_style_config(openai_config)
+    analysis_method = "openai_compatible" if has_openai_style_config else "local_transcript_synthesis"
 
     job_id = uuid.uuid4().hex
     job_dir = style_learning_job_dir(job_id)
@@ -1861,11 +1859,12 @@ async def commentary_style_learning_create(
             "style_name": style_name,
             "max_videos": max_videos,
             "language": language,
-            "provider": "openai_compatible",
-            "model": openai_config["model"],
+            "provider": analysis_method,
+            "model": openai_config["model"] if has_openai_style_config else "",
         },
         "profile_url": profile_url,
         "style_name": style_name,
+        "analysis_method": analysis_method,
         "selected_videos": [],
         "failed_videos": [],
         "error": None,
@@ -1908,6 +1907,10 @@ async def commentary_style_learning_create(
             total = int(job.get("transcript_count") or 0)
             done = int(job.get("style_summary_count") or 0)
             job["stage_progress"] = int(done * 100 / total) if total else None
+        elif "synthesizing" in lower or "local" in lower:
+            job["stage"] = "synthesize"
+            job["stage_label"] = "归纳真实转写风格"
+            job["stage_progress"] = None
         elif "aggregating" in lower:
             job["stage"] = "aggregate"
             job["stage_label"] = "生成通用风格"

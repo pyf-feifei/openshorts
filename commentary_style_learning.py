@@ -12,6 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
@@ -1062,6 +1063,11 @@ def _style_analysis_chat(openai_config: Dict) -> Callable:
     return call
 
 
+def _has_openai_style_config(openai_config: Optional[Dict]) -> bool:
+    config = openai_config or {}
+    return all(str(config.get(key) or "").strip() for key in ("api_key", "base_url", "model"))
+
+
 def summarize_single_video_style(video: Dict, transcript: Dict, openai_chat: Callable) -> Dict:
     text = _compact_text(transcript.get("text") or "", 12000)
     prompt = f"""
@@ -1230,6 +1236,236 @@ prompt 至少包含这些小节，使用清晰标题：
     return parsed
 
 
+def _dedupe_failed_videos(failures: List[Dict], successful_aweme_ids: Optional[set] = None) -> List[Dict]:
+    successful = {str(item or "").strip() for item in (successful_aweme_ids or set()) if str(item or "").strip()}
+    deduped = {}
+    for item in failures or []:
+        if not isinstance(item, dict):
+            continue
+        aweme_id = str(item.get("aweme_id") or "").strip()
+        if aweme_id and aweme_id in successful:
+            continue
+        stage = str(item.get("stage") or "unknown").strip() or "unknown"
+        key = (aweme_id, stage)
+        deduped[key] = {
+            "aweme_id": aweme_id,
+            "stage": stage,
+            "error": str(item.get("error") or "")[:800],
+        }
+    return list(deduped.values())
+
+
+def _split_commentary_units(text: str) -> List[str]:
+    units = []
+    for chunk in re.split(r"[。！？!?；;，,\n]+|\s{2,}", str(text or "")):
+        value = re.sub(r"\s+", " ", chunk).strip()
+        if len(value) >= 2:
+            units.append(value)
+    return units
+
+
+def _count_terms(text: str, terms: List[str]) -> List[str]:
+    counts = Counter()
+    for term in terms:
+        count = str(text or "").count(term)
+        if count:
+            counts[term] = count
+    return [term for term, _ in counts.most_common(10)]
+
+
+def _infer_local_style_position(all_text: str, titles_text: str, language: str) -> str:
+    value = str(language or "").strip().lower()
+    combined = f"{titles_text}\n{all_text}"
+    documentary_hits = sum(combined.count(term) for term in ("纪录片", "生活", "清晨", "山", "一家人", "回家", "孩子", "丈夫", "婆婆", "收获"))
+    process_hits = sum(combined.count(term) for term in ("准备", "随后", "接着", "最后", "开始", "继续", "带回", "发现", "找到"))
+    if value in {"zh", "zh-cn", "cn"}:
+        if documentary_hits >= 8:
+            return "生活纪录片式中文短视频解说"
+        if process_hits >= 8:
+            return "流程推进式中文短视频解说"
+        return "画面先行的中文短视频解说"
+    if documentary_hits >= 8:
+        return "documentary-style short-video narration"
+    if process_hits >= 8:
+        return "process-driven short-video narration"
+    return "visual-first short-video narration"
+
+
+def _build_local_chinese_style_prompt(style_position: str, recurring_terms: List[str]) -> str:
+    term_hint = "、".join(recurring_terms[:6]) if recurring_terms else "人物动作、环境变化、材料处理、家庭处境、收获结果"
+    return f"""
+# 核心风格定位
+你要模仿一种“{style_position}”的解说方式，但不要绑定任何固定账号、人物、地区、作品、产品或题材。叙述者像一个在现场旁观、熟悉生活流程的纪录片解说员，用平实、连续、带一点惊奇感的语气，把观众带进一个正在发生的真实过程里。整体不是喊麦、不是鸡汤、不是营销口播，也不是百科讲解；它更像耐心讲一个见闻：先看见动作，再解释处境，再点出结果、风险、压力或反差。
+
+# 画面优先规则
+每一段都必须先落到当前画面里真实可见的动作、人物位置、工具、动物、植物、道路、山坡、天气、容器、搬运过程、材料变化或表情反应。不要一上来空喊情绪，也不要编造画面外剧情。可以补充判断，但判断必须来自画面证据或用户提供的转写证据，例如“看起来收获不少”“这一步并不轻松”“家里还等着结果”。如果画面只展示动作，就写动作和动作造成的变化；如果画面展示人物关系，就写谁在做什么、谁在等待、谁受到影响。
+
+# 结构模板
+开头先用一个具体动作或处境抓人，不用泛泛介绍人物身份。常用结构是：可见动作/突发发现 -> 当前处境或目标 -> 连续动作推进 -> 中途转折或压力 -> 结果落点。主体段落要像跟着画面往前走，每一句承担一个功能：交代动作、补足原因、指出难度、承接下一步、给出克制判断。结尾不要强行升华，可以落在“带回了什么”“问题是否解决”“下一步还要面对什么”这类具体结果上。
+
+# 开头写法
+开头不要先喊“今天我们来看”或直接给宏大结论，而是把观众拉到一个正在发生的瞬间。优先从“人物已经在做的动作”“刚发现的东西”“眼前环境带来的压力”里选择一个钩子。开头可以带一点悬念，但悬念必须具体，例如某个收获不够、路程还很远、工具不好用、天气或环境增加难度。第一句不要超过一个判断，第二句再交代为什么这个动作值得看。不要用标题党式夸张词，也不要为了抓人而编出画面外冲突。
+
+# 主体推进
+主体要像跟拍一样按时间顺序推进。每切换一个画面，先说画面变化，再说动作目的；每出现一个结果，先说结果长什么样，再说它意味着什么。不要把所有信息堆在一句里，而是拆成连续的小步：谁在动、动了什么、为什么这样做、这一步带来什么变化。可以反复使用“先做一件小事，再发现新的麻烦，再继续处理”的链条，让解说有现场感。解释不要离画面太远，宁愿少讲一点，也不要把人物心理、家庭冲突、收入状况写成无证据事实。
+
+# 转折和反差
+这类风格的反差不是夸张反转，而是生活流程里的现实落差：辛苦走了很远但收获有限，准备很久但工具不顺手，发现好东西但还要背回去，表面动作简单但过程很耗体力。写转折时先给画面证据，再给克制判断。可以用“没想到、可问题是、但真正麻烦的是、这时候、原来”来转折，但每次转折都要对应一个可见变化。不要把普通动作硬写成惊天反转。
+
+# 信息密度
+每 10 秒左右的解说应至少包含一个可见动作或物体变化，不要连续多句空泛抒情。画面信息少时，可以扩写动作的目的、难度、顺序和后果；画面信息多时，优先选择最能推动流程的 1 到 2 个细节，不要流水账列清单。保持“动作密度高、解释适中、情绪低饱和”的比例。可以补充背景常识，但只能作为一句辅助解释，不能盖过当前画面。
+
+# 人物和关系写法
+可以写人物之间的配合、等待、催促、分工和压力，但要用中性旁观口吻。不要替人物编内心独白，不要强行拔高苦难，也不要把关系写成狗血冲突。人物称谓优先使用画面或输入资料给出的通用身份，例如“老人、丈夫、孩子、家人、同伴、村民”，除非用户明确要求保留姓名。即便保留姓名，也不要复刻原账号里的固定人物设定。
+
+# 句式和节奏
+以短句和中短句为主，节奏连续但不碎。多数句子只表达一个动作或一个判断，少量长句用于串起原因和结果。可以使用“随后、接着、没想到、原来、这时、最后、为了、因为、但”来推动时间和转折，但不要机械堆叠。句子要有纪录片旁白感：不抢画面，不夸张，不用密集网络热词。每 2 到 4 句形成一个小推进：先描述画面，再解释为什么这样做，最后补一个结果或反差。
+
+# 用词和语气
+多用具体动作词和过程词，例如寻找、背起、放下、捡起、带回、清理、压榨、翻找、继续、准备、赶回。判断词要克制，可以说“不容易、并不轻松、看起来、显然、没想到、只好、终于”，但不要把情绪写成夸张口号。允许出现生活压力、家庭分工、自然环境、收获多少、路途远近等判断，但必须由画面或转写支撑。可参考这类高频关注点：{term_hint}，但不要直接复制原视频里的姓名、地名、口头禅或连续原句。
+
+# 段落组织
+如果要生成 1 到 3 分钟的完整解说，按“开场 10% + 过程 70% + 收束 20%”组织。开场负责给出动作钩子和处境；过程负责持续跟随画面，每段都要有新动作；收束负责落到具体结果、未解决的问题或下一步任务。不要每段都重复“这很不容易”，要换成具体难点：山路、重量、时间、工具、天气、距离、材料状态、家人的等待。
+
+# 复刻公式
+1. “[画面里正在发生的具体动作]，说明[人物当前目标或处境]。”
+2. “他/她先[动作A]，又[动作B]，因为[从画面或资料能看出的原因]。”
+3. “看似只是[表层动作]，其实难点在[工具、环境、体力、时间或家庭压力]。”
+4. “没想到[画面里的转折]，这让接下来的[行动/结果]变得更麻烦。”
+5. “最后[可见结果]，但[仍然存在的现实问题或下一步悬念]。”
+6. “镜头里[细节变化]，也说明[当前处境正在变好/变难]。”
+7. “为了[具体目标]，他/她只能[下一步动作]，这一步比看上去更费时间。”
+8. “如果只看[表面结果]，可能以为很简单，但[画面证据]才是关键。”
+
+# 可直接套用的分镜旁白骨架
+第一段：从最清楚的动作切入，交代人物正在做什么，以及这件事和眼前目标有什么关系。
+第二段：顺着画面说下一步动作，补一句为什么必须这样做，不要跳到画面外故事。
+第三段：抓一个困难或变化，用克制语气写出反差，让观众知道流程并不轻松。
+第四段：回到动作推进，写人物如何继续处理、搬运、寻找、清理、等待或准备。
+第五段：落到结果，说明眼前收获、损失、进展或未解决的问题，并自然留下下一步。
+
+# 生成要求
+写新解说时，必须优先复刻“说话方式”，不要复刻原题材。输出应像同一类型解说员在讲一个新画面：画面证据先行，信息逐步推进，情绪克制，判断具体。遇到不确定内容时，用“看起来、似乎、可能是因为画面中……”这类保守表达；不要把推测写成事实。不要只给风格标签，要真正按这种节奏写完整旁白。
+
+# 自检标准
+生成后逐段检查：第一，每段是否至少有一个当前画面证据；第二，判断是否能从画面或输入资料推出；第三，是否有连续动作链，而不是孤立点评；第四，是否避免复制原视频人物、地名、标题和长句；第五，语气是否像旁观纪录片解说，而不是广告、新闻稿、鸡汤或短剧旁白。达不到这五点，就重写。
+
+# 禁止事项
+禁止写账号名、主页链接、视频 ID、固定人物姓名、固定地名、原作品标题或可识别原文。禁止连续照搬原作者句子。禁止编造画面外故事、家庭关系、冲突、收入、结局或动机。禁止用泛泛鸡汤、营销话术、夸张反转标题、密集感叹号、网络段子替代画面描述。禁止只总结“这是纪录片风格”，必须在每段具体写出动作、原因、转折和结果。
+""".strip()
+
+
+def _build_local_english_style_prompt(style_position: str, recurring_terms: List[str]) -> str:
+    term_hint = ", ".join(recurring_terms[:6]) if recurring_terms else "visible actions, setting changes, tools, materials, relationships, outcomes"
+    return f"""
+# Core Style
+Write in a {style_position} voice without copying any account identity, fixed people, places, titles, links, or source wording. The narrator should sound like an observant documentary commentator: grounded, sequential, lightly curious, and focused on what the viewer can actually see.
+
+# Visual-First Rule
+Start each beat from visible evidence: actions, positions, tools, terrain, weather, containers, materials, facial reactions, or changes on screen. Any judgement must be supported by the current visuals or provided transcript evidence. Do not invent off-screen story.
+
+# Structure
+Use this flow: visible action or discovery -> immediate goal or situation -> next actions -> obstacle or turn -> concrete result. Each sentence should do one job: describe, explain, connect, contrast, or conclude.
+
+# Rhythm
+Prefer short and medium sentences. Keep the pace continuous but calm. Use simple connectors such as then, after that, but, because, at this point, and finally. Avoid hype, slogans, and generic motivational lines.
+
+# Diction
+Use concrete process verbs and cautious judgements. Recurring attention points in the source pattern include: {term_hint}. Treat them as style signals, not content that must be copied.
+
+# Reusable Formulas
+1. "[Visible action] shows [current goal or situation]."
+2. "They first [action A], then [action B], because [evidence-based reason]."
+3. "It looks like [surface action], but the difficult part is [tool, environment, time, strength, or pressure]."
+4. "The turn comes when [visible change], which makes [next step] harder."
+5. "By the end, [visible result], but [remaining concrete problem]."
+
+# Do Not
+Do not include account names, links, video IDs, fixed names, fixed places, original titles, copied phrases, invented backstory, unsupported emotions, or exaggerated clickbait. Recreate the narration mechanics, not the source topics.
+""".strip()
+
+
+def synthesize_style_from_transcripts_locally(
+    transcripts: List[Dict],
+    style_name: str = "",
+    profile_url: str = "",
+    video_count: int = 0,
+    language: str = "zh",
+) -> Dict:
+    transcript_items = [item for item in (transcripts or []) if isinstance(item, dict)]
+    texts = [str(((item.get("transcript") or {}).get("text") or "")).strip() for item in transcript_items]
+    texts = [text for text in texts if text]
+    if not texts:
+        raise Exception("No transcript text was available for local style synthesis.")
+
+    titles = [
+        str(((item.get("video") or {}).get("title") or "")).strip()
+        for item in transcript_items
+        if str(((item.get("video") or {}).get("title") or "")).strip()
+    ]
+    all_text = "\n".join(texts)
+    titles_text = "\n".join(titles)
+    units = _split_commentary_units(all_text)
+    avg_unit_chars = round(sum(len(unit) for unit in units) / max(1, len(units)), 1)
+    short_unit_ratio = round(sum(1 for unit in units if len(unit) <= 18) / max(1, len(units)), 3)
+    recurring_terms = _count_terms(
+        f"{titles_text}\n{all_text}",
+        [
+            "随后", "接着", "这时", "最后", "没想到", "原来", "因为", "为了", "继续", "准备",
+            "找到", "发现", "带回", "收获", "回家", "一家人", "孩子", "丈夫", "婆婆", "山坡",
+            "山上", "清晨", "野菜", "药材", "工具", "赶紧", "终于",
+        ],
+    )
+    style_position = _infer_local_style_position(all_text, titles_text, language)
+    lang = str(language or "").strip().lower()
+    if lang in {"zh", "zh-cn", "cn"}:
+        prompt = _build_local_chinese_style_prompt(style_position, recurring_terms)
+        label = _normalize_style_label(style_name or "真实转写归纳解说风格")
+        summary = (
+            f"基于 {len(texts)} 条真实转写做本地归纳：画面先行、流程推进、短句为主、判断克制。"
+            f"共抽取约 {len(all_text)} 字转写，平均语义单元约 {avg_unit_chars} 字。"
+        )
+        traits = ["画面先行", "流程推进", "短句旁白", "克制判断", "禁止编造画面外剧情"]
+        warnings = [
+            "未配置 OpenAI 兼容模型，使用本地规则从真实转写归纳；不是模型聚合结果。",
+            "只复刻通用说话方式，不复制原账号身份、人物姓名、地名或原文。",
+        ]
+    else:
+        prompt = _build_local_english_style_prompt(style_position, recurring_terms)
+        label = _normalize_style_label(style_name or "Transcript-derived commentary style")
+        summary = (
+            f"Local synthesis from {len(texts)} real transcripts: visual-first, process-driven, concise, and grounded. "
+            f"Approx. {len(all_text)} transcript characters; average unit length {avg_unit_chars}."
+        )
+        traits = ["visual-first", "process-driven", "concise documentary voice", "grounded judgements"]
+        warnings = [
+            "No OpenAI-compatible model was configured; this is a local rule-based synthesis from real transcripts.",
+            "Use it to reproduce generic narration mechanics, not source identities or exact wording.",
+        ]
+
+    return {
+        "label": label,
+        "prompt": _sanitize_style_prompt(prompt, profile_url),
+        "source": "douyin_style_learning_local_transcript_synthesis",
+        "summary": summary,
+        "style_traits": traits,
+        "metadata": {
+            "source_platform": "douyin",
+            "language": language or "zh",
+            "video_count": video_count,
+            "transcript_count": len(texts),
+            "total_transcript_chars": len(all_text),
+            "commentary_unit_count": len(units),
+            "avg_commentary_unit_chars": avg_unit_chars,
+            "short_commentary_unit_ratio": short_unit_ratio,
+            "recurring_terms": recurring_terms,
+            "analysis_method": "local_transcript_synthesis",
+            "confidence": "medium" if len(texts) >= 6 else "low",
+            "warnings": warnings,
+        },
+    }
+
+
 def _write_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -1257,7 +1493,8 @@ def run_commentary_style_learning(
     provider = provider or DouyinProfileProvider()
     download_audio_fn = download_audio_fn or download_douyin_audio
     transcribe_fn = transcribe_fn or transcribe_video
-    openai_chat = openai_chat_fn or _style_analysis_chat(openai_config)
+    use_openai_analysis = bool(openai_chat_fn) or _has_openai_style_config(openai_config)
+    openai_chat = openai_chat_fn or (_style_analysis_chat(openai_config) if use_openai_analysis else None)
     download_concurrency = max(1, int(os.environ.get("OPENSHORTS_STYLE_DOWNLOAD_CONCURRENCY", "2")))
     analysis_concurrency = max(1, int(os.environ.get("OPENSHORTS_STYLE_ANALYSIS_CONCURRENCY", "2")))
     media_concurrency = max(1, int(os.environ.get("OPENSHORTS_STYLE_MEDIA_CONCURRENCY", "2")))
@@ -1338,7 +1575,7 @@ def run_commentary_style_learning(
             except Exception as exc:
                 failures.append({"aweme_id": video.get("aweme_id"), "stage": "download", "error": str(exc)[:800]})
                 log(f"Audio download failed for {video.get('aweme_id')}: {str(exc)[:240]}")
-            cp({"downloaded_count": len(downloaded), "failed_videos": failures[-100:]})
+            cp({"downloaded_count": len(downloaded), "failed_videos": _dedupe_failed_videos(failures)[-100:]})
 
     downloaded.sort(key=lambda item: _int_value((item.get("video") or {}).get("rank_index")))
     transcripts = []
@@ -1362,54 +1599,73 @@ def run_commentary_style_learning(
         except Exception as exc:
             failures.append({"aweme_id": video.get("aweme_id"), "stage": "transcribe", "error": str(exc)[:800]})
             log(f"Transcription failed for {video.get('aweme_id')}: {str(exc)[:240]}")
-            cp({"failed_videos": failures[-100:]})
+            cp({"failed_videos": _dedupe_failed_videos(failures)[-100:]})
     if not transcripts:
         raise Exception("No Douyin video audio could be transcribed, so no commentary style can be learned.")
 
-    log(f"Analyzing commentary style from {len(transcripts)} transcripts with OpenAI-compatible model...")
     summaries = []
-    with ThreadPoolExecutor(max_workers=analysis_concurrency) as executor:
-        future_map = {
-            executor.submit(summarize_single_video_style, item["video"], item["transcript"], openai_chat): item
-            for item in transcripts
-        }
-        for future in as_completed(future_map):
-            item = future_map[future]
-            _raise_if_cancelled(cancel_event)
-            video = item["video"]
-            try:
-                summary = future.result()
-                summaries.append(summary)
-                log(f"Analyzed style summary {len(summaries)}/{len(transcripts)}: {video.get('aweme_id')}")
-                cp({"style_summary_count": len(summaries)})
-            except Exception as exc:
-                failures.append({"aweme_id": video.get("aweme_id"), "stage": "analyze", "error": str(exc)[:800]})
-                log(f"Style analysis failed for {video.get('aweme_id')}: {str(exc)[:240]}")
-                cp({"failed_videos": failures[-100:]})
-    if not summaries:
-        raise Exception("OpenAI-compatible model did not return any usable style summaries.")
+    summaries_path = ""
+    if use_openai_analysis:
+        log(f"Analyzing commentary style from {len(transcripts)} transcripts with OpenAI-compatible model...")
+        with ThreadPoolExecutor(max_workers=analysis_concurrency) as executor:
+            future_map = {
+                executor.submit(summarize_single_video_style, item["video"], item["transcript"], openai_chat): item
+                for item in transcripts
+            }
+            for future in as_completed(future_map):
+                item = future_map[future]
+                _raise_if_cancelled(cancel_event)
+                video = item["video"]
+                try:
+                    summary = future.result()
+                    summaries.append(summary)
+                    log(f"Analyzed style summary {len(summaries)}/{len(transcripts)}: {video.get('aweme_id')}")
+                    cp({"style_summary_count": len(summaries)})
+                except Exception as exc:
+                    failures.append({"aweme_id": video.get("aweme_id"), "stage": "analyze", "error": str(exc)[:800]})
+                    log(f"Style analysis failed for {video.get('aweme_id')}: {str(exc)[:240]}")
+                    cp({"failed_videos": _dedupe_failed_videos(failures)[-100:]})
+        if not summaries:
+            raise Exception("OpenAI-compatible model did not return any usable style summaries.")
 
-    summaries.sort(key=lambda item: _int_value(item.get("rank_index")))
-    summaries_path = os.path.join(output_dir, "style_summaries.json")
-    _write_json(summaries_path, summaries)
-    log("Aggregating final reusable commentary style...")
-    style = aggregate_style_summaries(
-        summaries,
-        openai_chat,
-        style_name=style_name,
-        profile_url=profile_url,
-        video_count=len(ranked),
-        transcript_count=len(transcripts),
-        language=language,
-    )
+        summaries.sort(key=lambda item: _int_value(item.get("rank_index")))
+        summaries_path = os.path.join(output_dir, "style_summaries.json")
+        _write_json(summaries_path, summaries)
+        log("Aggregating final reusable commentary style...")
+        style = aggregate_style_summaries(
+            summaries,
+            openai_chat,
+            style_name=style_name,
+            profile_url=profile_url,
+            video_count=len(ranked),
+            transcript_count=len(transcripts),
+            language=language,
+        )
+        analysis_method = "openai_compatible"
+    else:
+        log(f"Synthesizing reusable commentary style locally from {len(transcripts)} real transcripts...")
+        style = synthesize_style_from_transcripts_locally(
+            transcripts,
+            style_name=style_name,
+            profile_url=profile_url,
+            video_count=len(ranked),
+            language=language,
+        )
+        analysis_method = "local_transcript_synthesis"
+        cp({"style_summary_count": 0})
+
+    successful_aweme_ids = {str((item.get("video") or {}).get("aweme_id") or "").strip() for item in transcripts}
+    failed_videos = _dedupe_failed_videos(failures, successful_aweme_ids=successful_aweme_ids)
     style["metadata"] = {
         **(style.get("metadata") or {}),
         "profile_url": profile_url,
         "selected_count": len(ranked),
         "downloaded_count": len(downloaded),
-        "failed_count": len(failures),
-        "summaries_path": summaries_path,
+        "failed_count": len(failed_videos),
+        "analysis_method": analysis_method,
     }
+    if summaries_path:
+        style["metadata"]["summaries_path"] = summaries_path
     saved_style = save_commentary_style(style, storage_path=style_storage_path)
     result = {
         "style": saved_style,
@@ -1419,10 +1675,11 @@ def run_commentary_style_learning(
         "downloaded_count": len(downloaded),
         "transcript_count": len(transcripts),
         "style_summary_count": len(summaries),
-        "failed_videos": failures[-100:],
+        "failed_videos": failed_videos[-100:],
         "selected_videos": ranked,
         "selected_videos_path": selected_path,
         "style_summaries_path": summaries_path,
+        "analysis_method": analysis_method,
     }
     result_path = os.path.join(output_dir, "style_learning_result.json")
     _write_json(result_path, result)

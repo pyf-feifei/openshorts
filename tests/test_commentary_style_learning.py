@@ -316,6 +316,70 @@ class CommentaryStyleLearningTest(unittest.TestCase):
             self.assertEqual(result["style"]["prompt"], saved[0]["prompt"])
             self.assertGreaterEqual(len(openai_calls), 3)
 
+    def test_run_commentary_style_learning_can_synthesize_style_locally_without_openai(self):
+        videos = [
+            {
+                "aweme_id": "a1",
+                "video_url": "https://www.douyin.com/video/a1",
+                "title": "山坡上一家人继续寻找野菜",
+                "like_count": 10,
+                "save_count": 2,
+                "rank_score": 12,
+                "timestamp": 1,
+            },
+            {
+                "aweme_id": "a2",
+                "video_url": "https://www.douyin.com/video/a2",
+                "title": "清晨回家后准备处理收获",
+                "like_count": 2,
+                "save_count": 20,
+                "rank_score": 22,
+                "timestamp": 2,
+            },
+        ]
+
+        def fake_download(video, output_dir, cookie_path, cancel_event=None):
+            path = os.path.join(output_dir, f"{video['aweme_id']}.mp3")
+            os.makedirs(output_dir, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(b"audio")
+            return {"audio_path": path, "title": video["title"]}
+
+        def fake_transcribe(audio_path):
+            return {
+                "text": (
+                    "清晨一家人来到山坡上寻找野菜。她先把篮子放下，随后继续沿着山路往前走。"
+                    "没想到这片山坡上的收获并不多，孩子还在旁边等待。最后她只好把找到的东西带回家。"
+                ) * 3,
+                "segments": [],
+                "language": "zh",
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+            patch.object(learner, "ensure_douyin_direct_media", side_effect=lambda video, progress=None, cancel_event=None: video):
+            result = learner.run_commentary_style_learning(
+                profile_url="https://www.douyin.com/user/MS4wLjABAAAAabc",
+                output_dir=tmpdir,
+                openai_config={},
+                cookie_path="",
+                provider=FakeProvider(videos),
+                download_audio_fn=fake_download,
+                transcribe_fn=fake_transcribe,
+                style_storage_path=os.path.join(tmpdir, "styles.json"),
+            )
+
+            self.assertEqual("local_transcript_synthesis", result["analysis_method"])
+            self.assertEqual(2, result["selected_count"])
+            self.assertEqual(2, result["transcript_count"])
+            self.assertEqual(0, result["style_summary_count"])
+            self.assertEqual("local_transcript_synthesis", result["style"]["metadata"]["analysis_method"])
+            self.assertIn("# 核心风格定位", result["style"]["prompt"])
+            self.assertIn("# 复刻公式", result["style"]["prompt"])
+            self.assertIn("真实转写", result["style"]["summary"])
+            self.assertNotIn("douyin.com", result["style"]["prompt"])
+            saved = learner.list_commentary_styles(os.path.join(tmpdir, "styles.json"))
+            self.assertEqual(result["style"]["prompt"], saved[0]["prompt"])
+
     def test_run_commentary_style_learning_checkpoints_ranked_videos_before_media_resolution(self):
         videos = [
             {

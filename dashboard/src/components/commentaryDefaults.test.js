@@ -286,7 +286,16 @@ test('commentary style learner is wired into the sidebar and style APIs', () => 
   assert.match(learnerSource, /mergeStyleIntoLocalStorage/);
   assert.match(learnerSource, /useI18n/);
   assert.match(learnerSource, /styleLearning\.description/);
+  assert.match(learnerSource, /formatElapsedDuration/);
+  assert.match(learnerSource, /styleLearning\.metrics\.elapsed/);
+  assert.match(learnerSource, /styleLearning\.elapsedHistory/);
+  assert.match(learnerSource, /viewMode/);
+  assert.match(learnerSource, /styleLearning\.newMode/);
+  assert.match(learnerSource, /styleLearning\.historyMode/);
+  assert.match(learnerSource, /noHistorySelection/);
   assert.match(translationsSource, /likes plus saves/);
+  assert.match(translationsSource, /elapsedHistory/);
+  assert.match(translationsSource, /查看历史/);
   assert.match(translationsSource, /公开主页抓到 \{total\} 条/);
   assert.match(translationsSource, /获取解说风格/);
   assert.match(commentarySource, /\/api\/commentary\/styles/);

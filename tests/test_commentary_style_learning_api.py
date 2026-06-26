@@ -74,13 +74,15 @@ class CommentaryStyleLearningApiTests(unittest.TestCase):
         self.assertEqual(200, listed_after.status_code, listed_after.text)
         self.assertEqual([], listed_after.json()["styles"])
 
-    def test_style_learning_create_does_not_require_cookies_and_validates_openai_headers_before_job_start(self):
+    def test_style_learning_create_does_not_require_cookies_or_openai_headers_before_job_start(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
             patch.object(app, "DOUYIN_COOKIES_PATH", os.path.join(tmpdir, "missing_cookies.txt")), \
-            patch.object(app, "OUTPUT_DIR", os.path.join(tmpdir, "output")):
+            patch.object(app, "OUTPUT_DIR", os.path.join(tmpdir, "output")), \
+            patch.object(app.threading, "Thread") as thread_cls:
+            thread_cls.return_value.start.return_value = None
             app.style_learning_jobs.clear()
             client = TestClient(app.app)
-            missing_openai = client.post(
+            created = client.post(
                 "/api/commentary/style-learning/jobs",
                 json={"profile_url": "https://www.douyin.com/user/MS4wLjABAAAAabc"},
             )
@@ -90,8 +92,10 @@ class CommentaryStyleLearningApiTests(unittest.TestCase):
                 json={"profile_url": ""},
             )
 
-        self.assertEqual(400, missing_openai.status_code, missing_openai.text)
-        self.assertIn("OpenAI-compatible", missing_openai.json()["detail"])
+        self.assertEqual(200, created.status_code, created.text)
+        job = app.style_learning_jobs[created.json()["job_id"]]
+        self.assertEqual("local_transcript_synthesis", job["analysis_method"])
+        self.assertEqual("local_transcript_synthesis", job["request"]["provider"])
         self.assertEqual(400, missing_profile.status_code, missing_profile.text)
         self.assertIn("profile URL", missing_profile.json()["detail"])
 

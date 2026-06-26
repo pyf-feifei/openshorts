@@ -7,8 +7,10 @@ import {
   Download,
   Eye,
   FileText,
+  History,
   Link,
   Loader2,
+  Plus,
   RefreshCcw,
   Search,
   Square,
@@ -61,6 +63,32 @@ function compactText(value, max = 90) {
   return `${text.slice(0, max - 3)}...`
 }
 
+function parseTimestampMs(value) {
+  const timestamp = Date.parse(value || '')
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function getElapsedSeconds(job, nowMs) {
+  const startMs = parseTimestampMs(job?.created_at)
+  if (startMs === null) return null
+  const finishMs = TERMINAL_STATUSES.has(job?.status)
+    ? parseTimestampMs(job?.updated_at)
+    : null
+  const endMs = finishMs ?? nowMs
+  return Math.max(0, Math.floor((endMs - startMs) / 1000))
+}
+
+function formatElapsedDuration(job, nowMs, t) {
+  const elapsedSeconds = getElapsedSeconds(job, nowMs)
+  if (elapsedSeconds === null) return '--'
+  const hours = Math.floor(elapsedSeconds / 3600)
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60)
+  const seconds = elapsedSeconds % 60
+  if (hours > 0) return t('styleLearning.elapsed.hours', { hours, minutes })
+  if (minutes > 0) return t('styleLearning.elapsed.minutes', { minutes, seconds })
+  return t('styleLearning.elapsed.seconds', { seconds })
+}
+
 export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
   const { t } = useI18n()
   const [profileUrl, setProfileUrl] = useState('')
@@ -69,18 +97,21 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
   const [jobId, setJobId] = useState(null)
   const [job, setJob] = useState(null)
   const [jobs, setJobs] = useState([])
+  const [viewMode, setViewMode] = useState('new')
   const [selectedJobIds, setSelectedJobIds] = useState([])
   const [deletingJobIds, setDeletingJobIds] = useState([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [promptModalOpen, setPromptModalOpen] = useState(false)
+  const [elapsedNow, setElapsedNow] = useState(() => Date.now())
   const syncedStyleIdRef = useRef(null)
   const pollingRef = useRef(null)
   const hasOpenAI = hasOpenAICompatibleAccess(openAICompatibleConfig)
 
   const currentJob = job || jobs.find((item) => item.job_id === jobId) || null
   const learnedStyle = currentJob?.style || currentJob?.result?.style || null
+  const analysisMethod = learnedStyle?.metadata?.analysis_method || currentJob?.analysis_method || currentJob?.result?.analysis_method || ''
   const selectedVideos = currentJob?.selected_videos || currentJob?.result?.selected_videos || []
   const failedVideos = currentJob?.failed_videos || currentJob?.result?.failed_videos || []
   const totalVideos = Number(currentJob?.total_videos ?? currentJob?.video_count ?? currentJob?.result?.video_count ?? 0)
@@ -90,10 +121,12 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
   const hasProgress = Number.isFinite(progressValue)
   const currentStatusLabel = currentJob ? translateStatus(currentJob.status, t) : ''
   const currentStageLabel = currentJob ? translateStage(currentJob, t) : ''
+  const currentElapsed = currentJob ? formatElapsedDuration(currentJob, elapsedNow, t) : '--'
   const visibleJobIds = jobs.map((item) => item.job_id).filter(Boolean)
   const selectedVisibleJobIds = selectedJobIds.filter((id) => visibleJobIds.includes(id))
   const allVisibleJobsSelected = visibleJobIds.length > 0 && visibleJobIds.every((id) => selectedJobIds.includes(id))
   const isDeletingJobs = deletingJobIds.length > 0
+  const hasRunningStyleJob = currentJob?.status === 'processing' || jobs.some((item) => item.status === 'processing')
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -102,14 +135,10 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
       const data = await res.json()
       const list = Array.isArray(data.jobs) ? data.jobs : []
       setJobs(list)
-      if (!jobId && list[0]) {
-        setJobId(list[0].job_id)
-        setJob(list[0])
-      }
     } catch {
       // best-effort history
     }
-  }, [jobId])
+  }, [])
 
   const fetchJob = useCallback(async (id) => {
     if (!id) return null
@@ -127,6 +156,13 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
   useEffect(() => {
     fetchJobs()
   }, [fetchJobs])
+
+  useEffect(() => {
+    if (!hasRunningStyleJob) return undefined
+    setElapsedNow(Date.now())
+    const timer = setInterval(() => setElapsedNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [hasRunningStyleJob])
 
   useEffect(() => {
     const visibleIds = new Set(jobs.map((item) => item.job_id).filter(Boolean))
@@ -171,11 +207,8 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
       setError(t('styleLearning.errors.profileRequired'))
       return
     }
-    if (!hasOpenAI) {
-      setError(t('styleLearning.errors.openAIRequired'))
-      return
-    }
     setError('')
+    setViewMode('new')
     setSubmitting(true)
     setJob(null)
     try {
@@ -211,9 +244,19 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
   }
 
   const selectJob = (item) => {
+    setViewMode('history')
     setJobId(item.job_id)
     setJob(item)
     setError('')
+  }
+
+  const startNewDraft = () => {
+    setViewMode('new')
+    setJobId(null)
+    setJob(null)
+    setError('')
+    setPromptModalOpen(false)
+    setCopied(false)
   }
 
   const toggleJobSelection = (id) => {
@@ -258,9 +301,10 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
       setJobs(remainingJobs)
       setSelectedJobIds((selected) => selected.filter((id) => !ids.includes(id)))
       if (jobId && ids.includes(jobId)) {
-        const nextJob = remainingJobs[0] || null
+        const nextJob = viewMode === 'history' ? remainingJobs[0] || null : null
         setJobId(nextJob?.job_id || null)
         setJob(nextJob)
+        if (!nextJob) setViewMode('new')
         setPromptModalOpen(false)
         setCopied(false)
       }
@@ -336,9 +380,27 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
               {t('styleLearning.description')}
             </p>
           </div>
-          <button type="button" onClick={fetchJobs} className="btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm">
-            <RefreshCcw size={15} /> {t('styleLearning.refresh')}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-xl border border-white/10 bg-black/20 p-1">
+              <button
+                type="button"
+                onClick={startNewDraft}
+                className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${viewMode === 'new' ? 'bg-blue-500 text-white' : 'text-zinc-400 hover:bg-white/5 hover:text-white'}`}
+              >
+                <Plus size={15} /> {t('styleLearning.newMode')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('history')}
+                className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${viewMode === 'history' ? 'bg-cyan-500/20 text-cyan-200' : 'text-zinc-400 hover:bg-white/5 hover:text-white'}`}
+              >
+                <History size={15} /> {t('styleLearning.historyMode')}
+              </button>
+            </div>
+            <button type="button" onClick={fetchJobs} className="btn-secondary inline-flex items-center justify-center gap-2 px-4 py-2 text-sm">
+              <RefreshCcw size={15} /> {t('styleLearning.refresh')}
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -350,10 +412,11 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <div className="space-y-6">
+            {viewMode === 'new' && (
             <section className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
               <div className="mb-4 flex items-center gap-2">
                 <Link size={18} className="text-cyan-300" />
-                <h2 className="text-base font-semibold text-zinc-100">{t('styleLearning.profile')}</h2>
+                <h2 className="text-base font-semibold text-zinc-100">{t('styleLearning.newTask')}</h2>
               </div>
               <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px_260px]">
                 <input
@@ -396,6 +459,19 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                 )}
               </div>
             </section>
+            )}
+
+            {viewMode === 'history' && !currentJob && (
+              <section className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+                <div className="flex items-center gap-2">
+                  <History size={18} className="text-cyan-300" />
+                  <h2 className="text-base font-semibold text-zinc-100">{t('styleLearning.historyTask')}</h2>
+                </div>
+                <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-4 text-sm text-zinc-500">
+                  {t('styleLearning.noHistorySelection')}
+                </div>
+              </section>
+            )}
 
             {currentJob && (
               <section className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
@@ -405,6 +481,9 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                       <h2 className="text-base font-semibold text-zinc-100">{t('styleLearning.jobStatus')}</h2>
                       <span className={`rounded-full border px-2.5 py-1 text-xs ${statusBadgeClass}`}>
                         {currentStatusLabel}
+                      </span>
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-zinc-300">
+                        {viewMode === 'history' ? t('styleLearning.historyTask') : t('styleLearning.newTask')}
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-zinc-500">{currentStageLabel}</p>
@@ -420,7 +499,7 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                     <div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${Math.max(0, Math.min(100, progressValue))}%` }} />
                   </div>
                 )}
-                <div className="grid gap-3 sm:grid-cols-4">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                     <div className="text-xs text-zinc-500">{t('styleLearning.metrics.selected')}</div>
                     <div className="mt-1 text-xl font-semibold text-white">{selectedCount || selectedVideos.length || 0}</div>
@@ -436,6 +515,10 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                   <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                     <div className="text-xs text-zinc-500">{t('styleLearning.metrics.failed')}</div>
                     <div className="mt-1 text-xl font-semibold text-white">{failedVideos.length}</div>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <div className="text-xs text-zinc-500">{t('styleLearning.metrics.elapsed')}</div>
+                    <div className="mt-1 text-xl font-semibold tabular-nums text-white">{currentElapsed}</div>
                   </div>
                 </div>
               </section>
@@ -469,6 +552,11 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                 <p className="mt-3 text-xs text-green-300">
                   {t('styleLearning.synced')}
                 </p>
+                {analysisMethod && (
+                  <p className="mt-2 text-xs text-zinc-400">
+                    {analysisMethod === 'local_transcript_synthesis' ? t('styleLearning.localSynthesis') : t('styleLearning.modelSynthesis')}
+                  </p>
+                )}
               </section>
             )}
 
@@ -534,10 +622,11 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                 {jobs.map((item) => {
                   const selected = selectedJobIds.includes(item.job_id)
                   const deleting = deletingJobIds.includes(item.job_id)
+                  const elapsed = formatElapsedDuration(item, elapsedNow, t)
                   return (
                     <div
                       key={item.job_id}
-                      className={`rounded-lg border p-3 transition-all ${item.job_id === jobId ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-white/10 bg-black/20 hover:bg-white/5'}`}
+                      className={`rounded-lg border p-3 transition-all ${viewMode === 'history' && item.job_id === jobId ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-white/10 bg-black/20 hover:bg-white/5'}`}
                     >
                       <div className="flex items-start gap-2">
                         <button
@@ -558,7 +647,10 @@ export default function CommentaryStyleLearner({ openAICompatibleConfig }) {
                             <span className="truncate text-sm font-medium text-zinc-100">{item.style?.label || item.style_name || t('styleLearning.defaultJobName')}</span>
                             {item.status === 'processing' && <Loader2 size={14} className="shrink-0 animate-spin text-cyan-300" />}
                           </div>
-                          <div className="mt-1 truncate text-xs text-zinc-500">{item.stage_label || item.status}</div>
+                          <div className="mt-1 flex items-center justify-between gap-2 text-xs text-zinc-500">
+                            <span className="truncate">{item.stage_label || item.status}</span>
+                            <span className="shrink-0 tabular-nums">{t('styleLearning.elapsedHistory', { duration: elapsed })}</span>
+                          </div>
                         </button>
                       </div>
                       <div className="mt-3 flex justify-end">
