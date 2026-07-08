@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import hashlib
 import json
 import math
+import mimetypes
 import os
 import re
 import shutil
@@ -15,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 
 import cv2
 import httpx
+import oss2
+from oss2.models import PartInfo
 from google.genai import types
 from PIL import Image
 
@@ -212,6 +216,22 @@ FFMPEG_VIDEO_ENCODER_CONCURRENCY = max(
 )
 _FFMPEG_VIDEO_ENCODER_SEMAPHORE = threading.BoundedSemaphore(FFMPEG_VIDEO_ENCODER_CONCURRENCY)
 GEMINI_FILE_UPLOAD_RETRIES = max(1, int(os.environ.get("OPENSHORTS_GEMINI_FILE_UPLOAD_RETRIES", "3")))
+GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_ENABLED = os.environ.get(
+    "OPENSHORTS_GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_ENABLED",
+    "true",
+).strip().lower() not in {"0", "false", "no", "off"}
+GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_TIMEOUT_SECONDS = max(
+    30,
+    int(os.environ.get("OPENSHORTS_GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_TIMEOUT_SECONDS", "120")),
+)
+GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_PART_SIZE = max(
+    5 * 1024 * 1024,
+    int(os.environ.get("OPENSHORTS_GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_PART_SIZE", str(16 * 1024 * 1024))),
+)
+GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_THREADS = max(
+    1,
+    int(os.environ.get("OPENSHORTS_GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_THREADS", "10")),
+)
 GEMINI_FILE_PROCESSING_TIMEOUT_SECONDS = max(60, int(os.environ.get("OPENSHORTS_GEMINI_FILE_PROCESSING_TIMEOUT_SECONDS", "3600")))
 GEMINI_FILE_PROCESSING_MAX_TIMEOUT_SECONDS = max(
     GEMINI_FILE_PROCESSING_TIMEOUT_SECONDS,
@@ -10140,6 +10160,218 @@ def _copy_to_ascii_safe_upload_path(path: str) -> Optional[str]:
     return safe_path
 
 
+def _chat2api_direct_upload_base_url(base_url: Optional[str]) -> str:
+    normalized = normalize_gemini_base_url(base_url)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return normalized.rstrip("/")
+
+
+def _chat2api_qwen_direct_upload_headers(api_key: Optional[str]) -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _chat2api_qwen_direct_client_file_key(path: str, mime_type: str) -> str:
+    stat = os.stat(path)
+    payload = {
+        "schema": "openshorts-qwen-direct-file-v1",
+        "path": os.path.abspath(path),
+        "mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+        "size": int(stat.st_size),
+        "mime_type": mime_type,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8", errors="replace")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _chat2api_qwen_direct_oss_region(region: Optional[str]) -> Optional[str]:
+    value = str(region or "").strip()
+    if value.startswith("oss-"):
+        return value[4:]
+    return value or None
+
+
+def _chat2api_qwen_direct_upload_to_oss(upload: Dict, path: str, mime_type: str, progress=None) -> None:
+    auth = oss2.StsAuth(
+        str(upload.get("accessKeyId") or ""),
+        str(upload.get("accessKeySecret") or ""),
+        str(upload.get("securityToken") or ""),
+        auth_version=oss2.AUTH_VERSION_4,
+    )
+    session = oss2.Session(pool_size=max(10, GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_THREADS + 2))
+    session.session.trust_env = False
+    bucket = oss2.Bucket(
+        auth,
+        str(upload.get("endpoint") or ""),
+        str(upload.get("bucket") or ""),
+        session=session,
+        region=_chat2api_qwen_direct_oss_region(upload.get("region")),
+    )
+    part_size = int(upload.get("partSize") or GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_PART_SIZE)
+    num_threads = int(upload.get("parallel") or GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_THREADS)
+    part_size = max(5 * 1024 * 1024, part_size)
+    num_threads = max(1, num_threads)
+    headers = {"Content-Type": mime_type or "video/mp4"}
+    file_path = str(upload.get("filePath") or "")
+    total_size = os.path.getsize(path)
+    if total_size <= part_size:
+        sent = 0
+
+        def _put_progress(consumed_bytes, total_bytes):
+            nonlocal sent
+            sent = max(sent, int(consumed_bytes or 0))
+            if progress:
+                denominator = total_bytes or max(1, total_size)
+                percent = int(min(100, max(0, sent * 100 / denominator)))
+                progress(f"Uploading analysis video directly to Qwen OSS... {percent}%")
+
+        bucket.put_object_from_file(file_path, path, headers=headers, progress_callback=_put_progress)
+        return
+
+    init_result = bucket.init_multipart_upload(file_path, headers=headers)
+    upload_id = init_result.upload_id
+    part_count = int(math.ceil(total_size / part_size))
+    uploaded_bytes = 0
+    uploaded_lock = threading.Lock()
+    last_logged_percent = -10
+
+    def _log_progress(delta: int) -> None:
+        nonlocal uploaded_bytes, last_logged_percent
+        if delta <= 0:
+            return
+        with uploaded_lock:
+            uploaded_bytes += delta
+            percent = int(min(100, max(0, uploaded_bytes * 100 / max(1, total_size))))
+            if progress and (percent >= last_logged_percent + 10 or percent >= 100):
+                last_logged_percent = percent
+                progress(f"Uploading analysis video directly to Qwen OSS... {percent}%")
+
+    def _upload_part(part_number: int) -> PartInfo:
+        offset = (part_number - 1) * part_size
+        size = min(part_size, total_size - offset)
+        result = None
+        for attempt in range(1, 4):
+            try:
+                with open(path, "rb") as handle:
+                    handle.seek(offset)
+                    data = handle.read(size)
+                result = bucket.upload_part(file_path, upload_id, part_number, data, headers=headers)
+                break
+            except Exception:
+                if attempt >= 3:
+                    raise
+                time.sleep(min(8, attempt * 2))
+        if result is None:
+            raise Exception(f"Qwen OSS multipart upload part {part_number} did not return a result.")
+        _log_progress(size)
+        return PartInfo(part_number, result.etag, size=size)
+
+    try:
+        parts = []
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(_upload_part, part_number) for part_number in range(1, part_count + 1)]
+            for future in as_completed(futures):
+                parts.append(future.result())
+        parts.sort(key=lambda item: item.part_number)
+        bucket.complete_multipart_upload(file_path, upload_id, parts, headers=headers)
+        if progress and last_logged_percent < 100:
+            progress("Uploading analysis video directly to Qwen OSS... 100%")
+    except Exception:
+        try:
+            bucket.abort_multipart_upload(file_path, upload_id)
+        except Exception:
+            pass
+        raise
+
+
+def _try_upload_chat2api_qwen_direct_video_part(
+    analysis_video_path: str,
+    duration: float,
+    api_key: Optional[str],
+    base_url: Optional[str],
+    model: Optional[str],
+    progress: Optional[Callable[[str], None]] = None,
+    checkpoint: Optional[Callable[[Dict], None]] = None,
+):
+    if not GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_ENABLED:
+        return None
+    endpoint_base = _chat2api_direct_upload_base_url(base_url)
+    if not endpoint_base:
+        return None
+
+    file_size = os.path.getsize(analysis_video_path)
+    mime_type = mimetypes.guess_type(analysis_video_path)[0] or "video/mp4"
+    client_file_key = _chat2api_qwen_direct_client_file_key(analysis_video_path, mime_type)
+    payload = {
+        "model": model or DEFAULT_GEMINI_MODEL,
+        "filename": os.path.basename(analysis_video_path),
+        "mimeType": mime_type,
+        "sizeBytes": file_size,
+        "clientFileKey": client_file_key,
+    }
+    headers = _chat2api_qwen_direct_upload_headers(api_key)
+    timeout = httpx.Timeout(
+        GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_TIMEOUT_SECONDS,
+        connect=30.0,
+        read=GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_TIMEOUT_SECONDS,
+        write=GEMINI_CHAT2API_QWEN_DIRECT_UPLOAD_TIMEOUT_SECONDS,
+    )
+    start_url = f"{endpoint_base}/v1beta/chat2api/qwen-ai/direct-upload/start"
+    complete_url = f"{endpoint_base}/v1beta/chat2api/qwen-ai/direct-upload/complete"
+    if progress:
+        size_mb = file_size / 1024 / 1024
+        progress(f"Requesting Chat2API Qwen direct upload session ({size_mb:.1f} MB)...")
+    with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=_openai_httpx_trust_env(endpoint_base)) as http_client:
+        start_response = http_client.post(start_url, headers=headers, json=payload)
+        if start_response.status_code == 404:
+            return None
+        start_response.raise_for_status()
+        started = start_response.json()
+        file_info = started.get("file") or {}
+        if started.get("reused"):
+            file_uri = file_info.get("uri") or file_info.get("file_uri")
+            if not file_uri:
+                raise Exception("Chat2API Qwen direct upload cache hit did not return a file URI.")
+            if checkpoint:
+                checkpoint({
+                    "gemini_file_uri": file_uri,
+                    "gemini_file_name": file_info.get("name"),
+                    "gemini_file_mime_type": file_info.get("mimeType") or file_info.get("mime_type") or mime_type,
+                })
+            if progress:
+                progress("Reusing existing Chat2API Qwen direct-upload video.")
+            return _gemini_video_part_from_uri(file_uri, file_info.get("mimeType") or file_info.get("mime_type") or mime_type, duration)
+
+        upload = started.get("upload") or {}
+        session_id = upload.get("sessionId") or upload.get("session_id")
+        if not session_id:
+            raise Exception("Chat2API Qwen direct upload start did not return a sessionId.")
+        _chat2api_qwen_direct_upload_to_oss(upload, analysis_video_path, mime_type, progress=progress)
+        complete_response = http_client.post(complete_url, headers=headers, json={"sessionId": session_id})
+        complete_response.raise_for_status()
+        completed = complete_response.json()
+    file_info = completed.get("file") or {}
+    file_uri = file_info.get("uri") or file_info.get("file_uri")
+    if not file_uri:
+        raise Exception("Chat2API Qwen direct upload complete did not return a file URI.")
+    final_mime_type = file_info.get("mimeType") or file_info.get("mime_type") or mime_type
+    if checkpoint:
+        checkpoint({
+            "gemini_file_uri": file_uri,
+            "gemini_file_name": file_info.get("name"),
+            "gemini_file_mime_type": final_mime_type,
+        })
+    if progress:
+        progress("Chat2API Qwen direct-upload video is ready for model analysis.")
+    return _gemini_video_part_from_uri(file_uri, final_mime_type, duration)
+
+
 def _upload_gemini_video_part(
     client,
     analysis_video_path: str,
@@ -10148,6 +10380,9 @@ def _upload_gemini_video_part(
     checkpoint: Optional[Callable[[Dict], None]] = None,
     gemini_file: Optional[Dict] = None,
     pool_session=None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     reusable_uri = (gemini_file or {}).get("uri") or (gemini_file or {}).get("file_uri")
     if reusable_uri:
@@ -10155,6 +10390,18 @@ def _upload_gemini_video_part(
         if progress:
             progress("Reusing processed Gemini analysis video from previous task...")
         return _gemini_video_part_from_uri(reusable_uri, mime_type, duration)
+
+    direct_part = _try_upload_chat2api_qwen_direct_video_part(
+        analysis_video_path,
+        duration,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        progress=progress,
+        checkpoint=checkpoint,
+    )
+    if direct_part is not None:
+        return direct_part
 
     if not getattr(client, "files", None) or not getattr(client.files, "upload", None):
         raise Exception(
@@ -10255,6 +10502,9 @@ def _build_video_analysis_contents(
     checkpoint: Optional[Callable[[Dict], None]] = None,
     gemini_file: Optional[Dict] = None,
     pool_session=None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     reusable_uri = (gemini_file or {}).get("uri") or (gemini_file or {}).get("file_uri")
     if reusable_uri:
@@ -10266,6 +10516,9 @@ def _build_video_analysis_contents(
             checkpoint=checkpoint,
             gemini_file=gemini_file,
             pool_session=pool_session,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
         )
         return [types.Content(role="user", parts=[video_part, types.Part.from_text(text=prompt)])]
     if not analysis_video_path:
@@ -10286,6 +10539,9 @@ def _build_video_analysis_contents(
         checkpoint=checkpoint,
         gemini_file=gemini_file,
         pool_session=pool_session,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
     )
     return [types.Content(role="user", parts=[video_part, types.Part.from_text(text=prompt)])]
 
@@ -10574,6 +10830,9 @@ def generate_commentary_script(
                     checkpoint=checkpoint,
                     gemini_file=reusable_gemini_file,
                     pool_session=pool_session,
+                    api_key=gemini_key,
+                    base_url=base_url,
+                    model=resolved_model,
                 )
                 break
             except Exception as exc:
@@ -10637,6 +10896,9 @@ def generate_commentary_script(
                     checkpoint=checkpoint,
                     gemini_file=None,
                     pool_session=pool_session,
+                    api_key=gemini_key,
+                    base_url=base_url,
+                    model=resolved_model,
                 )
                 continue
             if _should_failover_gemini_pool(gemini_pool, classification):
@@ -10655,6 +10917,9 @@ def generate_commentary_script(
                             checkpoint=checkpoint,
                             gemini_file=None,
                             pool_session=pool_session,
+                            api_key=gemini_key,
+                            base_url=base_url,
+                            model=resolved_model,
                         )
                     if progress:
                         progress(f"Gemini key {failed_fingerprint} failed ({classification.state}); switching to next configured key...")

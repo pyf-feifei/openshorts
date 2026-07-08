@@ -2495,6 +2495,101 @@ class CommentaryAnalysisModeTests(unittest.TestCase):
             upload_calls[0].encode("ascii")
             self.assertFalse(os.path.exists(upload_calls[0]))
 
+
+    def test_chat2api_qwen_direct_upload_bypasses_gemini_files_upload(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(b"video")
+            path = f.name
+
+        try:
+            upload_calls = []
+            posts = []
+
+            class FakeResponse:
+                def __init__(self, status_code, payload):
+                    self.status_code = status_code
+                    self._payload = payload
+
+                def raise_for_status(self):
+                    if self.status_code >= 400:
+                        raise RuntimeError(f"HTTP {self.status_code}")
+
+                def json(self):
+                    return self._payload
+
+            class FakeHttpClient:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def post(self, url, headers=None, json=None):
+                    posts.append((url, headers, json))
+                    if url.endswith("/start"):
+                        return FakeResponse(200, {
+                            "reused": False,
+                            "upload": {
+                                "sessionId": "session-1",
+                                "accessKeyId": "ak",
+                                "accessKeySecret": "sk",
+                                "securityToken": "token",
+                                "bucket": "bucket",
+                                "region": "oss-cn-hangzhou",
+                                "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+                                "filePath": "path/video.mp4",
+                                "partSize": 5242880,
+                                "parallel": 2,
+                            },
+                        })
+                    return FakeResponse(200, {
+                        "file": {
+                            "uri": "qwen-ai-direct://direct-1",
+                            "name": "files/direct-1",
+                            "mimeType": "video/mp4",
+                        }
+                    })
+
+            client = pytypes.SimpleNamespace(
+                files=pytypes.SimpleNamespace(
+                    upload=lambda file: upload_calls.append(file),
+                    get=lambda name: None,
+                )
+            )
+
+            with patch.object(commentary.httpx, "Client", FakeHttpClient), \
+                 patch.object(commentary, "_chat2api_qwen_direct_upload_to_oss") as upload_to_oss:
+                part = commentary._upload_gemini_video_part(
+                    client,
+                    path,
+                    api_key="test-key",
+                    base_url="http://chat2api.local:8080/v1beta",
+                    model="qwen",
+                )
+
+            self.assertEqual([], upload_calls)
+            upload_to_oss.assert_called_once()
+            self.assertEqual("qwen-ai-direct://direct-1", part.file_data.file_uri)
+            self.assertEqual(2, len(posts))
+            self.assertTrue(posts[0][0].endswith("/v1beta/chat2api/qwen-ai/direct-upload/start"))
+            self.assertEqual("Bearer test-key", posts[0][1]["Authorization"])
+            self.assertEqual("qwen", posts[0][2]["model"])
+        finally:
+            os.remove(path)
+
+    def test_chat2api_qwen_direct_upload_normalizes_oss_v4_region(self):
+        self.assertEqual(
+            "ap-southeast-1",
+            commentary._chat2api_qwen_direct_oss_region("oss-ap-southeast-1"),
+        )
+        self.assertEqual(
+            "cn-hangzhou",
+            commentary._chat2api_qwen_direct_oss_region("cn-hangzhou"),
+        )
+
     def test_large_video_processing_timeout_scales_beyond_default_wait(self):
         timeout = commentary._gemini_file_processing_timeout(
             duration=3935,

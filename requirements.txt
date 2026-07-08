@@ -10,6 +10,7 @@ google-genai
 python-dotenv
 mediapipe==0.10.14
 boto3
+oss2
 
 fastapi
 uvicorn
